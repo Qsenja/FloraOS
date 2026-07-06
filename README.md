@@ -92,8 +92,10 @@ What's explicitly *not* done yet (all documented with reasoning in
   and the kernel only ships a generic firmware-framebuffer KMS driver, not
   i915/amdgpu/nouveau (add the one your hardware needs once this actually
   blocks someone — see ARCHITECTURE.md).
-- No persistent disk install — FloraOS currently only boots as a live,
-  RAM-resident image.
+- **Persistent disk install** now exists: run `florainstall` (a TUI, ncurses-
+  based) from a root shell on the live image to partition a real disk,
+  format it, and copy the running system onto it — BIOS/MBR only for now,
+  no UEFI (see ARCHITECTURE.md).
 
 ## Quick start
 
@@ -104,7 +106,10 @@ What's explicitly *not* done yet (all documented with reasoning in
 
 Logging in yourself (e.g. `qemu-system-x86_64 -cdrom floraos.iso`): login as
 `root` with an empty password (just press Enter) — see `/etc/issue` at the
-prompt.
+prompt. From there, run `florainstall` to install FloraOS onto a real disk
+(destructive — it partitions and formats whatever disk you point it at;
+`florainstall` will ask you to type the disk's name back to confirm before
+touching anything).
 
 Zero configuration needed for a default build. To change the hostname, add
 extra base packages, or rename the output ISO, edit `config/floraos.conf`
@@ -142,6 +147,7 @@ tools/floralogin/        # FloraOS's own PAM-free login (see ARCHITECTURE.md)
 tools/floraseat/         # FloraOS's own seatd-protocol-compatible seat daemon
 tools/florauser/         # FloraOS's own useradd/passwd/groupadd equivalent
 tools/fauelf/            # FloraOS's own absolute-DT_NEEDED fixup tool
+tools/florainstall/      # FloraOS's own TUI disk installer
 scripts/                # rootfs + ISO build scripts and per-package build recipes
 work/                   # build output (gitignored) -- sources, staged builds, rootfs, fau repo
 ```

@@ -56,6 +56,16 @@ recipe_build() {
 	# modprobe/udev can actually resolve and load -- building the modules
 	# here is necessary but not sufficient on its own.
 	#
+	# CONFIG_BTRFS_FS: needed for tools/florainstall's persistent disk
+	# install (see its own file header) -- the installed system boots with
+	# a real disk as root and no initramfs, so the root filesystem driver
+	# has to be built directly into vmlinuz (=y), not loadable as a module
+	# after the fact the way DRM_AMDGPU/DRM_NOUVEAU are above. Unlike
+	# ext4, btrfs is NOT on by default in x86_64 defconfig (confirmed
+	# against the same linux-6.18.y tree referenced below), so this has to
+	# be turned on explicitly rather than just relying on what defconfig
+	# already gives.
+	#
 	# Kernel config *symbol names* above are verified against the live
 	# linux-6.18.y tree (git.kernel.org), not guessed. What's still not
 	# independently verified in this project's own sandbox: an actual full
@@ -69,7 +79,8 @@ recipe_build() {
 		--enable DRM_KMS_HELPER \
 		--enable DRM_SIMPLEDRM \
 		--module DRM_AMDGPU \
-		--module DRM_NOUVEAU
+		--module DRM_NOUVEAU \
+		--enable BTRFS_FS
 	make -C "$src" ARCH=x86_64 olddefconfig >/dev/null
 
 	log "linux-lts: building (this is the longest single step, -j$jobs)"

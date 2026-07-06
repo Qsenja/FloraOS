@@ -152,6 +152,20 @@ main() {
 
 	FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap "${BUILD_ORDER[@]}"
 
+	log "=== staging the kernel image for florainstall (tools/florainstall) ==="
+	# build-iso.sh's own initramfs-packing step deliberately excludes
+	# everything under ./boot from the live image (GRUB reads
+	# boot/vmlinuz-floraos directly off the ISO's own boot/ directory --
+	# embedding the kernel a second time inside the very initramfs it boots
+	# from would be redundant). That means the *running* live system has no
+	# /boot/vmlinuz-floraos anywhere in it. florainstall needs the actual
+	# kernel image to copy onto a real disk it's installing to, so a copy is
+	# staged here at a path that isn't under ./boot and does survive into
+	# the live initramfs -- see tools/florainstall/florainstall.c's own
+	# header comment for the full reasoning.
+	mkdir -p "$ROOTFS_DIR/usr/lib/floraos"
+	cp "$ROOTFS_DIR/boot/vmlinuz-floraos" "$ROOTFS_DIR/usr/lib/floraos/vmlinuz-floraos"
+
 	log "=== shipping a pacman mirrorlist/repo-list for fau's own use ==="
 	# fau's alpm (Arch/Artix repo) fallback (tools/fau/fau) never shells out to the
 	# `pacman` binary -- it reads the mirrorlist and sync-db formats
@@ -232,6 +246,22 @@ main() {
 		-o "$ROOTFS_DIR/usr/bin/florauser" \
 		"$FLORA_ROOT/tools/florauser/florauser.c" -lcrypt
 	chmod 755 "$ROOTFS_DIR/usr/bin/florauser"
+
+	log "=== compiling florainstall (FloraOS's own TUI disk installer) ==="
+	# Not a fau package, same reasoning as floralogin/fauelf/floraseat/
+	# florauser above: FloraOS-authored source, not a fetched upstream
+	# tarball. Links against this rootfs's own just-installed ncurses/menu
+	# libraries (-I/-L pointed at $ROOTFS_DIR, same reasoning as florauser's
+	# libcrypt linking above) -- the widec (-w suffixed) library names
+	# directly, since that's ncurses.sh's actual build output; the plain
+	# (non-w) names are just compatibility symlinks for *other* software
+	# that assumes them, not something this project's own compiles need to
+	# rely on.
+	gcc -Wall -Wextra -O2 \
+		-I"$ROOTFS_DIR/usr/include" -L"$ROOTFS_DIR/usr/lib" \
+		-o "$ROOTFS_DIR/usr/bin/florainstall" \
+		"$FLORA_ROOT/tools/florainstall/florainstall.c" -lncursesw -lmenuw
+	chmod 755 "$ROOTFS_DIR/usr/bin/florainstall"
 
 	log "=== libgcc: base C++ runtime (libgcc_s.so.1), via fau's alpm fallback ==="
 	# kitty was deliberately left out here: its dependency closure (Python3 +

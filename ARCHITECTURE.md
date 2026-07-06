@@ -234,18 +234,19 @@ build path that would've required compiling 16-bit real-mode boot code.
   index/provides-index at all) still installs and runs correctly.
 - TODO: `fau backup` — a full-root snapshot (not just `system.json` + app
   configs, which `fau export`/`fau import` already cover) that's restorable
-  from the GRUB boot menu. Deliberately not attempted yet: FloraOS has no
-  persistent disk install (it boots and runs entirely from RAM, see
-  `scripts/build-iso.sh`'s own header comment), `scripts/build-iso.sh`
-  regenerates a single hardcoded GRUB `menuentry` from scratch on every build
-  (see its heredoc) with no multi-entry support, and there is no `/init` or
-  other early-userspace step that reads `/proc/cmdline` for a custom
-  parameter — the kernel execs `/sbin/init` (sysvinit) directly out of the
-  unpacked initramfs. A real implementation needs all three solved first
-  (somewhere persistent to store a snapshot, a second GRUB entry, and a
-  boot-time hook to actually apply it before sysvinit starts) — bigger than a
-  `tools/fau/fau` change, and not worth guessing at unverified boot-time
-  plumbing.
+  from the GRUB boot menu. Originally deliberately not attempted at all:
+  FloraOS had no persistent disk install (ran entirely from RAM, see
+  `scripts/build-iso.sh`'s own header comment), no multi-entry GRUB support,
+  and no early-userspace step reading `/proc/cmdline` for a custom parameter
+  before sysvinit starts. The first of those three is now partially
+  addressed -- **florainstall** (`tools/florainstall`, see below) gives
+  FloraOS a real persistent disk install to snapshot in the first place --
+  but the other two still aren't: florainstall's own `grub.cfg` is one
+  hardcoded menuentry per install (same single-entry convention
+  build-iso.sh's ISO build already uses), not a general multi-entry
+  generator, and there is still no boot-time hook that could apply a
+  snapshot before sysvinit starts. Bigger than a `tools/fau/fau` change on
+  its own, and not worth guessing at unverified boot-time plumbing.
 - DONE: `depends=` entries can now carry an optional version constraint --
   `name`, `name>=1.2`, or `name==1.2` (comma-separated, as always). If an
   already-installed dependency doesn't satisfy it, fau reinstalls it from
@@ -364,6 +365,60 @@ build path that would've required compiling 16-bit real-mode boot code.
     kitty is still left out of the default ISO build for the same
     ~773MB-dependency-closure reason as before, though it now has
     somewhere to actually draw once installed.
+- PARTIAL (was: no persistent disk install at all): **florainstall**
+  (`tools/florainstall`), a TUI installer run manually from the live shell
+  (not wired into `/etc/inittab` -- same "boot to a shell, run the
+  installer yourself" convention real live-installer images use, not just
+  this project's own choice). ncurses/menu-driven -- the ncurses build
+  already produces `libmenuw`/`libformw` alongside `libncursesw` (confirmed
+  from ncurses.sh's own post-install symlink step, which explicitly
+  symlinks `form`/`panel`/`menu` alongside `ncurses`/`tinfo`), so this adds
+  no new package. What it actually does: partitions the target disk (MBR,
+  one bootable Linux partition -- deliberately NOT GPT+"BIOS boot
+  partition", which needs a partition-type GUID this project has no
+  primary source available to verify, the same "don't guess" standard
+  applied to the DRM Kconfig symbols above), formats btrfs, then `rsync`s
+  the *live system's own already-running "/"* onto it -- there is no
+  separate installer payload to unpack, since the booted image already is
+  the fully-built OS (see scripts/build-iso.sh's own initramfs comment).
+  btrfs-progs (mkfs.btrfs) isn't a base package either, same reasoning as
+  grub just below -- fetched via fau's own alpm fallback too, except onto
+  the *live* system itself (`fau bootstrap btrfs-progs`, FAU_ROOT left at
+  its own default of "/"), since it has to run before the target disk has
+  anything mounted on it at all. GRUB itself is still not built from
+  source (this project already ruled that out for the ISO -- see the
+  Bootloader section below); florainstall fetches the `grub` package via
+  fau's own alpm fallback straight into the target disk's tree at install
+  time instead, then runs `grub-install`
+  inside a `chroot` into that target (its shared-library deps live under
+  the target's own /usr/lib, not the live system's -- plain
+  `--boot-directory` from outside a chroot isn't enough). Account setup
+  (root password, one optional extra user) execs the real `florauser`
+  inside that same chroot with the terminal inherited, so florauser's own
+  interactive, termios-masked password prompt runs directly against the
+  target's `/etc/shadow` -- florainstall never handles a plaintext
+  password itself. One build-pipeline change needed to make this possible
+  at all: build-iso.sh's own initramfs packing deliberately excludes
+  everything under `./boot` from the live image (confirmed by reading that
+  script directly), so the *running* live system had no
+  `/boot/vmlinuz-floraos` anywhere in it for an installer to copy from --
+  fixed with one extra staging line in build-rootfs.sh that copies the
+  kernel to `/usr/lib/floraos/vmlinuz-floraos` (a path that isn't under
+  `./boot`) purely for florainstall's own use. Still explicitly NOT done:
+  **no UEFI support** (no dosfstools/ESP handling -- BIOS/MBR only, same
+  scope-disclosure standard as this file's other gaps); **not
+  independently boot-tested end-to-end** (no spare disk/hardware or a QEMU
+  disk-boot harness available in this sandbox -- see florainstall.c's own
+  header comment for exactly what to re-check, in particular that this
+  kernel actually builds `CONFIG_BTRFS_FS=y` rather than `=m` -- now
+  explicitly enabled in scripts/recipes/linux-lts.sh, since btrfs isn't on
+  by default in x86_64 defconfig the way ext4 is, but not verified by an
+  actual kernel build here -- since the installed system has no initramfs
+  to load a module from before root is mounted); **`fau backup`'s own
+  GRUB-multi-entry-menu prerequisite
+  below is still unmet** -- florainstall writes one hardcoded menuentry per
+  install, the same single-entry convention build-iso.sh's own ISO build
+  already uses, not a general multi-entry `grub.cfg` generator.
 - DONE: `sysctl` (procps-ng), `hostname` (Debian's standalone package, not
   inetutils -- see docs/MANIFEST.md), and `loadkeys`/`dumpkeys` (kbd) are now
   built and shipped; their openrc sysinit services run successfully instead
