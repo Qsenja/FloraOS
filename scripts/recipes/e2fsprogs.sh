@@ -17,5 +17,12 @@ recipe_build() {
 			--disable-fuse2fs
 		make -j"$jobs"
 		fakeroot -- make DESTDIR="$files" install
+
+		# fsck.cramfs/mkfs.cramfs link against libz, which FloraOS doesn't
+		# ship -- broken inside the running OS ("cannot open shared object
+		# file: libz.so.1"). Pruned rather than adding libz for a legacy
+		# filesystem FloraOS doesn't use (ext4 only, via mkfs.ext4/fsck.ext4
+		# above, both of which don't need libz).
+		rm -f "$files/usr/sbin/fsck.cramfs" "$files/usr/sbin/mkfs.cramfs"
 	)
 }

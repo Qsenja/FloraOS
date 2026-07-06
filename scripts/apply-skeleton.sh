@@ -39,6 +39,18 @@ cat > "$ROOTFS/etc/motd" <<'EOF'
 
 EOF
 
+# agetty prints this before the login prompt -- the one place a first-time
+# user actually sees it before being asked for credentials. root's shadow
+# entry ships with an empty password field (traditional Unix for "no
+# password required"), intentional for this live, RAM-resident image: there
+# is no persistent install yet (see README.md) and no passwd(1) built yet to
+# change it either.
+cat > "$ROOTFS/etc/issue" <<'EOF'
+FloraOS \n \l
+login: root (just press Enter at the password prompt)
+
+EOF
+
 cat > "$ROOTFS/etc/fstab" <<'EOF'
 # <fs>          <mountpoint>    <type>          <opts>          <dump/pass>
 proc            /proc           proc            defaults        0 0
@@ -84,19 +96,22 @@ EOF
 chmod 600 "$ROOTFS/etc/shadow"
 
 # sysvinit + openrc glue: PID1 runs openrc's sysinit/boot/default stages,
-# then a shell directly on tty1 (physical console) and ttyS0 (serial --
+# then a real getty (agetty) on tty1 (physical console) and ttyS0 (serial --
 # useful for any VM/headless boot, and what QEMU's -serial capture sees;
 # without this the kernel's own dmesg lines still reach ttyS0, but nothing
-# userspace-side ever would).
+# userspace-side ever would), which execs floralogin.
 #
-# This intentionally bypasses agetty+login: agetty --autologin execs
-# login(1), and util-linux's login *requires* PAM to build at all (and this
-# build host has PAM, so it would build -- linked against libpam/libaudit/
-# libcap-ng, none of which FloraOS ships, so it'd fail to even load). Real
-# password-backed login needs either a from-scratch PAM or a PAM-free login
-# path -- neither exists yet, so util-linux's login/su/runuser/chfn/chsh are
-# disabled at build time (see scripts/recipes/util-linux.sh) and this spawns
-# bash directly instead. TODO in ARCHITECTURE.md.
+# util-linux's own login *requires* PAM to build at all (this build host has
+# PAM, so it would build -- linked against libpam/libaudit/libcap-ng, none
+# of which FloraOS ships, so it'd fail to even load), which is why
+# login/su/runuser/chfn/chsh are disabled at build time (see
+# scripts/recipes/util-linux.sh). floralogin (tools/floralogin) is FloraOS's
+# own from-scratch, PAM-free replacement -- crypt(3)-verified against
+# /etc/shadow via libxcrypt, since glibc dropped crypt() itself. agetty
+# itself doesn't need PAM and needed no changes; using it instead of
+# spawning bash directly is also what actually fixes job control ("cannot
+# set terminal process group") -- agetty opens/attaches the tty as session
+# leader before exec'ing floralogin, which bash spawned directly never did.
 cat > "$ROOTFS/etc/inittab" <<'EOF'
 id:3:initdefault:
 
@@ -108,8 +123,8 @@ l1:S1:wait:/usr/bin/openrc single
 l3:3:wait:/usr/bin/openrc default
 l6:6:wait:/usr/bin/openrc reboot
 
-1:2345:respawn:/usr/bin/bash --login
-s0:2345:respawn:/usr/bin/bash --login
+1:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin --noclear tty1 linux
+s0:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin ttyS0 115200 vt100
 EOF
 
 # Minimal openrc init.d script for dhcpcd -- upstream dhcpcd ships no OpenRC

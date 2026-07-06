@@ -24,5 +24,14 @@ recipe_build() {
 			libc_cv_slibdir=/usr/lib
 		make -j"$jobs"
 		fakeroot -- make DESTDIR="$files" install
+
+		# memusagestat (the graph-rendering half of `memusage`) links
+		# against libgd, which FloraOS doesn't ship -- it can't load inside
+		# the running OS ("cannot open shared object file: libgd.so.3").
+		# Pruned rather than adding libgd (and its own dependency closure)
+		# just for one debugging tool's optional graph output; `memusage`
+		# itself (the LD_PRELOAD-based profiler) doesn't need memusagestat
+		# and still works without it.
+		rm -f "$files/usr/bin/memusagestat"
 	)
 }

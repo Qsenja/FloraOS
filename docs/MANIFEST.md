@@ -16,12 +16,12 @@ in the base.
 | Package | Reason |
 |---|---|
 | linux-lts | kernel; LTS branch means fewer breaking changes to track on a from-scratch distro (see ARCHITECTURE.md) |
-| glibc | libc; standard pairing with GNU userland, which the target spec mandates |
+| glibc | libc; standard pairing with GNU userland, which the target spec mandates. `memusagestat` pruned post-install (needs libgd, which FloraOS doesn't ship) |
 | ncurses | terminal capabilities (terminfo) library — bash/readline links against libncursesw.so.6 dynamically; without shipping it ourselves bash can't even load |
 | bash | required default shell |
 | coreutils | required GNU userland (ls, cp, mv, cat, ...) |
 | util-linux | required GNU userland (mount, fdisk, losetup, ...) |
-| e2fsprogs | mkfs.ext4/fsck.ext4 — minimum filesystem tooling to build and check the rootfs |
+| e2fsprogs | mkfs.ext4/fsck.ext4 — minimum filesystem tooling to build and check the rootfs. `fsck.cramfs`/`mkfs.cramfs` pruned post-install (legacy filesystem FloraOS doesn't use, needs libz, which FloraOS doesn't ship) |
 | sysvinit | PID1 — OpenRC is a runlevel/dependency manager, not a PID1 implementation itself, and needs one of sysvinit/busybox-init as a companion. sysvinit is the traditional OpenRC pairing (pre-systemd Gentoo/Arch/etc.) and, unlike busybox, isn't a single monolithic binary, keeping with the GNU-userland-only rule |
 | openrc | runlevel/service manager, started by sysvinit; explicitly no systemd |
 | dhcpcd | DHCP client; base networking as specified in the target spec |
@@ -36,13 +36,23 @@ in the base.
 | zstd | fau's package format is .fau.tar.zst — fau can't extract or build any package without it — same reasoning as grep |
 | rsync | fau's system-package installs merge via `rsync -aK` (needed to merge into the merged-/usr symlinks without replacing them) — same reasoning as grep |
 | fau | FloraOS's own package manager (see tools/fau) — installs from the FloraOS package repo and owns the `system.json` reproducibility manifest natively. (Yes, fau needs the row above to function — a small bootstrapping irony worth naming rather than leaving implicit) |
+| procps-ng | `sysctl` — OpenRC's `etc/init.d/sysctl` service (`sysctl --system`) failed non-fatally without it; the rest of the suite (ps/top/kill/free/watch/...) comes along for free from the same source tree. Only upstream package here without a generated `configure` in its release artifact (raw gitlab source archive) — needs `autoreconf` on the build host |
+| hostname | `hostname`/`dnsdomainname` — OpenRC's `etc/init.d/hostname` service failed non-fatally without it. Deliberately the small standalone package (Debian's `hostname.c` + Makefile), not inetutils, which bundles telnet/ftp/rsh/talk/etc for the one command actually needed here |
+| kbd | `loadkeys`/`dumpkeys`/`setfont` — OpenRC's `etc/init.d/keymaps` service failed non-fatally without it. Built with vlock/zlib/bzip2/lzma/xkb off (PAM, and libs FloraOS doesn't ship); zstd left on since fau already needs libzstd. Known minor gap: loadkeys shells out to `gzip` to decompress `.gz` keymaps and falls back to its own internal decompression when that's missing (FloraOS doesn't ship gzip) — cosmetic stderr noise, keymap still loads |
+| libxcrypt | glibc itself dropped `crypt()`/`crypt.h` a few versions back — floralogin (see below) needs it to verify `/etc/shadow` hashes. Built with `--enable-obsolete-api=glibc` for the traditional crypt(3) ABI (SONAME `libcrypt.so.1`) |
+
+## FloraOS-authored (not a fetched upstream package, compiled directly)
+
+| Tool | Reason |
+|---|---|
+| floralogin (`tools/floralogin`) | FloraOS's own ~100-line, from-scratch, PAM-free login — util-linux's own login unconditionally requires PAM to build at all (no fallback exists upstream), and PAM isn't part of FloraOS. Verifies against `/etc/shadow` via crypt(3)/libxcrypt, execs the shell on success. `/etc/inittab` runs it via `agetty --skip-login --login-program`, same as `fau` itself, not tracked in fau's own package manifest since it's compiled straight from FloraOS's own source, not fetched from anywhere (see build-rootfs.sh) |
 
 ## Branding (not part of the minimal-base philosophy, added deliberately anyway)
 
 | Package | Reason |
 |---|---|
 | libgcc | fastfetch (C++) needs libgcc_s.so.1 for exception-handling at runtime. Not a declared dependency of fastfetch itself -- Arch/Artix assume it's always present as a base-system package -- so it has to be installed explicitly alongside it |
-| fastfetch | requested identity/branding touch — shown at login via /etc/profile, configured with a custom logo (assets/floraos-logo.txt) and a Packages line reading fau's own list instead of a package manager it doesn't know about. Fetched via fau's pacman-backed fallback, not built from source (small, and not core to the OS) |
+| fastfetch | requested identity/branding touch — shown at login via /etc/profile, configured with a custom logo (assets/floraos-logo.txt) and a Packages line reading fau's own list instead of a package manager it doesn't know about. Fetched via fau's pacman-backed fallback, not built from source (small, and not core to the OS). Resolving it pulls in Arch's full dependency closure (glibc, filesystem, tzdata, iana-etc, linux-api-headers) -- `fau` now skips anything it already built itself and strips `etc/`+`usr/include` from the rest (see ARCHITECTURE.md's fau section for why) |
 
 ## Build-host tooling (not part of FloraOS, not built from source)
 

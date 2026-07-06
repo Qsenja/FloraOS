@@ -1,10 +1,9 @@
 # linux-lts: kernel image + modules, and (as a side effect) the sanitized
 # UAPI headers glibc needs to build against. Headers are a build-time-only
-# artifact, not part of the shipped package.
+# artifact, not part of the shipped package. LINUX_HEADERS_DIR itself is
+# defined in lib/common.sh, not here -- see the comment there.
 PKG_DESCRIPTION="Linux LTS kernel"
 PKG_DEPENDS=""
-
-LINUX_HEADERS_DIR="$BUILD_DIR/linux-headers/include"
 
 recipe_build() {
 	local src=$1 files=$2

@@ -41,6 +41,16 @@ MANDATORY_ORDER=(
 	tar
 	zstd
 	rsync
+	# sysctl/hostname/loadkeys+dumpkeys: OpenRC's sysinit services for these
+	# fail non-fatally without them (see docs/MANIFEST.md for each package's
+	# one-line reason).
+	procps-ng
+	hostname
+	kbd
+	# libxcrypt: glibc itself dropped crypt() -- floralogin (compiled below,
+	# not a fau package itself) needs it to verify /etc/shadow hashes. See
+	# scripts/recipes/libxcrypt.sh and tools/floralogin.
+	libxcrypt
 )
 BUILD_ORDER=("${MANDATORY_ORDER[@]}" ${EXTRA_PACKAGES:-})
 
@@ -48,7 +58,9 @@ pinned_kernel=$(version_field linux-lts 1)
 [ "${KERNEL_VERSION:-$pinned_kernel}" = "$pinned_kernel" ] || die \
 	"floraos.conf requests kernel $KERNEL_VERSION but config/versions.conf pins linux-lts at $pinned_kernel -- update versions.conf (URL + sha256) to change kernel version"
 
-for cmd in curl tar zstd make gcc sha256sum rsync fakeroot; do require_cmd "$cmd"; done
+# autoreconf: procps-ng only publishes a raw source-archive tarball (no
+# generated configure), unlike every other package here -- see its recipe.
+for cmd in curl tar zstd make gcc sha256sum rsync fakeroot autoreconf; do require_cmd "$cmd"; done
 
 already_built() {
 	# already_built <name> -- true if the repo already has this exact
@@ -117,6 +129,22 @@ main() {
 	chmod 755 "$ROOTFS_DIR/usr/bin/fau"
 
 	FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" install "${BUILD_ORDER[@]}"
+
+	log "=== compiling floralogin (FloraOS's own PAM-free login) ==="
+	# Not a fau package: it's FloraOS-authored source, not a fetched upstream
+	# tarball (same reasoning as fau itself not going through the recipe
+	# pipeline). Compiled here, after the install above, specifically
+	# against *this rootfs's own* just-installed crypt.h/libcrypt.so.1 (via
+	# -I/-L pointed at $ROOTFS_DIR) rather than whatever libcrypt the build
+	# host happens to have -- linking against the host's copy would bake in
+	# a mismatched SONAME the shipped image doesn't actually provide (the
+	# same class of bug found and fixed in fau's pacman fallback, see
+	# ARCHITECTURE.md).
+	gcc -Wall -Wextra -O2 \
+		-I"$ROOTFS_DIR/usr/include" -L"$ROOTFS_DIR/usr/lib" \
+		-o "$ROOTFS_DIR/usr/bin/floralogin" \
+		"$FLORA_ROOT/tools/floralogin/floralogin.c" -lcrypt
+	chmod 755 "$ROOTFS_DIR/usr/bin/floralogin"
 
 	log "=== branding: fastfetch (via fau's pacman fallback, not the minimal base) ==="
 	# kitty was deliberately left out here: its dependency closure (Python3 +

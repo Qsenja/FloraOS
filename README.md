@@ -15,47 +15,56 @@ for how and why, and its real limits.
 
 ## Status: boots to a working shell, verified
 
-`./floraiso test` passes: the kernel starts, and the login shell is actually
-reached (checked from the QEMU serial console, not assumed). Concretely,
-right now:
+`./floraiso test` passes: the kernel starts, and a *real, credential-checked*
+login actually succeeds and reaches a shell (driven through QEMU's serial
+console — the test types the login itself, it doesn't just watch for a
+shell to appear on its own). Concretely, right now:
 
-- **23 packages** in the base image, every one built from pinned upstream
+- **27 packages** in the base image, every one built from pinned upstream
   source on this machine (see [docs/MANIFEST.md](docs/MANIFEST.md) for the
   full list and a one-line reason for each) — kernel, glibc, sysvinit,
   OpenRC, ncurses, bash, coreutils, util-linux, e2fsprogs, iproute2, dhcpcd,
   plus grep/sed/gawk/findutils/tar/zstd/rsync/attr/acl/libmd (all of it
   needed for `fau` itself to actually work *inside* the running OS, not just
   during the build — see ARCHITECTURE.md for how that gap got found), plus
-  fastfetch as a deliberate branding touch.
+  procps-ng/hostname/kbd so OpenRC's sysctl/hostname/keymaps services
+  actually run instead of failing non-fatally, plus libxcrypt for password
+  verification, plus fastfetch as a deliberate branding touch.
+- **Real password-backed login**, PAM-free. util-linux's own login requires
+  PAM to build at all (no fallback exists upstream), so FloraOS ships
+  **floralogin**, a small from-scratch login (`tools/floralogin`) that
+  verifies `/etc/shadow` via crypt(3)/libxcrypt, run through a real `agetty`
+  instead of spawning bash directly — which also fixed console job control
+  as a side effect (agetty properly attaches the controlling tty; bash
+  spawned directly never did). Root's password is intentionally empty
+  (traditional Unix "no password required" — see `/etc/issue` at the login
+  prompt) since this is a live, RAM-resident image with no `passwd` command
+  yet to set a real one.
 - **`fau` runs inside the booted OS**, not just as a build-time tool —
   verified directly with an unprivileged `unshare --user --map-root-user
   --mount chroot` into the built rootfs (no sudo needed): `fau list`
-  correctly prints all 23 installed packages, and ordinary commands like
+  correctly prints all 27 installed packages, and ordinary commands like
   `ls` work.
-- **ISO size: 132MB** (`floraos.iso`, hybrid BIOS+UEFI, boots and runs
-  entirely from RAM as a live image).
+- **ISO size: 154MB** (`floraos.iso`, hybrid BIOS+UEFI, boots and runs
+  entirely from RAM as a live image). Grew from an earlier 135MB after
+  fixing a real bug where FloraOS's own compiled glibc was being silently
+  overwritten by Arch's smaller, pre-stripped binary (see ARCHITECTURE.md) —
+  the extra size is FloraOS's own unstripped build correctly winning out,
+  not new bloat.
 - **fastfetch** runs at login with a custom ASCII logo and a package count
   read from `fau`'s own list.
 
 What's explicitly *not* done yet (all documented with reasoning in
 [ARCHITECTURE.md](ARCHITECTURE.md)'s TODO section):
 
-- **No password-backed login.** `util-linux`'s login/su/chfn-chsh require
-  PAM to build at all, and PAM isn't part of FloraOS. `/etc/inittab` spawns
-  bash directly instead of through agetty+login for now.
 - **No GUI/display server** (X11 or Wayland). `fau app-install` can fetch
   GUI apps' files via its pacman-backed fallback, but they have nowhere to
   render yet. `kitty` was deliberately left out of the default ISO for this
   reason — its dependency closure is ~773MB of Python3/Mesa/X11/Wayland with
   nothing to run it on; `fau app-install kitty` works today if you want the
   files anyway.
-- `sysctl`, `hostname`, and `loadkeys`/`keymaps` commands aren't shipped yet
-  (separate small packages — procps-ng, inetutils, kbd). Their openrc
-  sysinit services fail non-fatally at boot; everything else still starts.
 - No persistent disk install — FloraOS currently only boots as a live,
   RAM-resident image.
-- No job control in the console shell (cosmetic side effect of the
-  no-getty setup above).
 
 ## Quick start
 
@@ -63,6 +72,10 @@ What's explicitly *not* done yet (all documented with reasoning in
 ./floraiso build   # builds the rootfs (if needed) and the ISO
 ./floraiso test    # boots the ISO in QEMU and checks it actually reaches a shell
 ```
+
+Logging in yourself (e.g. `qemu-system-x86_64 -cdrom floraos.iso`): login as
+`root` with an empty password (just press Enter) — see `/etc/issue` at the
+prompt.
 
 Zero configuration needed for a default build. To change the hostname, add
 extra base packages, or rename the output ISO, edit `config/floraos.conf`
@@ -76,13 +89,14 @@ extra base packages, or rename the output ISO, edit `config/floraos.conf`
   system: everything downloads and builds under `work/` (gitignored).
 - `./floraiso build` — runs the rootfs build if needed, then packs the whole
   rootfs as an initramfs and calls `grub-mkrescue` to produce a hybrid
-  BIOS+UEFI bootable `floraos.iso` (name configurable, currently 132MB).
+  BIOS+UEFI bootable `floraos.iso` (name configurable, currently 154MB).
   FloraOS currently boots and runs entirely from RAM as a live image —
   persistent disk installs are a documented TODO, not yet scripted (see
   ARCHITECTURE.md).
-- `./floraiso test` — boots that ISO in QEMU with a serial console and checks
-  the boot log for two markers: the kernel actually starting, and the login
-  shell actually being reached. Exits non-zero (and prints why) if either is
+- `./floraiso test` — boots that ISO in QEMU with a serial console, drives an
+  actual login (root, empty password) through it, and checks the boot log
+  for two markers: the kernel actually starting, and the login shell
+  actually being reached. Exits non-zero (and prints why) if either is
   missing.
 
 ## Layout
@@ -95,6 +109,7 @@ docs/FILESYSTEM_LAYOUT.md
 ARCHITECTURE.md         # design decisions, why, and the current TODO list
 assets/                 # fastfetch logo + config shipped into the rootfs
 tools/fau/               # FloraOS's package manager
+tools/floralogin/        # FloraOS's own PAM-free login (see ARCHITECTURE.md)
 scripts/                # rootfs + ISO build scripts and per-package build recipes
 work/                   # build output (gitignored) -- sources, staged builds, rootfs, fau repo
 ```

@@ -51,6 +51,25 @@ So FloraOS ships **fau**, a small package manager written from scratch
   pacman-based host (as here), but *not* from inside an already-booted
   FloraOS system -- there, `fau install`/`app-install` only have whatever
   `FAU_REPO_DIR` you point them at.
+  - **Found and fixed a real integrity bug in this fallback**: the scratch
+    pacman db it resolves against has a deliberately *empty* local-package
+    state (so `pacman -Sp` resolves the requested package's FULL upstream
+    closure, not just what's missing) -- but for something like
+    `fau install fastfetch`, that closure also includes `glibc`,
+    `filesystem`, `tzdata`, etc: packages FloraOS already built from its own
+    pinned source. Left unguarded, those got merged into `FAU_ROOT` too,
+    which **silently replaced FloraOS's own compiled `libc.so.6` with
+    Arch's official binary** on every single rootfs build -- caught by
+    comparing sha256 before/after a real build, not by inspection. Fixed in
+    three parts, all in `tools/fau/fau`'s `install_one_pacman`: (1) skip any
+    resolved package fau's own `system.json` already has a version for
+    (i.e. skip `glibc`, since FloraOS built it), (2) strip `etc/` from
+    whatever *does* get merged -- Arch's `filesystem` package ships its own
+    `/etc/artix-release`, `/etc/shells`, `/etc/securetty`, etc, which have
+    no business anywhere near FloraOS's own skeleton (`apply-skeleton.sh` is
+    the sole source of truth for `/etc`), (3) strip `usr/include` too --
+    `linux-api-headers` is a pure build-time artifact that added 15MB of
+    unused kernel headers to the shipped image for zero runtime benefit.
 - **Reproducibility is native, not bolted on**: every install/remove updates
   `/var/lib/fau/system.json`, an exact manifest of installed package names
   and pinned versions. `fau export` dumps it (e.g. for backup or copying to
@@ -99,15 +118,53 @@ build path that would've required compiling 16-bit real-mode boot code.
 
 - TODO: persistent syslog daemon — no concrete logging requirement yet: skip
   for now, add when one shows up.
-- TODO: fau dependency resolution is single-level (no version constraint
-  solving) until the package set grows enough to need it.
-- TODO: real password-backed login. util-linux's login/su/runuser/chfn/chsh
-  require PAM to build at all, and PAM isn't part of FloraOS -- shipping
-  them linked against the build host's PAM would produce binaries FloraOS
-  itself can't load. Disabled at build time; `/etc/inittab` spawns bash
-  directly on tty1/ttyS0 instead of agetty+login. Needs either a
-  from-scratch PAM (+ /etc/pam.d config) or a PAM-free login path before
-  real authentication makes sense.
+- DONE: `depends=` entries can now carry an optional version constraint --
+  `name`, `name>=1.2`, or `name==1.2` (comma-separated, as always). If an
+  already-installed dependency doesn't satisfy it, fau reinstalls it from
+  the repo and re-checks; if the repo's own version still doesn't satisfy
+  it, fau dies with a clear message instead of silently proceeding with an
+  unsatisfied dependency. Deliberately just these two operators, compared
+  via `sort -V` (coreutils, already a base package) rather than a
+  hand-rolled semver parser -- full range solving is still explicitly out
+  of scope, this just closes the gap where an already-installed dependency
+  could be too old for what actually needs it. No package in the current
+  manifest uses a constraint yet; verified with synthetic test packages.
+  Fixing this also surfaced a real, unrelated bug in the merge step itself:
+  `install_one`'s `rsync -aK` (no `-c`/`--checksum`) uses rsync's default
+  quick-check (same size + same mtime => skip), which silently kept OLD
+  file content on an upgrade whenever two versions of a file matched in
+  both -- reproduced directly (bumped a test package 1.0 -> 2.0 with
+  same-size files; the "upgraded" file kept serving 1.0 content while
+  system.json claimed 2.0). Fixed by adding `--checksum` to both of fau's
+  `rsync -aK` merge calls.
+- DONE: real password-backed login. util-linux's own login/su/runuser/
+  chfn/chsh still require PAM to build at all (confirmed straight from
+  configure.ac: `UL_REQUIRES_HAVE([login], [security_pam_appl_h], ...)`,
+  with no non-PAM fallback path -- upstream fully committed to PAM years
+  ago), and PAM still isn't part of FloraOS. Rather than adding PAM itself,
+  FloraOS now ships **floralogin** (`tools/floralogin/floralogin.c`), a
+  ~100-line from-scratch login written the same way `fau` was: small,
+  auditable, purpose-built, no PAM. It verifies the typed password against
+  `/etc/shadow` via `crypt(3)` -- which glibc itself dropped a few versions
+  back, so **libxcrypt** (`scripts/recipes/libxcrypt.sh`, built with
+  `--enable-obsolete-api=glibc` for the traditional ABI) is now a base
+  package too, purely to give floralogin something to link against.
+  `/etc/inittab` now runs `agetty --skip-login --login-program
+  /usr/bin/floralogin` on tty1/ttyS0 (agetty itself never needed PAM) instead
+  of spawning bash directly -- `--skip-login` matters: agetty's *default*
+  behavior is to prompt for a username itself and exec the login program
+  with it as an argument, but floralogin does its own full username+password
+  prompt loop, so agetty needs to hand off before prompting at all, not
+  after. Root's `/etc/shadow` entry keeps an empty password field
+  (traditional Unix for "no password required"), which floralogin honors
+  intentionally -- documented in `/etc/issue` (agetty prints it before the
+  prompt) since this is a live, RAM-resident image with no `passwd` command
+  built yet to set a real one. Verified end-to-end against the actual ISO,
+  not just floralogin in isolation: drove a real login (and a rejected
+  wrong-password attempt) through QEMU's serial console via a socket +
+  named pipe (see `scripts/test-iso.sh`, which now does this on every
+  `./floraiso test` run instead of just watching for the shell to appear on
+  its own).
 - TODO: no GUI/display server (X11 or Wayland) -- `fau app-install`'s
   pacman-backed fallback (see tools/fau/fau) can fetch GUI apps' files, but
   they have nowhere to draw pixels without this. Separate, larger project.
@@ -115,19 +172,40 @@ build path that would've required compiling 16-bit real-mode boot code.
   its dependency closure (Python3 + Mesa + X11/Wayland) is ~773MB with
   nothing to run it on yet -- `fau app-install kitty` works today if you
   want the files anyway, it's just not baked in by default.
-- TODO: `sysctl`, `hostname`, and `loadkeys`/`keymaps` commands aren't part
-  of any built package yet (sysctl is procps-ng; hostname is its own small
-  package or part of inetutils; keymaps needs kbd). Their openrc sysinit
-  services fail non-fatally (logged, boot continues) -- add these packages
-  when their functionality is actually needed.
-- TODO: `memusagestat` (glibc's memory-usage grapher) and `fsck.cramfs`/
-  `mkfs.cramfs` (e2fsprogs' legacy cramfs support) auto-link against
-  libgd and libz respectively, both absent from the base manifest. Left
-  broken rather than adding two more packages for tools that aren't part
-  of FloraOS's actual filesystem (ext4) or debugging workflow -- revisit if
-  either is ever actually needed.
-- TODO: bash lacks job control on the console (`cannot set terminal process
-  group`) since /etc/inittab spawns it directly instead of through a real
-  getty that opens/attaches the tty properly. Cosmetic for now; would need
-  revisiting alongside the login/PAM TODO above if job control matters
-  before then.
+- DONE: `sysctl` (procps-ng), `hostname` (Debian's standalone package, not
+  inetutils -- see docs/MANIFEST.md), and `loadkeys`/`dumpkeys` (kbd) are now
+  built and shipped; their openrc sysinit services run successfully instead
+  of failing non-fatally. procps-ng required patching out its po/po-man
+  gettext subdirs before autoreconf -- this build host's gettext is
+  gettext-tiny (reports itself as version "1.0"), which lacks the
+  po-directories hook real GNU gettext's autopoint provides, and NLS/
+  translations aren't wanted here anyway. kbd is built with
+  vlock/zlib/bzip2/lzma/xkb explicitly off (PAM and libs FloraOS doesn't
+  ship; same auto-detected-optional-lib class of issue as iproute2's
+  libtirpc).
+- TODO: `loadkeys`/kbd shells out to `gzip` to decompress `.gz`-compressed
+  keymaps/fonts and falls back to its own internal decompression when that's
+  missing -- FloraOS doesn't ship gzip. Cosmetic only (stderr noise, the
+  keymap still loads -- confirmed via `./floraiso test`'s boot log), not
+  worth a fourth package for right now.
+- DONE: `memusagestat` (glibc's memory-usage grapher) and `fsck.cramfs`/
+  `mkfs.cramfs` (e2fsprogs' legacy cramfs support) auto-linked against libgd
+  and libz respectively, neither of which FloraOS ships -- both were broken
+  ("cannot open shared object file") inside the running OS. Pruned at build
+  time (see scripts/recipes/glibc.sh and e2fsprogs.sh) rather than adding
+  two more packages for tools that aren't part of FloraOS's actual
+  filesystem (ext4) or debugging workflow; `memusage` itself (the
+  LD_PRELOAD-based profiler, as opposed to memusagestat's graph output)
+  still works fine without memusagestat.
+- DONE: `fau`'s `install_one`/`app_install_one` now detect a circular
+  `depends=` (A -> B -> A) and die with a clear error instead of recursing
+  until bash gives up. No package in the current manifest actually has a
+  cycle -- this is a robustness fix for a typo'd `depends=` field, not a
+  response to an observed failure.
+- DONE: bash's job control (`cannot set terminal process group`) was a side
+  effect of `/etc/inittab` spawning it directly instead of through a real
+  getty. Fixed as part of the floralogin work above: agetty now opens and
+  attaches tty1/ttyS0 properly (session leader + controlling terminal)
+  before exec'ing floralogin, which execs the login shell -- confirmed
+  gone from a real boot's transcript, not inferred from the inittab change
+  alone.

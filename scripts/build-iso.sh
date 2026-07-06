@@ -51,5 +51,9 @@ log "running grub-mkrescue"
 rm -f "$ISO_OUT"
 grub-mkrescue -o "$ISO_OUT" "$ISO_STAGE_DIR" >/dev/null 2>&1 || grub-mkrescue -o "$ISO_OUT" "$ISO_STAGE_DIR"
 
-sha256sum "$ISO_OUT" > "$ISO_OUT.sha256"
+# Record a relative filename, not the absolute build path -- otherwise
+# `sha256sum -c floraos.iso.sha256` only works from this exact machine's
+# build directory and fails with "No such file or directory" anywhere else
+# (a different clone, or the ISO downloaded standalone next to its checksum).
+(cd "$FLORA_ROOT" && sha256sum "$(basename "$ISO_OUT")") > "$ISO_OUT.sha256"
 log "ISO ready: $ISO_OUT ($(du -h "$ISO_OUT" | cut -f1))"

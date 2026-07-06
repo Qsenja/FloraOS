@@ -63,6 +63,39 @@ pkginfo_field() {
 	grep "^$2=" "$1" 2>/dev/null | head -n1 | cut -d'=' -f2- || true
 }
 
+# --- dependency version constraints -----------------------------------------
+# depends= entries may optionally carry a constraint: "name", "name>=1.2", or
+# "name==1.2" (comma-separated, same as always). Deliberately just these two
+# operators, both string-compared via `sort -V` (coreutils, already a base
+# package) rather than a hand-rolled semver parser -- full range solving was
+# already scoped out in ARCHITECTURE.md as more than this tool needs.
+
+dep_parse() {
+	# dep_parse <dep-token> -> prints "name<TAB>op<TAB>version" (op/version
+	# empty if the token is a bare name)
+	local dep=$1
+	case "$dep" in
+		*'>='*) printf '%s\t%s\t%s\n' "${dep%%>=*}" '>=' "${dep#*>=}" ;;
+		*'=='*) printf '%s\t%s\t%s\n' "${dep%%==*}" '==' "${dep#*==}" ;;
+		*) printf '%s\t\t\n' "$dep" ;;
+	esac
+}
+
+version_satisfies() {
+	# version_satisfies <installed> <op> <required> -- op may be empty (any
+	# installed version satisfies an unconstrained dependency)
+	local installed=$1 op=$2 required=$3
+	case "$op" in
+		'') return 0 ;;
+		'==') [ "$installed" = "$required" ] ;;
+		'>=')
+			[ "$installed" = "$required" ] && return 0
+			[ "$(printf '%s\n%s\n' "$installed" "$required" | sort -V | tail -n1)" = "$installed" ]
+			;;
+		*) die "unknown version constraint operator: $op" ;;
+	esac
+}
+
 state_init() {
 	mkdir -p "$FAU_STATE_DIR" "$FAU_CACHE_DIR"
 	[ -f "$FAU_SYSTEM_JSON" ] || printf '{"packages":{}}\n' > "$FAU_SYSTEM_JSON"
@@ -200,6 +233,31 @@ repo_add() {
 	local archive=$1
 	[ -f "$archive" ] || die "no such archive: $archive"
 	mkdir -p "$FAU_REPO_DIR"
+
+	# A repo directory must hold at most one archive per package name --
+	# without this, repo_index (which just globs every *.fau.tar.zst) ends up
+	# with duplicate keys for the same name after a version bump (the old
+	# archive never gets removed on its own), and which one repo_lookup_file
+	# resolves to then depends on filesystem glob order, not on which
+	# version was actually just added.
+	local work; work=$(mktemp -d)
+	tar -I zstd -xf "$archive" -C "$work" pkginfo
+	local incoming_name; incoming_name=$(pkginfo_field "$work/pkginfo" name)
+	rm -rf "$work"
+	if [ -n "$incoming_name" ]; then
+		local existing existing_name w2
+		shopt -s nullglob
+		for existing in "$FAU_REPO_DIR"/*.fau.tar.zst; do
+			[ "$(basename "$existing")" = "$(basename "$archive")" ] && continue
+			w2=$(mktemp -d)
+			tar -I zstd -xf "$existing" -C "$w2" pkginfo 2>/dev/null
+			existing_name=$(pkginfo_field "$w2/pkginfo" name)
+			rm -rf "$w2"
+			[ "$existing_name" = "$incoming_name" ] && rm -f "$existing"
+		done
+		shopt -u nullglob
+	fi
+
 	cp "$archive" "$FAU_REPO_DIR/"
 	repo_index
 }
@@ -207,14 +265,34 @@ repo_add() {
 # --- install/remove ----------------------------------------------------------
 
 install_one() {
-	local name=$1
+	# install_one <name> [want-version] [ancestor-chain] -- want-version,
+	# when given (used by cmd_apply), is enforced against the fau repo's own
+	# recorded version: reproducibility from a system.json manifest is only
+	# real if a version mismatch is a hard error, not a silent "install
+	# whatever's there now". ancestor-chain is the colon-delimited list of
+	# packages currently being installed up the call stack -- passed as a
+	# plain argument (not a global) so each recursive branch gets its own
+	# copy with nothing to clean up on return, and detects a circular
+	# depends= (A -> B -> A) as a clear error instead of recursing until
+	# bash gives up.
+	local name=$1 want_version=${2:-} chain=${3:-}
+	case ":$chain:" in
+		*":$name:"*) die "circular dependency: $chain:$name" ;;
+	esac
 	local file; file=$(repo_lookup_file "$name")
 	if [ -z "$file" ]; then
 		if command -v pacman >/dev/null 2>&1; then
+			[ -z "$want_version" ] || log "warning: $name isn't in the fau repo -- falling back to pacman, exact version $want_version can't be guaranteed"
 			install_one_pacman "$name"
 			return
 		fi
 		die "package not found in repo: $name (and pacman isn't available to fall back to)"
+	fi
+
+	if [ -n "$want_version" ]; then
+		local repo_version; repo_version=$(json_get_version "$(repo_json)" "$name")
+		[ "$repo_version" = "$want_version" ] || \
+			die "manifest wants $name $want_version, but the repo only has $repo_version -- rebuild/repo-add the exact pinned version first"
 	fi
 
 	local existing; existing=$(system_get_version "$name")
@@ -229,7 +307,18 @@ install_one() {
 		for dep in $(printf '%s' "$depends" | tr ',' ' '); do
 			dep=$(echo "$dep" | xargs)
 			[ -z "$dep" ] && continue
-			[ -n "$(system_get_version "$dep")" ] || install_one "$dep"
+			local dep_name dep_op dep_ver
+			IFS=$'\t' read -r dep_name dep_op dep_ver <<< "$(dep_parse "$dep")"
+			local dep_installed; dep_installed=$(system_get_version "$dep_name")
+			if [ -z "$dep_installed" ]; then
+				install_one "$dep_name" "" "$chain:$name"
+			elif ! version_satisfies "$dep_installed" "$dep_op" "$dep_ver"; then
+				log "note: $dep_name $dep_installed is installed but $name needs $dep_name $dep_op$dep_ver -- reinstalling from the repo"
+				install_one "$dep_name" "" "$chain:$name"
+				dep_installed=$(system_get_version "$dep_name")
+				version_satisfies "$dep_installed" "$dep_op" "$dep_ver" || \
+					die "$name needs $dep_name $dep_op$dep_ver, but the repo only has $dep_installed"
+			fi
 		done
 	fi
 
@@ -243,7 +332,14 @@ install_one() {
 	# instead, which is what installing multiple packages into one merged
 	# root requires. Plain cp -a refuses the merge outright ("cannot
 	# overwrite non-directory X with directory Y").
-	rsync -aK "$work/files/" "$FAU_ROOT/"
+	# --checksum: without it, rsync's default quick-check (same size + same
+	# mtime => skip) silently keeps the OLD file content on an upgrade
+	# whenever two versions of a file happen to match in both -- reproduced
+	# directly (a package bumped from 1.0 to 2.0 with same-size files kept
+	# serving the 1.0 binary after "upgrading" to 2.0, with system.json
+	# claiming 2.0 the whole time). Package archives aren't gigabytes, so
+	# hashing every file on install is the correct trade, not a slow one.
+	rsync -aK --checksum "$work/files/" "$FAU_ROOT/"
 	rm -rf "$work"
 
 	system_set "$name" "$version"
@@ -287,10 +383,16 @@ cmd_apply() {
 	local manifest=$1
 	[ -f "$manifest" ] || die "no such file: $manifest"
 	state_init
-	local names
-	names=$(grep -oE '"[^"]+"[[:space:]]*:[[:space:]]*\{[[:space:]]*"version"' "$manifest" \
-		| sed -E 's/^"([^"]+)".*/\1/')
-	for n in $names; do install_one "$n"; done
+	# json_list_names/json_get_version already parse this exact
+	# {"packages":{"name":{"version":"x"}}} shape (system.json's own format)
+	# -- reusing them instead of a second hand-rolled regex is also what
+	# surfaced this function used to read names only and silently drop the
+	# version, so "apply" never actually verified it installed what the
+	# manifest recorded.
+	local n
+	for n in $(json_list_names "$manifest"); do
+		install_one "$n" "$(json_get_version "$manifest" "$n")"
+	done
 }
 
 # --- app-install/app-remove/app-list -----------------------------------------
@@ -323,7 +425,12 @@ app_wrapper_write() {
 }
 
 app_install_one() {
-	local name=$1
+	# app_install_one <name> [ancestor-chain] -- see install_one's own
+	# comment for why the chain is a plain argument, not a global.
+	local name=$1 chain=${2:-}
+	case ":$chain:" in
+		*":$name:"*) die "circular dependency: $chain:$name" ;;
+	esac
 	local file; file=$(repo_lookup_file "$name")
 	if [ -z "$file" ]; then
 		if command -v pacman >/dev/null 2>&1; then
@@ -341,7 +448,18 @@ app_install_one() {
 		for dep in $(printf '%s' "$depends" | tr ',' ' '); do
 			dep=$(echo "$dep" | xargs)
 			[ -z "$dep" ] && continue
-			[ -n "$(json_get_version "$FAU_APPS_JSON" "$dep")" ] || app_install_one "$dep"
+			local dep_name dep_op dep_ver
+			IFS=$'\t' read -r dep_name dep_op dep_ver <<< "$(dep_parse "$dep")"
+			local dep_installed; dep_installed=$(json_get_version "$FAU_APPS_JSON" "$dep_name")
+			if [ -z "$dep_installed" ]; then
+				app_install_one "$dep_name" "$chain:$name"
+			elif ! version_satisfies "$dep_installed" "$dep_op" "$dep_ver"; then
+				log "note: $dep_name $dep_installed is installed but $name needs $dep_name $dep_op$dep_ver -- reinstalling from the repo"
+				app_install_one "$dep_name" "$chain:$name"
+				dep_installed=$(json_get_version "$FAU_APPS_JSON" "$dep_name")
+				version_satisfies "$dep_installed" "$dep_op" "$dep_ver" || \
+					die "$name needs $dep_name $dep_op$dep_ver, but the repo only has $dep_installed"
+			fi
 		done
 	fi
 
@@ -453,6 +571,19 @@ install_one_pacman() {
 
 	while read -r pkgname repo; do
 		[ -n "$pkgname" ] || continue
+		# pacman_scratch_db's local-package state is deliberately empty (so
+		# `pacman -Sp` resolves the FULL upstream closure, not just what's
+		# missing) -- but for a package like fastfetch/libgcc that closure
+		# also includes glibc, filesystem, tzdata, etc: things FloraOS
+		# already built from its own pinned source. Without this guard
+		# those get rsync-merged over FAU_ROOT too, silently replacing
+		# FloraOS's own compiled binaries with Arch's official ones --
+		# found by comparing libc.so.6's sha256 before/after a real build:
+		# the shipped one turned out to be Arch's, not FloraOS's own.
+		if [ "$pkgname" != "$name" ] && [ -n "$(system_get_version "$pkgname")" ]; then
+			log "skipping $pkgname -- already provided by FloraOS's own build"
+			continue
+		fi
 		local pkgdir; pkgdir=$(pacman_pkgdir_for "$db_dir" "$repo" "$pkgname")
 		[ -n "$pkgdir" ] || die "couldn't find $pkgname in repo $repo's sync db"
 		local filename sha256
@@ -479,8 +610,24 @@ install_one_pacman() {
 		# what we just extracted. u+rX ensures we always can.
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
+		# FloraOS's own skeleton (apply-skeleton.sh) is the sole source of
+		# truth for /etc -- a pacman-resolved dependency like Arch's
+		# "filesystem" package ships its own /etc/artix-release,
+		# /etc/shells, /etc/securetty, /etc/host.conf, etc, which would
+		# otherwise land straight in FAU_ROOT/etc right alongside (and
+		# contradicting) FloraOS's own identity files. System packages
+		# fetched this way may only ever contribute to /usr.
+		rm -rf "$extract_dir/etc"
+		# /usr/include is dev-time-only (headers, never dlopen'd/exec'd at
+		# runtime) -- resolving fastfetch/libgcc's full closure also pulls
+		# in "linux-api-headers" purely because it's one of glibc's own
+		# build-time dependencies on Arch, and it alone added 15MB of unused
+		# kernel headers to the shipped image (measured on a real build).
+		rm -rf "$extract_dir/usr/include"
 		[ "$pkgname" = "$name" ] && version=$(pacman_desc_field "$db_dir" "$repo" "$pkgdir" VERSION)
-		rsync -aK "$extract_dir/" "$FAU_ROOT/"
+		# --checksum: see install_one's own merge for why plain -aK isn't
+		# enough on an upgrade.
+		rsync -aK --checksum "$extract_dir/" "$FAU_ROOT/"
 		rm -rf "$extract_dir"
 	done <<< "$resolved"
 	rm -rf "$fetch_dir"
@@ -547,9 +694,22 @@ app_install_one_pacman() {
 		app_wrapper_write "$name" "$app_dir" "$relbin"
 	done
 
+	# Without this, app-remove can't find which wrapper scripts belong to
+	# this app (it reads bin= from .pkginfo, same as the repo-based
+	# app_install_one does) -- confirmed by a real app-install/app-remove
+	# round-trip: the wrapper in FAU_APPS_BIN_DIR survived "removal" and
+	# failed with "No such file or directory" on next use.
+	{
+		echo "name=$name"
+		echo "version=${version:-unknown (via pacman)}"
+		printf 'bin='
+		printf '%s' "$target_files" | tr '\n' ','
+		echo
+	} > "$app_dir/.pkginfo"
+
 	json_set "$FAU_APPS_JSON" "$name" "${version:-unknown (via pacman)}"
 	log "installed app $name (via pacman) into $app_dir"
-	[ -n "$target_files" ] || log "note: couldn't find any usr/bin or bin entrypoint owned by $pkgname to wrap"
+	[ -n "$target_files" ] || log "note: couldn't find any usr/bin or bin entrypoint owned by $name to wrap"
 	case ":$PATH:" in
 		*":$FAU_APPS_BIN_DIR:"*) ;;
 		*) log "note: $FAU_APPS_BIN_DIR is not on your PATH yet — add it to use $name's commands directly" ;;

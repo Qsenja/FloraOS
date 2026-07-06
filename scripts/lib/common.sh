@@ -9,6 +9,14 @@ REPO_DIR="$WORK_DIR/repo"
 ROOTFS_DIR="$WORK_DIR/rootfs"
 VERSIONS_CONF="$FLORA_ROOT/config/versions.conf"
 FAU_BIN="$FLORA_ROOT/tools/fau/fau"
+# glibc needs this at build time (see scripts/recipes/glibc.sh). Defined here
+# rather than as a side effect of sourcing linux-lts.sh: build_package()
+# skips sourcing a package's recipe entirely once it's already cached, so if
+# only glibc needs a rebuild (e.g. a version bump) while linux-lts stays
+# cached, glibc's recipe would otherwise reference an unset variable ("set
+# -u" makes that a hard crash) even though the headers are still on disk
+# from the last time linux-lts actually built.
+LINUX_HEADERS_DIR="$BUILD_DIR/linux-headers/include"
 
 log()  { echo "[floraos] $*" >&2; }
 die()  { echo "[floraos] error: $*" >&2; exit 1; }
