@@ -17,6 +17,7 @@ FAU_REPO_DIR="${FAU_REPO_DIR:-/etc/fau/repo}"
 FAU_STATE_DIR="${FAU_ROOT%/}/var/lib/fau"
 FAU_CACHE_DIR="${FAU_ROOT%/}/var/cache/fau/pkg"
 FAU_SYSTEM_JSON="${FAU_STATE_DIR}/system.json"
+FAU_FILES_DIR="${FAU_STATE_DIR}/files"
 
 FAU_APPS_DIR="${FAU_APPS_DIR:-$HOME/apps}"
 FAU_APPS_BIN_DIR="${FAU_APPS_DIR}/.bin"
@@ -31,10 +32,13 @@ usage: fau <command> [args]
 
 commands:
   install <pkg> [pkg ...]   install system package(s) into FAU_ROOT, with dependencies
-  remove <pkg> [pkg ...]    remove system package(s) (files only, no dependency check)
+  remove <pkg> [pkg ...]    remove system package(s): files and system.json entry
+                              (no dependency check; files still owned by another
+                              installed package are left in place)
   list                      list installed system packages and versions
   export [file]             write system.json to file (default: stdout)
-  apply <file>              install the exact system package set recorded in file
+  apply [file]              install the exact system package set recorded in file
+                              (default: system.json in the current directory)
 
   app-install <pkg> [...]  install user app(s) into FAU_APPS_DIR/<name>/, isolated
   app-remove <pkg> [...]    remove user app(s) and their PATH wrappers
@@ -97,7 +101,7 @@ version_satisfies() {
 }
 
 state_init() {
-	mkdir -p "$FAU_STATE_DIR" "$FAU_CACHE_DIR"
+	mkdir -p "$FAU_STATE_DIR" "$FAU_CACHE_DIR" "$FAU_FILES_DIR"
 	[ -f "$FAU_SYSTEM_JSON" ] || printf '{"packages":{}}\n' > "$FAU_SYSTEM_JSON"
 }
 
@@ -264,6 +268,16 @@ repo_add() {
 
 # --- install/remove ----------------------------------------------------------
 
+record_files() {
+	# record_files <name> <source-dir> -- <source-dir> is a package's
+	# fully-assembled payload right before it gets rsync'd into FAU_ROOT;
+	# recording its relative paths here (relative to FAU_ROOT once merged)
+	# is what lets `remove` actually delete a package's own files instead
+	# of only untracking it from system.json.
+	local name=$1 src=$2
+	(cd "$src" && find . \( -type f -o -type l \) -printf '%P\n') > "$FAU_FILES_DIR/$name"
+}
+
 install_one() {
 	# install_one <name> [want-version] [ancestor-chain] -- want-version,
 	# when given (used by cmd_apply), is enforced against the fau repo's own
@@ -340,6 +354,7 @@ install_one() {
 	# serving the 1.0 binary after "upgrading" to 2.0, with system.json
 	# claiming 2.0 the whole time). Package archives aren't gigabytes, so
 	# hashing every file on install is the correct trade, not a slow one.
+	record_files "$name" "$work/files"
 	rsync -aK --checksum "$work/files/" "$FAU_ROOT/"
 	rm -rf "$work"
 
@@ -362,13 +377,56 @@ cmd_install() {
 	done
 }
 
+remove_one_file() {
+	# remove_one_file <name> <relpath> -- deletes relpath from FAU_ROOT
+	# unless some OTHER still-installed package's own file list also
+	# claims it (rsync merges every package into one shared FAU_ROOT, so
+	# paths legitimately do overlap between packages -- e.g. two things
+	# both shipping the same merged-/usr dir). Prints 1 on its stdout if
+	# it actually deleted the file, 0 if it skipped a shared one, so the
+	# caller can tally without a namerefs/global counter.
+	local name=$1 relpath=$2 other shared=0
+	for other in "$FAU_FILES_DIR"/*; do
+		[ -f "$other" ] || continue
+		[ "$(basename "$other")" = "$name" ] && continue
+		grep -qxF "$relpath" "$other" 2>/dev/null && { shared=1; break; }
+	done
+	if [ "$shared" -eq 1 ]; then
+		echo 0
+	else
+		rm -f "${FAU_ROOT%/}/$relpath"
+		echo 1
+	fi
+}
+
 cmd_remove() {
 	[ $# -ge 1 ] || die "remove requires at least one package name"
 	state_init
 	for name in "$@"; do
 		[ -n "$(system_get_version "$name")" ] || { log "$name is not installed, skipping"; continue; }
-		system_unset "$name"
-		log "removed $name from system.json (files left in place — fau does not track individual files yet)"
+		local file_list="$FAU_FILES_DIR/$name"
+		if [ -f "$file_list" ]; then
+			local relpath removed=0 kept=0 did
+			while IFS= read -r relpath; do
+				[ -z "$relpath" ] && continue
+				did=$(remove_one_file "$name" "$relpath")
+				if [ "$did" -eq 1 ]; then removed=$((removed + 1)); else kept=$((kept + 1)); fi
+			done < "$file_list"
+			rm -f "$file_list"
+			system_unset "$name"
+			if [ "$kept" -gt 0 ]; then
+				log "removed $name ($removed files deleted, $kept left in place -- still owned by another installed package)"
+			else
+				log "removed $name ($removed files deleted)"
+			fi
+		else
+			# Installed before fau tracked per-package file lists, or a
+			# transitive alpm dependency that was never independently
+			# tracked in system.json to begin with (see install_one_alpm) --
+			# nothing to delete from, so just untrack it like before.
+			system_unset "$name"
+			log "removed $name from system.json (no file manifest recorded for it -- files left in place)"
+		fi
 	done
 }
 
@@ -385,8 +443,8 @@ cmd_export() {
 }
 
 cmd_apply() {
-	[ $# -eq 1 ] || die "apply requires exactly one manifest file"
-	local manifest=$1
+	[ $# -le 1 ] || die "apply takes at most one manifest file"
+	local manifest=${1:-system.json}
 	[ -f "$manifest" ] || die "no such file: $manifest"
 	state_init
 	# json_list_names/json_get_version already parse this exact
@@ -1000,6 +1058,12 @@ install_one_alpm() {
 		# kernel headers to the shipped image (measured on a real build).
 		rm -rf "$extract_dir/usr/include"
 		[ "$pkgname" = "$name" ] && version=$pkgversion
+		# Only the exact requested package ($name) gets its files recorded,
+		# matching system_set below: transitive alpm dependencies pulled in
+		# via this closure (e.g. libstdc++ for cmatrix) never get their own
+		# system.json entry either, so there'd be nothing sensible for a
+		# later `fau remove` to key their file list off of.
+		[ "$pkgname" = "$name" ] && record_files "$name" "$extract_dir"
 		# --checksum: see install_one's own merge for why plain -aK isn't
 		# enough on an upgrade.
 		log "[$i/$total] merging $pkgname into $FAU_ROOT..."
