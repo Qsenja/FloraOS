@@ -4,14 +4,12 @@ Every package/binary in the base image, and why it's there. Nothing gets added
 without a line here. If you can't justify it in one line, it doesn't belong
 in the base.
 
-## Build-time only (LFS-style bootstrap toolchain, not present in final image)
+## Build-time only (not present in the final image)
 
 | Component | Reason |
 |---|---|
-| cross gcc | compiles the target toolchain and every runtime package from source |
-| cross binutils | assembler/linker for the cross toolchain |
-| linux kernel headers | needed to build glibc against the target kernel ABI |
-| glibc (pass 1) | bootstrap libc so the final gcc/binutils can build native binaries |
+| this build host's own gcc/binutils | compiles every package from source. Every FloraOS binary is still built from pristine upstream source (nothing copied from Arch/Artix) -- we just use the compiler already on this machine to do the compiling, rather than *also* bootstrapping our own compiler from scratch first (a deliberate scope call: full LFS-style cross-toolchain bootstrapping adds hours and much more that can break, for no benefit beyond purity) |
+| sanitized linux kernel headers | `make headers_install` from the linux-lts source, needed so glibc builds against the right kernel ABI |
 
 ## Runtime (shipped in the base rootfs)
 
@@ -43,6 +41,7 @@ in the base.
 
 | Package | Reason |
 |---|---|
+| libgcc | fastfetch (C++) needs libgcc_s.so.1 for exception-handling at runtime. Not a declared dependency of fastfetch itself -- Arch/Artix assume it's always present as a base-system package -- so it has to be installed explicitly alongside it |
 | fastfetch | requested identity/branding touch — shown at login via /etc/profile, configured with a custom logo (assets/floraos-logo.txt) and a Packages line reading fau's own list instead of a package manager it doesn't know about. Fetched via fau's pacman-backed fallback, not built from source (small, and not core to the OS) |
 
 ## Build-host tooling (not part of FloraOS, not built from source)

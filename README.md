@@ -13,6 +13,50 @@ self-contained directory, never scattered across `/usr`, `/etc`, `/var/log`.
 [ARCHITECTURE.md](ARCHITECTURE.md#app-isolation-per-app-directories-under-apps)
 for how and why, and its real limits.
 
+## Status: boots to a working shell, verified
+
+`./floraiso test` passes: the kernel starts, and the login shell is actually
+reached (checked from the QEMU serial console, not assumed). Concretely,
+right now:
+
+- **23 packages** in the base image, every one built from pinned upstream
+  source on this machine (see [docs/MANIFEST.md](docs/MANIFEST.md) for the
+  full list and a one-line reason for each) — kernel, glibc, sysvinit,
+  OpenRC, ncurses, bash, coreutils, util-linux, e2fsprogs, iproute2, dhcpcd,
+  plus grep/sed/gawk/findutils/tar/zstd/rsync/attr/acl/libmd (all of it
+  needed for `fau` itself to actually work *inside* the running OS, not just
+  during the build — see ARCHITECTURE.md for how that gap got found), plus
+  fastfetch as a deliberate branding touch.
+- **`fau` runs inside the booted OS**, not just as a build-time tool —
+  verified directly with an unprivileged `unshare --user --map-root-user
+  --mount chroot` into the built rootfs (no sudo needed): `fau list`
+  correctly prints all 23 installed packages, and ordinary commands like
+  `ls` work.
+- **ISO size: 132MB** (`floraos.iso`, hybrid BIOS+UEFI, boots and runs
+  entirely from RAM as a live image).
+- **fastfetch** runs at login with a custom ASCII logo and a package count
+  read from `fau`'s own list.
+
+What's explicitly *not* done yet (all documented with reasoning in
+[ARCHITECTURE.md](ARCHITECTURE.md)'s TODO section):
+
+- **No password-backed login.** `util-linux`'s login/su/chfn-chsh require
+  PAM to build at all, and PAM isn't part of FloraOS. `/etc/inittab` spawns
+  bash directly instead of through agetty+login for now.
+- **No GUI/display server** (X11 or Wayland). `fau app-install` can fetch
+  GUI apps' files via its pacman-backed fallback, but they have nowhere to
+  render yet. `kitty` was deliberately left out of the default ISO for this
+  reason — its dependency closure is ~773MB of Python3/Mesa/X11/Wayland with
+  nothing to run it on; `fau app-install kitty` works today if you want the
+  files anyway.
+- `sysctl`, `hostname`, and `loadkeys`/`keymaps` commands aren't shipped yet
+  (separate small packages — procps-ng, inetutils, kbd). Their openrc
+  sysinit services fail non-fatally at boot; everything else still starts.
+- No persistent disk install — FloraOS currently only boots as a live,
+  RAM-resident image.
+- No job control in the console shell (cosmetic side effect of the
+  no-getty setup above).
+
 ## Quick start
 
 ```
@@ -27,15 +71,15 @@ extra base packages, or rename the output ISO, edit `config/floraos.conf`
 ## What each command does
 
 - `./floraiso rootfs` — builds only `work/rootfs`, the base root filesystem
-  (kernel, glibc, sysvinit, openrc, ncurses, bash, coreutils, util-linux,
-  e2fsprogs, iproute2, dhcpcd — see [docs/MANIFEST.md](docs/MANIFEST.md) for
+  (see [docs/MANIFEST.md](docs/MANIFEST.md) for the full package list and
   the justification of every single one). Nothing here touches your real
   system: everything downloads and builds under `work/` (gitignored).
 - `./floraiso build` — runs the rootfs build if needed, then packs the whole
   rootfs as an initramfs and calls `grub-mkrescue` to produce a hybrid
-  BIOS+UEFI bootable `floraos.iso` (name configurable). FloraOS currently
-  boots and runs entirely from RAM as a live image — persistent disk installs
-  are a documented TODO, not yet scripted (see ARCHITECTURE.md).
+  BIOS+UEFI bootable `floraos.iso` (name configurable, currently 132MB).
+  FloraOS currently boots and runs entirely from RAM as a live image —
+  persistent disk installs are a documented TODO, not yet scripted (see
+  ARCHITECTURE.md).
 - `./floraiso test` — boots that ISO in QEMU with a serial console and checks
   the boot log for two markers: the kernel actually starting, and the login
   shell actually being reached. Exits non-zero (and prints why) if either is
@@ -48,8 +92,9 @@ config/floraos.conf     # the one config file: hostname, extra packages, kernel 
 config/versions.conf    # pinned source URL + sha256 for every base package
 docs/MANIFEST.md        # every package in the base rootfs, one-line reason each
 docs/FILESYSTEM_LAYOUT.md
-ARCHITECTURE.md         # design decisions and why
-tools/fau/              # FloraOS's package manager
+ARCHITECTURE.md         # design decisions, why, and the current TODO list
+assets/                 # fastfetch logo + config shipped into the rootfs
+tools/fau/               # FloraOS's package manager
 scripts/                # rootfs + ISO build scripts and per-package build recipes
 work/                   # build output (gitignored) -- sources, staged builds, rootfs, fau repo
 ```
@@ -70,6 +115,8 @@ fetching from this machine's pacman/Artix repos (dependency-resolved,
 sha256-verified, merged into the same isolated app directory — no root, and
 nothing gets installed onto your real system). GUI apps will fetch fine but
 have nowhere to render without a display server (not built yet, see
-ARCHITECTURE.md).
+ARCHITECTURE.md). Note this fallback needs pacman on whatever machine runs
+`fau` — it works when building the ISO here, but not from inside an
+already-booted FloraOS system, which doesn't ship pacman itself.
 
 See `tools/fau/fau --help` for the full command list.
