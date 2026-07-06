@@ -33,6 +33,14 @@ EOF
 
 echo "$FLORA_HOSTNAME" > "$ROOTFS/etc/hostname"
 
+# OpenRC's own etc/init.d/hostname service ignores /etc/hostname entirely --
+# it reads the hostname= var from etc/conf.d/hostname, which upstream ships
+# defaulted to "localhost". Without this, config/floraos.conf's HOSTNAME=
+# silently never took effect at boot (booted system always came up as
+# "localhost" regardless of what /etc/hostname said).
+mkdir -p "$ROOTFS/etc/conf.d"
+echo "hostname=\"$FLORA_HOSTNAME\"" > "$ROOTFS/etc/conf.d/hostname"
+
 cat > "$ROOTFS/etc/motd" <<'EOF'
 
   FloraOS — minimal, from-scratch, no systemd.
@@ -72,6 +80,18 @@ if [ -f "$FLORA_ROOT/assets/floraos-logo.txt" ]; then
 	mkdir -p "$ROOTFS/etc/fastfetch"
 	cp "$FLORA_ROOT/assets/floraos-logo.txt" "$ROOTFS/etc/fastfetch/floraos-logo.txt"
 	cp "$FLORA_ROOT/assets/fastfetch-config.jsonc" "$ROOTFS/etc/fastfetch/config.jsonc"
+fi
+
+# kbd's loadkeys shells out to `gzip` (via /bin/sh -c) to decompress .gz
+# keymaps and falls back to its own internal decompression when that fails --
+# FloraOS deliberately doesn't ship gzip (see docs/MANIFEST.md), so every
+# boot printed "sh: line 1: gzip: command not found" to the console even
+# though the keymap loads fine. Silencing just that one call's stderr (openrc
+# already reports success/failure via ebegin/eend, so nothing informational
+# is lost) instead of adding a whole package back just to suppress cosmetic
+# noise.
+if [ -f "$ROOTFS/etc/init.d/keymaps" ]; then
+	sed -i '/^[[:space:]]*loadkeys /s/$/ 2>\/dev\/null/' "$ROOTFS/etc/init.d/keymaps"
 fi
 
 cat > "$ROOTFS/etc/nsswitch.conf" <<'EOF'
@@ -124,12 +144,42 @@ l1:S1:wait:/usr/bin/openrc single
 l3:3:wait:/usr/bin/openrc default
 l6:6:wait:/usr/bin/openrc reboot
 
+# dhcpcd itself is NOT run through openrc's own default-runlevel dependency
+# resolution (etc/init.d/dhcpcd still exists and works fine for manual
+# `rc-service dhcpcd start/stop`) -- a custom-authored openrc-run script
+# symlinked into etc/runlevels/default never actually got scheduled by
+# openrc at boot, full stop: confirmed across several from-scratch
+# rebuilds and fresh boots, with and without `provide net` in its depend(),
+# with and without openrc's own legacy etc/init.d/network and
+# etc/init.d/staticroute (both of which unconditionally/conditionally
+# `provide net` too) still present -- rc-status default only ever showed
+# netmount+local, dhcpcd never appeared at all (not started, not crashed),
+# while running the exact same script by hand
+# (`/etc/init.d/dhcpcd start`) always worked immediately. Rather than
+# chase further into openrc's dependency-cache internals, driving it
+# directly from inittab -- the same pattern already used below for
+# floralogin -- sidesteps whatever that is entirely and just guarantees it
+# runs once per boot.
+dh:2345:once:/etc/init.d/dhcpcd start
+
 1:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin --noclear tty1 linux
 s0:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin ttyS0 115200 vt100
 EOF
 
-# Minimal openrc init.d script for dhcpcd -- upstream dhcpcd ships no OpenRC
-# integration of its own.
+# init.d script for dhcpcd, kept for manual `rc-service dhcpcd
+# start/stop/restart` -- upstream dhcpcd ships no OpenRC integration of its
+# own. NOT symlinked into etc/runlevels/default/: a custom-authored
+# openrc-run script placed there never actually got scheduled by openrc's
+# own dependency resolution at boot, with or without `provide net`, with or
+# without openrc's own legacy etc/init.d/network+staticroute (both of which
+# also `provide net`) present -- confirmed across several full
+# from-scratch rebuilds and fresh boots, rc-status default only ever
+# showed netmount+local, dhcpcd never appeared at all (not started, not
+# crashed), while running the exact same script by hand always worked
+# immediately. Rather than chase further into openrc's dependency-cache
+# internals, it's invoked directly from inittab above instead (see the
+# comment there) -- this file just makes it independently
+# start/stop-able.
 cat > "$ROOTFS/etc/init.d/dhcpcd" <<'EOF'
 #!/usr/bin/openrc-run
 description="DHCP client"
@@ -138,10 +188,19 @@ command_args="--quiet"
 pidfile="/run/dhcpcd.pid"
 
 depend() {
-	provide net
 	need localmount
 	after bootmisc
 }
 EOF
 chmod 755 "$ROOTFS/etc/init.d/dhcpcd"
-ln -sf ../../init.d/dhcpcd "$ROOTFS/etc/runlevels/default/dhcpcd"
+
+# openrc's own baselayout ships etc/init.d/network (generic static
+# ifconfig/ip-file interface bringup) and etc/init.d/staticroute enabled in
+# the boot runlevel by default. FloraOS has no /etc/ifconfig.*/etc/ip.*
+# files or /etc/route.conf -- it relies entirely on dhcpcd -- so both
+# scripts' start() do nothing at all here. Removed as dead weight (and
+# ruled out, not confirmed, as the dhcpcd-scheduling cause above: removing
+# both still left dhcpcd unscheduled by openrc, which is why it's driven
+# from inittab instead).
+rm -f "$ROOTFS/etc/runlevels/boot/network"
+rm -f "$ROOTFS/etc/runlevels/boot/staticroute"

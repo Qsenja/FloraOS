@@ -322,6 +322,7 @@ install_one() {
 		done
 	fi
 
+	log "installing $name..."
 	local work; work=$(mktemp -d)
 	tar -I zstd -xf "$archive" -C "$work"
 	local version; version=$(pkginfo_field "$work/pkginfo" version)
@@ -353,7 +354,12 @@ install_one() {
 cmd_install() {
 	[ $# -ge 1 ] || die "install requires at least one package name"
 	state_init
-	for name in "$@"; do install_one "$name"; done
+	local total=$# i=0
+	for name in "$@"; do
+		i=$((i + 1))
+		[ "$total" -eq 1 ] || log "=== [$i/$total] requested package: $name ==="
+		install_one "$name"
+	done
 }
 
 cmd_remove() {
@@ -463,6 +469,7 @@ app_install_one() {
 		done
 	fi
 
+	log "installing app $name..."
 	local work; work=$(mktemp -d)
 	tar -I zstd -xf "$archive" -C "$work"
 	local version bin; version=$(pkginfo_field "$work/pkginfo" version)
@@ -546,16 +553,38 @@ alpm_repo_names() {
 	esac
 }
 
-alpm_mirror_url() {
-	# alpm_mirror_url <repo> <filename> -> first configured mirror's URL
+alpm_mirror_urls() {
+	# alpm_mirror_urls <repo> <filename> -> every configured mirror's URL for
+	# this file, one per line, in mirrorlist order (candidates for
+	# alpm_fetch's fallback, not just the first one)
 	local repo=$1 filename=$2
 	local mirrorlist; mirrorlist=$(alpm_mirrorlist_path) || die "no pacman mirrorlist available"
-	local tmpl; tmpl=$(grep -m1 '^Server' "$mirrorlist" | sed 's/^Server[[:space:]]*=[[:space:]]*//')
-	[ -n "$tmpl" ] || die "no Server= line found in $mirrorlist"
 	local arch; arch=$(uname -m)
-	tmpl=${tmpl//\$repo/$repo}
-	tmpl=${tmpl//\$arch/$arch}
-	echo "$tmpl/$filename"
+	local tmpl
+	grep '^Server' "$mirrorlist" | sed 's/^Server[[:space:]]*=[[:space:]]*//' | while IFS= read -r tmpl; do
+		tmpl=${tmpl//\$repo/$repo}
+		tmpl=${tmpl//\$arch/$arch}
+		echo "$tmpl/$filename"
+	done
+}
+
+alpm_fetch() {
+	# alpm_fetch <repo> <filename> <dest> -- tries every configured mirror in
+	# order until one succeeds, instead of hard-failing on whatever mirror
+	# happens to be first in the list. A single dead/unresolvable mirror
+	# (seen for real: a mirrorlist entry whose DNS name didn't resolve from
+	# inside the QEMU guest network, while every other mirror worked fine)
+	# used to abort the whole install with no retry, exactly like real
+	# pacman would keep going instead.
+	local repo=$1 filename=$2 dest=$3
+	local urls; urls=$(alpm_mirror_urls "$repo" "$filename")
+	[ -n "$urls" ] || die "no Server= line found in the mirrorlist for $repo/$filename"
+	local url
+	while IFS= read -r url; do
+		curl -fL --progress-bar -o "$dest" "$url" && return 0
+		log "mirror failed, trying next one: $url"
+	done <<< "$urls"
+	die "failed to fetch $filename from every configured mirror for $repo"
 }
 
 alpm_db_cache_dir() {
@@ -577,9 +606,8 @@ alpm_fetch_repo_db() {
 		if [ -r "/var/lib/pacman/sync/$repo.db" ]; then
 			cp "/var/lib/pacman/sync/$repo.db" "$dest"
 		else
-			local url; url=$(alpm_mirror_url "$repo" "$repo.db")
 			log "fetching $repo.db..."
-			curl -fL --progress-bar -o "$dest.part" "$url" || die "failed to fetch $repo.db from $url"
+			alpm_fetch "$repo" "$repo.db" "$dest.part"
 			mv "$dest.part" "$dest"
 		fi
 	fi
@@ -901,9 +929,12 @@ install_one_alpm() {
 	mkdir -p "$FAU_ROOT"
 	local fetch_dir; fetch_dir=$(mktemp -d)
 	local version=""
+	local total; total=$(printf '%s\n' "$resolved" | grep -c .)
+	local i=0
 
 	while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
 		[ -n "$pkgname" ] || continue
+		i=$((i + 1))
 		# alpm_resolve's closure for a package like fastfetch/libgcc also
 		# includes glibc, filesystem, tzdata, etc: things FloraOS already
 		# built from its own pinned source. Without this guard those get
@@ -936,10 +967,11 @@ install_one_alpm() {
 
 		local dest="$fetch_dir/$filename"
 		if [ -r "/var/cache/pacman/pkg/$filename" ]; then
+			log "[$i/$total] using cached $pkgname $pkgversion"
 			cp "/var/cache/pacman/pkg/$filename" "$dest"
 		else
-			local url; url=$(alpm_mirror_url "$repo" "$filename")
-			curl -fsSL -o "$dest" "$url" || die "failed to fetch $pkgname from $url"
+			log "[$i/$total] fetching $pkgname $pkgversion..."
+			alpm_fetch "$repo" "$filename" "$dest"
 		fi
 		local actual; actual=$(sha256sum "$dest" | cut -d' ' -f1)
 		[ "$actual" = "$sha256" ] || die "checksum mismatch for $pkgname: expected $sha256, got $actual"
@@ -970,6 +1002,7 @@ install_one_alpm() {
 		[ "$pkgname" = "$name" ] && version=$pkgversion
 		# --checksum: see install_one's own merge for why plain -aK isn't
 		# enough on an upgrade.
+		log "[$i/$total] merging $pkgname into $FAU_ROOT..."
 		rsync -aK --checksum "$extract_dir/" "$FAU_ROOT/"
 		rm -rf "$extract_dir"
 	done <<< "$resolved"
@@ -989,17 +1022,21 @@ app_install_one_alpm() {
 	mkdir -p "$app_dir" "$app_dir/config" "$app_dir/cache" "$app_dir/data" "$app_dir/logs"
 	local fetch_dir; fetch_dir=$(mktemp -d)
 	local target_files version=""
+	local total; total=$(printf '%s\n' "$resolved" | grep -c .)
+	local i=0
 
 	while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
 		[ -n "$pkgname" ] || continue
+		i=$((i + 1))
 		[ -n "$filename" ] && [ -n "$sha256" ] || die "missing metadata for $pkgname in repo $repo"
 
 		local dest="$fetch_dir/$filename"
 		if [ -r "/var/cache/pacman/pkg/$filename" ]; then
+			log "[$i/$total] using cached $pkgname $pkgversion"
 			cp "/var/cache/pacman/pkg/$filename" "$dest"
 		else
-			local url; url=$(alpm_mirror_url "$repo" "$filename")
-			curl -fsSL -o "$dest" "$url" || die "failed to fetch $pkgname from $url"
+			log "[$i/$total] fetching $pkgname $pkgversion..."
+			alpm_fetch "$repo" "$filename" "$dest"
 		fi
 		local actual; actual=$(sha256sum "$dest" | cut -d' ' -f1)
 		[ "$actual" = "$sha256" ] || die "checksum mismatch for $pkgname: expected $sha256, got $actual"
@@ -1017,6 +1054,7 @@ app_install_one_alpm() {
 			version=$pkgversion
 			target_files=$(cd "$extract_dir" && find usr/bin bin -maxdepth 1 -type f 2>/dev/null; true)
 		fi
+		log "[$i/$total] merging $pkgname into $app_dir..."
 		cp -a "$extract_dir/." "$app_dir"
 		rm -rf "$extract_dir"
 	done <<< "$resolved"
@@ -1051,7 +1089,12 @@ app_install_one_alpm() {
 cmd_app_install() {
 	[ $# -ge 1 ] || die "app-install requires at least one package name"
 	apps_state_init
-	for name in "$@"; do app_install_one "$name"; done
+	local total=$# i=0
+	for name in "$@"; do
+		i=$((i + 1))
+		[ "$total" -eq 1 ] || log "=== [$i/$total] requested app: $name ==="
+		app_install_one "$name"
+	done
 }
 
 cmd_app_remove() {
