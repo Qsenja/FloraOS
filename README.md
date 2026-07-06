@@ -27,10 +27,10 @@ extra base packages, or rename the output ISO, edit `config/floraos.conf`
 ## What each command does
 
 - `./floraiso rootfs` — builds only `work/rootfs`, the base root filesystem
-  (kernel, glibc, sysvinit, openrc, bash, coreutils, util-linux, e2fsprogs,
-  iproute2, dhcpcd — see [docs/MANIFEST.md](docs/MANIFEST.md) for the
-  justification of every single one). Nothing here touches your real system:
-  everything downloads and builds under `work/` (gitignored).
+  (kernel, glibc, sysvinit, openrc, ncurses, bash, coreutils, util-linux,
+  e2fsprogs, iproute2, dhcpcd — see [docs/MANIFEST.md](docs/MANIFEST.md) for
+  the justification of every single one). Nothing here touches your real
+  system: everything downloads and builds under `work/` (gitignored).
 - `./floraiso build` — runs the rootfs build if needed, then packs the whole
   rootfs as an initramfs and calls `grub-mkrescue` to produce a hybrid
   BIOS+UEFI bootable `floraos.iso` (name configurable). FloraOS currently
@@ -63,5 +63,13 @@ fau app-remove <pkg>       # deletes that app's directory and its PATH wrapper, 
 fau export system.json     # dump the exact installed package set
 fau apply system.json      # reproduce that exact package set on another machine
 ```
+
+`app-install` first checks FloraOS's own repo; until there's a curated
+catalog of FloraOS-native apps, anything not found there falls back to
+fetching from this machine's pacman/Artix repos (dependency-resolved,
+sha256-verified, merged into the same isolated app directory — no root, and
+nothing gets installed onto your real system). GUI apps will fetch fine but
+have nowhere to render without a display server (not built yet, see
+ARCHITECTURE.md).
 
 See `tools/fau/fau --help` for the full command list.
