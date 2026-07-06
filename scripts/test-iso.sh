@@ -39,8 +39,18 @@ rm -f "$SERIAL_SOCK" "$INPUT_FIFO" "$BOOT_LOG"
 mkfifo "$INPUT_FIFO"
 
 log "booting $ISO in QEMU (up to ${TIMEOUT_SECS}s)"
+# 2048, not 1024: this whole rootfs is RAM-resident (initramfs, no separate
+# /tmp mount), and 1024 genuinely isn't enough headroom for `fau install`
+# of anything with a non-trivial alpm-fallback dependency closure -- an
+# isolated app directory doesn't strip etc/usr-include the way the base
+# system's own bootstrap path does, so e.g. cmatrix's closure (full
+# unstripped glibc, locale files included) ran a real boot out of disk
+# space mid-copy at 1024 and completed cleanly at 2048, with nothing else
+# about the install changed. This test only checks boot+login, not a
+# package install, but matching what a real interactive session needs
+# avoids the boot test passing while post-boot usage silently doesn't fit.
 timeout "$TIMEOUT_SECS" qemu-system-x86_64 \
-	-m 1024 \
+	-m 2048 \
 	-cdrom "$ISO" \
 	-boot d \
 	-nographic \

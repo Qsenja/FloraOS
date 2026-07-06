@@ -14,13 +14,14 @@
 		{
 			// fastfetch's built-in "packages" module only knows about
 			// pacman/dpkg/etc, not fau -- this reads the count straight
-			// from fau's own installed-package list instead.
-			// bootstrap-list, not list: list now covers user-installed
-			// isolated apps under ~/apps (0 on a fresh boot), not the base
-			// system's own package set this line is meant to report.
+			// from fau's own installed-package lists instead. Base system
+			// (bootstrap-list) and user-installed isolated apps (list) are
+			// two separate registries -- summed here so installing an app
+			// actually moves this number instead of only ever showing the
+			// fixed base-image count.
 			"type": "command",
 			"key": "Packages",
-			"text": "fau bootstrap-list | wc -l",
+			"text": "echo $(($(fau bootstrap-list | wc -l) + $(fau list | wc -l)))",
 			"format": "{} (fau)"
 		},
 		"memory",

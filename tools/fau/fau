@@ -631,20 +631,73 @@ alpm_mirror_urls() {
 	done
 }
 
+draw_count_bar() {
+	# draw_count_bar <done> <total> <suffix> -- redraws a single-line ASCII
+	# progress bar in place ('=' fill, '>' tip -- plain ASCII, not curl's own
+	# hardcoded '#' style, and safe on this console's ASCII terminal
+	# encoding, not just a UTF-8 one). Caller is responsible for a final
+	# newline once done == total.
+	local done=$1 total=$2 suffix=$3 width=30
+	local pct=100 filled=$width
+	if [ "$total" -gt 0 ]; then
+		pct=$(( done * 100 / total ))
+		filled=$(( pct * width / 100 ))
+	fi
+	local bar; bar=$(printf '%*s' "$filled" '' | tr ' ' '=')
+	local pad; pad=$(printf '%*s' "$((width - filled))" '')
+	printf '\r[%s>%s] %d%% (%d/%d)%s' "$bar" "$pad" "$pct" "$done" "$total" "$suffix" >&2
+}
+
+curl_fetch_with_bar() {
+	# curl_fetch_with_bar <url> <dest> -- like `curl -fL -o dest url`, but
+	# drawn with draw_count_bar (bytes done/total) instead of curl's own
+	# --progress-bar (hardcoded '#' fill, not overridable by any curl flag).
+	# Falls back to a plain quiet fetch with no bar if the server doesn't
+	# report Content-Length on HEAD (some redirects/mirrors don't) -- an
+	# indeterminate spinner isn't worth the complexity here.
+	local url=$1 dest=$2
+	local total; total=$(curl -fsIL "$url" 2>/dev/null | tr -d '\r' \
+		| awk 'tolower($0) ~ /^content-length:/ {print $2; exit}')
+	case "$total" in ''|*[!0-9]*|0) curl -fsL -o "$dest" "$url"; return $? ;; esac
+
+	curl -fsL -o "$dest" "$url" &
+	local pid=$!
+	while kill -0 "$pid" 2>/dev/null; do
+		local have; have=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+		[ "$have" -gt "$total" ] && have=$total
+		draw_count_bar "$have" "$total" ""
+		sleep 0.2
+	done
+	wait "$pid"; local rc=$?
+	[ "$rc" -eq 0 ] && draw_count_bar "$total" "$total" ""
+	echo >&2
+	return "$rc"
+}
+
 alpm_fetch() {
-	# alpm_fetch <repo> <filename> <dest> -- tries every configured mirror in
-	# order until one succeeds, instead of hard-failing on whatever mirror
-	# happens to be first in the list. A single dead/unresolvable mirror
-	# (seen for real: a mirrorlist entry whose DNS name didn't resolve from
-	# inside the QEMU guest network, while every other mirror worked fine)
-	# used to abort the whole install with no retry, exactly like real
-	# pacman would keep going instead.
-	local repo=$1 filename=$2 dest=$3
+	# alpm_fetch <repo> <filename> <dest> [quiet] -- tries every configured
+	# mirror in order until one succeeds, instead of hard-failing on
+	# whatever mirror happens to be first in the list. A single dead/
+	# unresolvable mirror (seen for real: a mirrorlist entry whose DNS name
+	# didn't resolve from inside the QEMU guest network, while every other
+	# mirror worked fine) used to abort the whole install with no retry,
+	# exactly like real pacman would keep going instead.
+	#
+	# `quiet` skips even that bar: callers fetching several packages in
+	# parallel (install_one_alpm, app_install_one_alpm) drive their own
+	# single combined progress bar instead -- multiple concurrent per-file
+	# bars writing '\r' to the same terminal line would just garble each
+	# other.
+	local repo=$1 filename=$2 dest=$3 quiet=${4:-}
 	local urls; urls=$(alpm_mirror_urls "$repo" "$filename")
 	[ -n "$urls" ] || die "no Server= line found in the mirrorlist for $repo/$filename"
 	local url
 	while IFS= read -r url; do
-		curl -fL --progress-bar -o "$dest" "$url" && return 0
+		if [ -n "$quiet" ]; then
+			curl -fsL -o "$dest" "$url" && return 0
+		else
+			curl_fetch_with_bar "$url" "$dest" && return 0
+		fi
 		log "mirror failed, trying next one: $url"
 	done <<< "$urls"
 	die "failed to fetch $filename from every configured mirror for $repo"
@@ -939,7 +992,6 @@ _alpm_resolve_one() {
 	IFS="$ALPM_FS" read -r repo pname pversion pdepends pfilename psha256 <<< "$found"
 
 	echo "$name" >> "$seen_file"
-	log "resolving dependencies: $(wc -l < "$seen_file") found so far (latest: $pname)"
 	# A dependency spec doesn't always name the real package directly -- it
 	# can reference a virtual/soname alias (e.g. "libz.so=1-64") that
 	# resolves to a differently-named real package (zlib). Without also
@@ -979,6 +1031,62 @@ alpm_resolve() {
 	rm -f "$seen" "$out"
 }
 
+alpm_fetch_job() {
+	# alpm_fetch_job <jobs_dir> <idx> <repo> <filename> <sha256> -- meant to
+	# run backgrounded (`&`): fetches (quietly -- the caller owns the one
+	# combined progress bar) and checksum-verifies a single package's
+	# *compressed* archive into "$jobs_dir/$idx.pkg", recording cache-hit vs
+	# real fetch in "$jobs_dir/$idx.source". Leaves no .pkg file behind on
+	# any failure (checksum mismatch, every mirror failing, etc) -- die()
+	# just ends this one background job; the caller's sequential
+	# extract+merge pass treats a missing .pkg file as that failure.
+	#
+	# Deliberately fetch-only, no extraction here: extraction/merge happens
+	# later, strictly one package at a time (see install_one_alpm/
+	# app_install_one_alpm) -- compressed archives are cheap to hold many
+	# of on disk at once, but their extracted, uncompressed form is not, on
+	# a RAM-backed (tmpfs) rootfs. An earlier version of this fetched *and*
+	# extracted in parallel, which meant several packages' full uncompressed
+	# trees existed on disk simultaneously -- ran a real boot out of space
+	# partway through copying glibc's locale files, even at just 2 at once.
+	local jobs_dir=$1 idx=$2 repo=$3 filename=$4 sha256=$5
+	local dest="$jobs_dir/$idx.pkg.tmp"
+	if [ -r "/var/cache/pacman/pkg/$filename" ]; then
+		cp "/var/cache/pacman/pkg/$filename" "$dest"
+		echo cached > "$jobs_dir/$idx.source"
+	else
+		alpm_fetch "$repo" "$filename" "$dest" quiet
+		echo fetched > "$jobs_dir/$idx.source"
+	fi
+	local actual; actual=$(sha256sum "$dest" | cut -d' ' -f1)
+	[ "$actual" = "$sha256" ] || die "checksum mismatch: expected $sha256, got $actual"
+	mv "$dest" "$jobs_dir/$idx.pkg"
+}
+
+alpm_parallel_fetch() {
+	# alpm_parallel_fetch <jobs_dir> <max_jobs> <idx>... -- fetches every
+	# given index's package (see alpm_fetch_job) up to <max_jobs> at once,
+	# drawing one combined progress bar, then waits for all of them.
+	local jobs_dir=$1 max_jobs=$2; shift 2
+	local total=$#
+	[ "$total" -gt 0 ] || return 0
+	local idx
+	for idx in "$@"; do
+		alpm_fetch_job "$jobs_dir" "$idx" "${pkg_repo[$idx]}" "${pkg_filename[$idx]}" "${pkg_sha256[$idx]}" &
+		while [ "$(jobs -rp | wc -l)" -ge "$max_jobs" ]; do
+			draw_count_bar "$(find "$jobs_dir" -maxdepth 1 -iname '*.pkg' 2>/dev/null | wc -l)" "$total" " fetching"
+			sleep 0.1
+		done
+	done
+	while [ "$(jobs -rp | wc -l)" -gt 0 ]; do
+		draw_count_bar "$(find "$jobs_dir" -maxdepth 1 -iname '*.pkg' 2>/dev/null | wc -l)" "$total" " fetching"
+		sleep 0.1
+	done
+	wait
+	draw_count_bar "$total" "$total" " fetching"
+	echo >&2
+}
+
 install_one_alpm() {
 	# System-side counterpart to app_install_one_alpm: merges into
 	# FAU_ROOT (rsync -aK, same as install_one's own merge) and records into
@@ -989,15 +1097,30 @@ install_one_alpm() {
 	local resolved; resolved=$(alpm_resolve "$name") \
 		|| die "couldn't resolve '$name' in any configured Arch/Artix repo"
 
-	mkdir -p "$FAU_ROOT"
-	local fetch_dir; fetch_dir=$(mktemp -d)
-	local version=""
-	local total; total=$(printf '%s\n' "$resolved" | grep -c .)
-	local i=0
-
+	# Parsed into indexed arrays up front (not streamed straight through a
+	# single `while read` loop) so the merge-as-each-job-finishes loop below
+	# can look a package's own repo/name/version/filename/sha256 back up by
+	# index in whatever order jobs actually complete in, not just top to
+	# bottom.
+	local -a pkg_repo=() pkg_name=() pkg_version=() pkg_filename=() pkg_sha256=()
+	local total=0 repo pkgname pkgversion filename sha256
 	while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
 		[ -n "$pkgname" ] || continue
-		i=$((i + 1))
+		total=$((total + 1))
+		pkg_repo[$total]=$repo; pkg_name[$total]=$pkgname; pkg_version[$total]=$pkgversion
+		pkg_filename[$total]=$filename; pkg_sha256[$total]=$sha256
+	done <<< "$resolved"
+	local names=""
+	local n; for n in $(seq 1 "$total"); do names="$names${pkg_name[$n]} "; done
+	log "resolved ${total} package(s) for $name: ${names% }"
+
+	mkdir -p "$FAU_ROOT"
+	local jobs_dir; jobs_dir=$(mktemp -d)
+	local version="" skipped=0 cached=0 fetched=0
+	local -a queue=()
+	local i
+	for i in $(seq 1 "$total"); do
+		pkgname=${pkg_name[$i]}
 		# alpm_resolve's closure for a package like fastfetch/libgcc also
 		# includes glibc, filesystem, tzdata, etc: things FloraOS already
 		# built from its own pinned source. Without this guard those get
@@ -1006,7 +1129,7 @@ install_one_alpm() {
 		# libc.so.6's sha256 before/after a real build: the shipped one
 		# turned out to be Arch's, not FloraOS's own.
 		if [ "$pkgname" != "$name" ] && [ -n "$(system_get_version "$pkgname")" ]; then
-			log "skipping $pkgname -- already provided by FloraOS's own build"
+			skipped=$((skipped + 1))
 			continue
 		fi
 		# "filesystem" is Arch/Artix's own base-system bootstrap package --
@@ -1023,24 +1146,30 @@ install_one_alpm() {
 		# fifth individual subdirectory: none of "filesystem" is ever
 		# wanted here, regardless of what FloraOS itself provides.
 		if [ "$pkgname" = "filesystem" ]; then
-			log "skipping $pkgname -- Arch/Artix base-system bootstrap package, not something $name needs to run"
+			skipped=$((skipped + 1))
 			continue
 		fi
-		[ -n "$filename" ] && [ -n "$sha256" ] || die "missing metadata for $pkgname in repo $repo"
+		[ -n "${pkg_filename[$i]}" ] && [ -n "${pkg_sha256[$i]}" ] || die "missing metadata for $pkgname in repo ${pkg_repo[$i]}"
+		queue+=("$i")
+	done
 
-		local dest="$fetch_dir/$filename"
-		if [ -r "/var/cache/pacman/pkg/$filename" ]; then
-			log "[$i/$total] using cached $pkgname $pkgversion"
-			cp "/var/cache/pacman/pkg/$filename" "$dest"
-		else
-			log "[$i/$total] fetching $pkgname $pkgversion..."
-			alpm_fetch "$repo" "$filename" "$dest"
-		fi
-		local actual; actual=$(sha256sum "$dest" | cut -d' ' -f1)
-		[ "$actual" = "$sha256" ] || die "checksum mismatch for $pkgname: expected $sha256, got $actual"
+	# Fetch every queued package's *compressed* archive in parallel first
+	# (cheap to hold several of on disk at once); extract+strip+merge
+	# strictly one at a time after (see alpm_fetch_job's own comment for
+	# why: this rootfs is tmpfs/RAM-backed, and holding more than one
+	# package's uncompressed extracted tree on disk at once genuinely ran a
+	# real boot out of space).
+	alpm_parallel_fetch "$jobs_dir" 4 "${queue[@]}"
+
+	for i in "${queue[@]}"; do
+		pkgname=${pkg_name[$i]}
+		local archive="$jobs_dir/$i.pkg"
+		[ -f "$archive" ] || die "fetching $pkgname failed (see errors above)"
+		[ "$(cat "$jobs_dir/$i.source" 2>/dev/null)" = cached ] && cached=$((cached + 1)) || fetched=$((fetched + 1))
 
 		local extract_dir; extract_dir=$(mktemp -d)
-		tar --zstd -xf "$dest" -C "$extract_dir"
+		tar --zstd -xf "$archive" -C "$extract_dir"
+		rm -f "$archive"
 		# Some packages (dbus's daemon-launch-helper, for one) ship
 		# intentionally unreadable setuid-root helpers as a hardening
 		# measure -- meaningless in this unprivileged, non-system-installed
@@ -1048,21 +1177,9 @@ install_one_alpm() {
 		# what we just extracted. u+rX ensures we always can.
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
-		# FloraOS's own skeleton (apply-skeleton.sh) is the sole source of
-		# truth for /etc -- an alpm-resolved dependency like Arch's
-		# "filesystem" package ships its own /etc/artix-release,
-		# /etc/shells, /etc/securetty, /etc/host.conf, etc, which would
-		# otherwise land straight in FAU_ROOT/etc right alongside (and
-		# contradicting) FloraOS's own identity files. System packages
-		# fetched this way may only ever contribute to /usr.
-		rm -rf "$extract_dir/etc"
-		# /usr/include is dev-time-only (headers, never dlopen'd/exec'd at
-		# runtime) -- resolving fastfetch/libgcc's full closure also pulls
-		# in "linux-api-headers" purely because it's one of glibc's own
-		# build-time dependencies on Arch, and it alone added 15MB of unused
-		# kernel headers to the shipped image (measured on a real build).
-		rm -rf "$extract_dir/usr/include"
-		[ "$pkgname" = "$name" ] && version=$pkgversion
+		rm -rf "$extract_dir/etc" "$extract_dir/usr/include"
+
+		[ "$pkgname" = "$name" ] && version=${pkg_version[$i]}
 		# Only the exact requested package ($name) gets its files recorded,
 		# matching system_set below: transitive alpm dependencies pulled in
 		# via this closure (e.g. libstdc++ for cmatrix) never get their own
@@ -1070,13 +1187,15 @@ install_one_alpm() {
 		# later `fau remove` to key their file list off of.
 		[ "$pkgname" = "$name" ] && record_files "$name" "$extract_dir"
 		# --checksum: see install_one's own merge for why plain -aK isn't
-		# enough on an upgrade.
-		log "[$i/$total] merging $pkgname into $FAU_ROOT..."
+		# enough on an upgrade. FloraOS's own skeleton (apply-skeleton.sh)
+		# is the sole source of truth for /etc, and /usr/include is
+		# dev-time-only -- both stripped just above.
 		rsync -aK --checksum "$extract_dir/" "$FAU_ROOT/"
 		rm -rf "$extract_dir"
-	done <<< "$resolved"
-	rm -rf "$fetch_dir"
+	done
+	rm -rf "$jobs_dir"
 
+	log "$name: fetched $fetched, used cache for $cached, skipped $skipped (already provided or base-system bootstrap noise) -- merged into $FAU_ROOT"
 	system_set "$name" "${version:-unknown (via alpm)}"
 	log "installed $name ${version:-(via alpm)} into $FAU_ROOT"
 }
@@ -1086,32 +1205,46 @@ app_install_one_alpm() {
 	local resolved; resolved=$(alpm_resolve "$name") \
 		|| die "couldn't resolve '$name' in any configured Arch/Artix repo"
 
+	# See install_one_alpm's own comment on why these get parsed into
+	# indexed arrays up front instead of streamed through one `while read`.
+	local -a pkg_repo=() pkg_name=() pkg_version=() pkg_filename=() pkg_sha256=()
+	local total=0 repo pkgname pkgversion filename sha256
+	while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
+		[ -n "$pkgname" ] || continue
+		total=$((total + 1))
+		pkg_repo[$total]=$repo; pkg_name[$total]=$pkgname; pkg_version[$total]=$pkgversion
+		pkg_filename[$total]=$filename; pkg_sha256[$total]=$sha256
+	done <<< "$resolved"
+	local names=""
+	local n; for n in $(seq 1 "$total"); do names="$names${pkg_name[$n]} "; done
+	log "resolved ${total} package(s) for $name: ${names% }"
+
 	local app_dir="${FAU_APPS_DIR%/}/${name}"
 	rm -rf "$app_dir"
 	mkdir -p "$app_dir" "$app_dir/config" "$app_dir/cache" "$app_dir/data" "$app_dir/logs"
-	local fetch_dir; fetch_dir=$(mktemp -d)
-	local target_files version=""
-	local total; total=$(printf '%s\n' "$resolved" | grep -c .)
-	local i=0
+	local jobs_dir; jobs_dir=$(mktemp -d)
+	local target_files version="" cached=0 fetched=0
+	local -a queue=()
+	local i; for i in $(seq 1 "$total"); do
+		[ -n "${pkg_filename[$i]}" ] && [ -n "${pkg_sha256[$i]}" ] || die "missing metadata for ${pkg_name[$i]} in repo ${pkg_repo[$i]}"
+		queue+=("$i")
+	done
 
-	while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
-		[ -n "$pkgname" ] || continue
-		i=$((i + 1))
-		[ -n "$filename" ] && [ -n "$sha256" ] || die "missing metadata for $pkgname in repo $repo"
+	# Fetch every queued package's *compressed* archive in parallel first;
+	# extract+merge strictly one at a time after -- see install_one_alpm's
+	# own comment (and alpm_fetch_job's) for why. No etc/usr-include strip
+	# here (unlike install_one_alpm): an isolated app directory never
+	# touches the real /etc, so there's nothing to guard against.
+	alpm_parallel_fetch "$jobs_dir" 4 "${queue[@]}"
 
-		local dest="$fetch_dir/$filename"
-		if [ -r "/var/cache/pacman/pkg/$filename" ]; then
-			log "[$i/$total] using cached $pkgname $pkgversion"
-			cp "/var/cache/pacman/pkg/$filename" "$dest"
-		else
-			log "[$i/$total] fetching $pkgname $pkgversion..."
-			alpm_fetch "$repo" "$filename" "$dest"
-		fi
-		local actual; actual=$(sha256sum "$dest" | cut -d' ' -f1)
-		[ "$actual" = "$sha256" ] || die "checksum mismatch for $pkgname: expected $sha256, got $actual"
+	for i in "${queue[@]}"; do
+		local archive="$jobs_dir/$i.pkg"
+		[ -f "$archive" ] || die "fetching ${pkg_name[$i]} failed (see errors above)"
+		[ "$(cat "$jobs_dir/$i.source" 2>/dev/null)" = cached ] && cached=$((cached + 1)) || fetched=$((fetched + 1))
 
 		local extract_dir; extract_dir=$(mktemp -d)
-		tar --zstd -xf "$dest" -C "$extract_dir"
+		tar --zstd -xf "$archive" -C "$extract_dir"
+		rm -f "$archive"
 		# Some packages (dbus's daemon-launch-helper, for one) ship
 		# intentionally unreadable setuid-root helpers as a hardening
 		# measure -- meaningless in this unprivileged, non-system-installed
@@ -1119,15 +1252,15 @@ app_install_one_alpm() {
 		# what we just extracted. u+rX ensures we always can.
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
-		if [ "$pkgname" = "$name" ]; then
-			version=$pkgversion
+		if [ "${pkg_name[$i]}" = "$name" ]; then
+			version=${pkg_version[$i]}
 			target_files=$(cd "$extract_dir" && find usr/bin bin -maxdepth 1 -type f 2>/dev/null; true)
 		fi
-		log "[$i/$total] merging $pkgname into $app_dir..."
 		cp -a "$extract_dir/." "$app_dir"
 		rm -rf "$extract_dir"
-	done <<< "$resolved"
-	rm -rf "$fetch_dir"
+	done
+	rm -rf "$jobs_dir"
+	log "$name: fetched $fetched, used cache for $cached -- merged into $app_dir"
 
 	for relbin in $target_files; do
 		app_wrapper_write "$name" "$app_dir" "$relbin"
