@@ -9,6 +9,6 @@ recipe_build() {
 		./configure --prefix=/usr --sbindir=/usr/sbin \
 			--dbdir=/var/lib/dhcpcd --rundir=/run
 		make -j"$jobs"
-		make DESTDIR="$files" install
+		fakeroot -- make DESTDIR="$files" install
 	)
 }

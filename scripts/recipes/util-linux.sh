@@ -6,11 +6,22 @@ recipe_build() {
 	local jobs; jobs=$(nproc)
 	(
 		cd "$src"
+		# login/su/runuser/chfn/chsh require PAM headers to build at all
+		# (configure.ac: UL_REQUIRES_HAVE(..., security_pam_appl_h)), and
+		# this build host has PAM installed -- so they'd build and link
+		# against libpam/libaudit/libcap-ng, none of which FloraOS ships.
+		# Shipping them would mean binaries that fail to even load. Disabled
+		# until FloraOS has its own PAM (or a PAM-free login) -- see
+		# ARCHITECTURE.md TODO. agetty itself doesn't need PAM.
 		./configure --prefix=/usr \
 			--without-systemd \
 			--without-systemdsystemunitdir \
-			--disable-static
+			--disable-static \
+			--disable-login \
+			--disable-su \
+			--disable-runuser \
+			--disable-chfn-chsh
 		make -j"$jobs"
-		make DESTDIR="$files" install
+		fakeroot -- make DESTDIR="$files" install
 	)
 }

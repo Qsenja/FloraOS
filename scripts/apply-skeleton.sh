@@ -17,6 +17,12 @@ chmod 1777 "$ROOTFS/tmp"
 # The kernel's initramfs unpacker execs /init directly if present.
 ln -sf sbin/init "$ROOTFS/init"
 
+# Standard /bin/sh -> bash. Without this, every #!/bin/sh script -- openrc's
+# own init-early.sh/init.sh included -- fails to exec at all (the kernel
+# reports the *script's* path as "No such file or directory" when the real
+# problem is its missing shebang interpreter, which makes this easy to miss).
+ln -sf bash "$ROOTFS/usr/bin/sh"
+
 cat > "$ROOTFS/etc/os-release" <<EOF
 NAME="FloraOS"
 ID=floraos
@@ -67,8 +73,19 @@ EOF
 chmod 600 "$ROOTFS/etc/shadow"
 
 # sysvinit + openrc glue: PID1 runs openrc's sysinit/boot/default stages,
-# then a single autologin getty on tty1 (no shadow-backed login wired up yet
-# -- see ARCHITECTURE.md TODO).
+# then a shell directly on tty1 (physical console) and ttyS0 (serial --
+# useful for any VM/headless boot, and what QEMU's -serial capture sees;
+# without this the kernel's own dmesg lines still reach ttyS0, but nothing
+# userspace-side ever would).
+#
+# This intentionally bypasses agetty+login: agetty --autologin execs
+# login(1), and util-linux's login *requires* PAM to build at all (and this
+# build host has PAM, so it would build -- linked against libpam/libaudit/
+# libcap-ng, none of which FloraOS ships, so it'd fail to even load). Real
+# password-backed login needs either a from-scratch PAM or a PAM-free login
+# path -- neither exists yet, so util-linux's login/su/runuser/chfn/chsh are
+# disabled at build time (see scripts/recipes/util-linux.sh) and this spawns
+# bash directly instead. TODO in ARCHITECTURE.md.
 cat > "$ROOTFS/etc/inittab" <<'EOF'
 id:3:initdefault:
 
@@ -80,7 +97,8 @@ l1:S1:wait:/usr/bin/openrc single
 l3:3:wait:/usr/bin/openrc default
 l6:6:wait:/usr/bin/openrc reboot
 
-1:2345:respawn:/usr/bin/agetty --autologin root 38400 tty1 linux
+1:2345:respawn:/usr/bin/bash --login
+s0:2345:respawn:/usr/bin/bash --login
 EOF
 
 # Minimal openrc init.d script for dhcpcd -- upstream dhcpcd ships no OpenRC

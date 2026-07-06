@@ -23,6 +23,6 @@ recipe_build() {
 			--enable-kernel=5.4 \
 			libc_cv_slibdir=/usr/lib
 		make -j"$jobs"
-		make DESTDIR="$files" install
+		fakeroot -- make DESTDIR="$files" install
 	)
 }

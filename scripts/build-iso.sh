@@ -42,7 +42,7 @@ set timeout=3
 set default=0
 
 menuentry "${HOSTNAME:-FloraOS}" {
-	linux /boot/vmlinuz-floraos console=ttyS0 console=tty0
+	linux /boot/vmlinuz-floraos console=tty0 console=ttyS0
 	initrd /boot/initramfs-floraos.img
 }
 EOF

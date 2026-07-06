@@ -1,5 +1,5 @@
 PKG_DESCRIPTION="GNU Bourne Again Shell"
-PKG_DEPENDS="glibc"
+PKG_DEPENDS="glibc,ncurses"
 
 recipe_build() {
 	local src=$1 files=$2
@@ -8,6 +8,6 @@ recipe_build() {
 		cd "$src"
 		./configure --prefix=/usr --without-bash-malloc
 		make -j"$jobs"
-		make DESTDIR="$files" install
+		fakeroot -- make DESTDIR="$files" install
 	)
 }

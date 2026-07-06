@@ -172,9 +172,12 @@ repo_index() {
 }
 
 repo_lookup_file() {
-	# repo_lookup_file <name> -> prints archive filename
+	# repo_lookup_file <name> -> prints archive filename, or nothing if
+	# there's no repo index yet or the name isn't in it (not an error here --
+	# callers that need a system package to exist check for an empty result
+	# themselves; app_install_one falls back to pacman on an empty result)
 	local name=$1 repo; repo=$(repo_json)
-	[ -f "$repo" ] || die "no repo index at $repo (run: fau repo-index)"
+	[ -f "$repo" ] || return 0
 	awk -v n="\"$name\"" '
 		index($0, n":{") { in_pkg=1 }
 		in_pkg && match($0, /"file":"[^"]*"/) {
@@ -213,8 +216,11 @@ install_one() {
 
 	local depends; depends=$(repo_lookup_depends "$archive")
 	if [ -n "${depends:-}" ]; then
-		local IFS=','
-		for dep in $depends; do
+		# tr, not `local IFS=','`: IFS is function-scoped, not block-scoped,
+		# so it would still be ',' for every command below this loop within
+		# this same call (notably system_set's own word-splitting) -- that's
+		# exactly what corrupted system.json before this fix.
+		for dep in $(printf '%s' "$depends" | tr ',' ' '); do
 			dep=$(echo "$dep" | xargs)
 			[ -z "$dep" ] && continue
 			[ -n "$(system_get_version "$dep")" ] || install_one "$dep"
@@ -225,7 +231,13 @@ install_one() {
 	tar -I zstd -xf "$archive" -C "$work"
 	local version; version=$(pkginfo_field "$work/pkginfo" version)
 	mkdir -p "$FAU_ROOT"
-	cp -a "$work/files/." "$FAU_ROOT"
+	# rsync -a alone replaces a destination symlink-to-directory (e.g. the
+	# merged-/usr bin/sbin/lib/lib64 symlinks) with a real directory;
+	# --keep-dirlinks (-K) keeps the symlink and merges into its target
+	# instead, which is what installing multiple packages into one merged
+	# root requires. Plain cp -a refuses the merge outright ("cannot
+	# overwrite non-directory X with directory Y").
+	rsync -aK "$work/files/" "$FAU_ROOT/"
 	rm -rf "$work"
 
 	system_set "$name" "$version"
@@ -289,6 +301,7 @@ app_wrapper_write() {
 	local name=$1 app_dir=$2 relbin=$3
 	local cmd_name; cmd_name=$(basename "$relbin")
 	local wrapper="$FAU_APPS_BIN_DIR/$cmd_name"
+	local app_libdir="$app_dir/usr/lib:$app_dir/lib"
 	cat > "$wrapper" <<-EOF
 	#!/bin/sh
 	export HOME="$app_dir"
@@ -296,6 +309,8 @@ app_wrapper_write() {
 	export XDG_CACHE_HOME="$app_dir/cache"
 	export XDG_DATA_HOME="$app_dir/data"
 	export XDG_STATE_HOME="$app_dir/logs"
+	export LD_LIBRARY_PATH="$app_libdir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+	export PATH="$app_dir/usr/bin:$app_dir/bin\${PATH:+:\$PATH}"
 	exec "$app_dir/$relbin" "\$@"
 	EOF
 	chmod 755 "$wrapper"
@@ -303,16 +318,21 @@ app_wrapper_write() {
 
 app_install_one() {
 	local name=$1
+	local file; file=$(repo_lookup_file "$name")
+	if [ -z "$file" ]; then
+		if command -v pacman >/dev/null 2>&1; then
+			app_install_one_pacman "$name"
+			return
+		fi
+		die "package not found in repo: $name (and pacman isn't available to fall back to)"
+	fi
+
 	local existing; existing=$(json_get_version "$FAU_APPS_JSON" "$name")
-	local file archive
-	file=$(repo_lookup_file "$name")
-	[ -n "$file" ] || die "package not found in repo: $name"
-	archive="${FAU_REPO_DIR%/}/${file}"
+	local archive="${FAU_REPO_DIR%/}/${file}"
 
 	local depends; depends=$(repo_lookup_depends "$archive")
 	if [ -n "${depends:-}" ]; then
-		local IFS=','
-		for dep in $depends; do
+		for dep in $(printf '%s' "$depends" | tr ',' ' '); do
 			dep=$(echo "$dep" | xargs)
 			[ -z "$dep" ] && continue
 			[ -n "$(json_get_version "$FAU_APPS_JSON" "$dep")" ] || app_install_one "$dep"
@@ -335,8 +355,7 @@ app_install_one() {
 		bin=$(find "$app_dir/bin" -maxdepth 1 -type f -printf 'bin/%f,' 2>/dev/null)
 	fi
 	if [ -n "${bin:-}" ]; then
-		local IFS=','
-		for relbin in $bin; do
+		for relbin in $(printf '%s' "$bin" | tr ',' ' '); do
 			relbin=$(echo "$relbin" | xargs)
 			[ -z "$relbin" ] && continue
 			app_wrapper_write "$name" "$app_dir" "$relbin"
@@ -349,6 +368,122 @@ app_install_one() {
 	else
 		log "installed app $name $version into $app_dir"
 	fi
+	case ":$PATH:" in
+		*":$FAU_APPS_BIN_DIR:"*) ;;
+		*) log "note: $FAU_APPS_BIN_DIR is not on your PATH yet — add it to use $name's commands directly" ;;
+	esac
+}
+
+# --- pacman-backed fallback ---------------------------------------------------
+# Until FloraOS has its own curated app catalog, app-install falls back to
+# pulling from this build host's pacman/Artix repos when a package isn't in
+# the local fau repo. This only fetches (no root, no installing onto the
+# real system): a scratch pacman db with an *empty* local-package state is
+# used so `pacman -Sp` resolves the FULL dependency closure regardless of
+# what's already installed on this host, not just what's "missing" here.
+# Real caveat: pacman binaries are built against Artix's glibc -- this only
+# works cleanly as long as that stays ABI-compatible with FloraOS's own
+# from-scratch glibc (currently identical versions by coincidence, not by
+# any guarantee). GUI apps also won't have a display server to draw on yet
+# (see ARCHITECTURE.md) -- this gets you the files, not a running X11.
+
+pacman_scratch_db() {
+	local db_dir="${FAU_APPS_DIR%/}/.pacman-db"
+	if [ ! -d "$db_dir/sync" ] || [ -z "$(ls -A "$db_dir/sync" 2>/dev/null)" ]; then
+		rm -rf "$db_dir"
+		mkdir -p "$db_dir/sync" "$db_dir/local"
+		cp /var/lib/pacman/sync/*.db "$db_dir/sync/" 2>/dev/null \
+			|| die "couldn't read /var/lib/pacman/sync -- is pacman's sync db populated? (pacman -Sy)"
+	fi
+	echo "$db_dir"
+}
+
+pacman_desc_field() {
+	# pacman_desc_field <db-dir> <repo> <pkg-dirname> <KEY> -> prints value
+	local db_dir=$1 repo=$2 pkgdir=$3 key=$4
+	local work; work=$(mktemp -d)
+	tar -xzf "$db_dir/sync/${repo}.db" -C "$work" "$pkgdir/desc" 2>/dev/null
+	awk -v k="%${key}%" 'f{print; f=0} $0==k{f=1}' "$work/$pkgdir/desc" 2>/dev/null
+	rm -rf "$work"
+}
+
+pacman_pkgdir_for() {
+	# pacman_pkgdir_for <db-dir> <repo> <name> -> the "name-version" dir inside repo.db
+	local db_dir=$1 repo=$2 name=$3
+	local work; work=$(mktemp -d)
+	tar -xzf "$db_dir/sync/${repo}.db" -C "$work" 2>/dev/null
+	find "$work" -maxdepth 1 -type d -name "${name}-*" -printf '%f\n' | while read -r d; do
+		[ "$(awk '/%NAME%/{getline;print;exit}' "$work/$d/desc")" = "$name" ] && echo "$d" && break
+	done
+	rm -rf "$work"
+}
+
+pacman_mirror_url() {
+	# pacman_mirror_url <repo> <filename> -> first configured mirror's URL
+	local repo=$1 filename=$2
+	local tmpl; tmpl=$(grep -m1 '^Server' /etc/pacman.d/mirrorlist | sed 's/^Server[[:space:]]*=[[:space:]]*//')
+	[ -n "$tmpl" ] || die "no Server= line found in /etc/pacman.d/mirrorlist"
+	local arch; arch=$(uname -m)
+	tmpl=${tmpl//\$repo/$repo}
+	tmpl=${tmpl//\$arch/$arch}
+	echo "$tmpl/$filename"
+}
+
+app_install_one_pacman() {
+	local name=$1
+	local db_dir; db_dir=$(pacman_scratch_db)
+
+	local resolved; resolved=$(pacman -Sp --dbpath "$db_dir" --print-format '%n %r' "$name" 2>&1) \
+		|| die "pacman couldn't resolve '$name': $resolved"
+
+	local app_dir="${FAU_APPS_DIR%/}/${name}"
+	rm -rf "$app_dir"
+	mkdir -p "$app_dir" "$app_dir/config" "$app_dir/cache" "$app_dir/data" "$app_dir/logs"
+	local fetch_dir; fetch_dir=$(mktemp -d)
+	local target_files version=""
+
+	while read -r pkgname repo; do
+		[ -n "$pkgname" ] || continue
+		local pkgdir; pkgdir=$(pacman_pkgdir_for "$db_dir" "$repo" "$pkgname")
+		[ -n "$pkgdir" ] || die "couldn't find $pkgname in repo $repo's sync db"
+		local filename sha256
+		filename=$(pacman_desc_field "$db_dir" "$repo" "$pkgdir" FILENAME)
+		sha256=$(pacman_desc_field "$db_dir" "$repo" "$pkgdir" SHA256SUM)
+		[ -n "$filename" ] && [ -n "$sha256" ] || die "missing metadata for $pkgname in sync db"
+
+		# Resolved directly, not via another `pacman -Sp <pkgname>` call --
+		# that re-resolves *that* package's own sub-dependencies too and can
+		# print several lines, making "the first line" ambiguous (caught by
+		# the checksum check below the hard way once already).
+		local dest="$fetch_dir/$filename"
+		if [ -r "/var/cache/pacman/pkg/$filename" ]; then
+			cp "/var/cache/pacman/pkg/$filename" "$dest"
+		else
+			local url; url=$(pacman_mirror_url "$repo" "$filename")
+			curl -fsSL -o "$dest" "$url" || die "failed to fetch $pkgname from $url"
+		fi
+		local actual; actual=$(sha256sum "$dest" | cut -d' ' -f1)
+		[ "$actual" = "$sha256" ] || die "checksum mismatch for $pkgname: expected $sha256, got $actual"
+
+		local extract_dir; extract_dir=$(mktemp -d)
+		tar --zstd -xf "$dest" -C "$extract_dir"
+		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
+		if [ "$pkgname" = "$name" ]; then
+			version=$(pacman_desc_field "$db_dir" "$repo" "$pkgdir" VERSION)
+			target_files=$(cd "$extract_dir" && find usr/bin bin -maxdepth 1 -type f 2>/dev/null; true)
+		fi
+		cp -a "$extract_dir/." "$app_dir"
+		rm -rf "$extract_dir"
+	done <<< "$resolved"
+	rm -rf "$fetch_dir"
+
+	for relbin in $target_files; do
+		app_wrapper_write "$name" "$app_dir" "$relbin"
+	done
+
+	json_set "$FAU_APPS_JSON" "$name" "${version:-unknown (via pacman)}"
+	log "installed app $name (via pacman) into $app_dir"
+	[ -n "$target_files" ] || log "note: couldn't find any usr/bin or bin entrypoint owned by $pkgname to wrap"
 	case ":$PATH:" in
 		*":$FAU_APPS_BIN_DIR:"*) ;;
 		*) log "note: $FAU_APPS_BIN_DIR is not on your PATH yet — add it to use $name's commands directly" ;;
@@ -369,8 +504,7 @@ cmd_app_remove() {
 		local app_dir="${FAU_APPS_DIR%/}/${name}"
 		local bin; bin=$([ -f "$app_dir/.pkginfo" ] && pkginfo_field "$app_dir/.pkginfo" bin || true)
 		if [ -n "${bin:-}" ]; then
-			local IFS=','
-			for relbin in $bin; do
+			for relbin in $(printf '%s' "$bin" | tr ',' ' '); do
 				relbin=$(echo "$relbin" | xargs)
 				[ -z "$relbin" ] && continue
 				rm -f "$FAU_APPS_BIN_DIR/$(basename "$relbin")"

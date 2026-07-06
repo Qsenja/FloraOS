@@ -19,6 +19,7 @@ MANDATORY_ORDER=(
 	glibc
 	sysvinit
 	openrc
+	ncurses
 	bash
 	coreutils
 	util-linux
@@ -32,10 +33,26 @@ pinned_kernel=$(version_field linux-lts 1)
 [ "${KERNEL_VERSION:-$pinned_kernel}" = "$pinned_kernel" ] || die \
 	"floraos.conf requests kernel $KERNEL_VERSION but config/versions.conf pins linux-lts at $pinned_kernel -- update versions.conf (URL + sha256) to change kernel version"
 
-for cmd in curl tar zstd make gcc sha256sum; do require_cmd "$cmd"; done
+for cmd in curl tar zstd make gcc sha256sum rsync fakeroot; do require_cmd "$cmd"; done
+
+already_built() {
+	# already_built <name> -- true if the repo already has this exact
+	# pinned version packaged. Lets a retry after a downstream failure skip
+	# expensive earlier steps (kernel, glibc) instead of rebuilding them --
+	# extract_source always wipes and re-extracts, so without this check
+	# every retry redoes the whole pipeline from package #1.
+	local name=$1 version; version=$(version_field "$name" 1)
+	local repo="$REPO_DIR/repo.json"
+	[ -f "$repo" ] || return 1
+	grep -q "\"${name}\":{\"version\":\"${version}\"" "$repo"
+}
 
 build_package() {
 	local name=$1
+	if already_built "$name"; then
+		log "=== $name (already built, skipping -- rm work/repo to force a rebuild) ==="
+		return
+	fi
 	log "=== $name ==="
 	# shellcheck source=/dev/null
 	source "$SELF_DIR/recipes/$name.sh"
@@ -46,7 +63,9 @@ build_package() {
 
 	local version files
 	version=$(version_field "$name" 1)
-	files="$STAGE_DIR/$name/files"
+	# Must be distinct from $STAGE_DIR/$name/files -- package_stage rm -rf's
+	# and recreates that path, which would delete this out from under itself.
+	files="$BUILD_DIR/$name-install"
 	rm -rf "$files"
 	mkdir -p "$files"
 

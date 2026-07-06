@@ -15,6 +15,6 @@ recipe_build() {
 			--disable-libuuid \
 			--disable-fsck
 		make -j"$jobs"
-		make DESTDIR="$files" install
+		fakeroot -- make DESTDIR="$files" install
 	)
 }

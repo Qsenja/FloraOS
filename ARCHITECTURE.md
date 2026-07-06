@@ -93,3 +93,23 @@ build path that would've required compiling 16-bit real-mode boot code.
   for now, add when one shows up.
 - TODO: fau dependency resolution is single-level (no version constraint
   solving) until the package set grows enough to need it.
+- TODO: real password-backed login. util-linux's login/su/runuser/chfn/chsh
+  require PAM to build at all, and PAM isn't part of FloraOS -- shipping
+  them linked against the build host's PAM would produce binaries FloraOS
+  itself can't load. Disabled at build time; `/etc/inittab` spawns bash
+  directly on tty1/ttyS0 instead of agetty+login. Needs either a
+  from-scratch PAM (+ /etc/pam.d config) or a PAM-free login path before
+  real authentication makes sense.
+- TODO: no GUI/display server (X11 or Wayland) -- `fau app-install`'s
+  pacman-backed fallback (see tools/fau/fau) can fetch GUI apps' files, but
+  they have nowhere to draw pixels without this. Separate, larger project.
+- TODO: `sysctl`, `hostname`, and `loadkeys`/`keymaps` commands aren't part
+  of any built package yet (sysctl is procps-ng; hostname is its own small
+  package or part of inetutils; keymaps needs kbd). Their openrc sysinit
+  services fail non-fatally (logged, boot continues) -- add these packages
+  when their functionality is actually needed.
+- TODO: bash lacks job control on the console (`cannot set terminal process
+  group`) since /etc/inittab spawns it directly instead of through a real
+  getty that opens/attaches the tty properly. Cosmetic for now; would need
+  revisiting alongside the login/PAM TODO above if job control matters
+  before then.

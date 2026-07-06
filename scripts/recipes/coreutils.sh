@@ -8,6 +8,6 @@ recipe_build() {
 		cd "$src"
 		./configure --prefix=/usr
 		make -j"$jobs"
-		make DESTDIR="$files" install
+		fakeroot -- make DESTDIR="$files" install
 	)
 }

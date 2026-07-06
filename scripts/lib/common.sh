@@ -76,10 +76,12 @@ package_stage() {
 	depends=$depends
 	EOF
 
-	mkdir -p "$REPO_DIR"
-	local archive="$REPO_DIR/${name}-${version}.fau.tar.zst"
+	# Built outside $REPO_DIR -- repo-add copies its argument *into* $REPO_DIR,
+	# so building the archive there directly makes that copy a no-op self-copy.
+	local archive="$STAGE_DIR/${name}-${version}.fau.tar.zst"
 	(cd "$pkg_dir" && tar -I zstd -cf "$archive" pkginfo files)
 	FAU_REPO_DIR="$REPO_DIR" "$FAU_BIN" repo-add "$archive"
+	rm -f "$archive"
 	log "packaged $name $version"
 }
 
