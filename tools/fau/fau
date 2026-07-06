@@ -478,7 +478,28 @@ app_wrapper_write() {
 	local name=$1 app_dir=$2 relbin=$3
 	local cmd_name; cmd_name=$(basename "$relbin")
 	local wrapper="$FAU_APPS_BIN_DIR/$cmd_name"
-	local app_libdir="$app_dir/usr/lib:$app_dir/lib"
+	# Flat usr/lib:lib covers most packages, but some (perl, for one) ship
+	# their real runtime .so nested well below that -- perl's own
+	# libperl.so lives at usr/lib/perl5/<ver>/core_perl/CORE/libperl.so,
+	# not directly under usr/lib/, so cowsay (a perl script) failed at
+	# runtime with "libperl.so: cannot open shared object file" despite
+	# installing fine. Computed once here (at wrapper-write time, not on
+	# every invocation) by finding every directory under the app that
+	# actually contains a shared library, so this covers that case and any
+	# other package with a similarly nested private lib directory.
+	local nested_libdirs; nested_libdirs=$(find "$app_dir" -iname '*.so*' -exec dirname {} \; 2>/dev/null | sort -u | tr '\n' ':')
+	local app_libdir="$app_dir/usr/lib:$app_dir/lib:${nested_libdirs%:}"
+	app_libdir=${app_libdir%:}
+	# Same problem, one level up: perl itself is compiled with @INC pointing
+	# at the real /usr/lib/perl5/..., not this app's own isolated copy, so a
+	# perl script here (cowsay, for one) found libperl.so fine but then
+	# failed with "Can't locate Cwd.pm in @INC" -- Cwd.pm existed, just under
+	# $app_dir, which perl's compiled-in search path never looks at. PERL5LIB
+	# is perl's own supported override for exactly this (like
+	# LD_LIBRARY_PATH, but for .pm modules instead of .so libraries) -- no
+	# need to patch perl or chroot anything.
+	local perl5lib; perl5lib=$(find "$app_dir" -iname '*.pm' -exec dirname {} \; 2>/dev/null | sort -u | tr '\n' ':')
+	perl5lib=${perl5lib%:}
 	cat > "$wrapper" <<-EOF
 	#!/bin/sh
 	export HOME="$app_dir"
@@ -488,6 +509,7 @@ app_wrapper_write() {
 	export XDG_STATE_HOME="$app_dir/logs"
 	export LD_LIBRARY_PATH="$app_libdir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 	export PATH="$app_dir/usr/bin:$app_dir/bin\${PATH:+:\$PATH}"
+	${perl5lib:+export PERL5LIB="$perl5lib\${PERL5LIB:+:\$PERL5LIB}"}
 	exec "$app_dir/$relbin" "\$@"
 	EOF
 	chmod 755 "$wrapper"
