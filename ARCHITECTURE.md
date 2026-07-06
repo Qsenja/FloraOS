@@ -192,6 +192,60 @@ build path that would've required compiling 16-bit real-mode boot code.
 
 - TODO: persistent syslog daemon — no concrete logging requirement yet: skip
   for now, add when one shows up.
+- DONE: `fau install <pkg>`'s alpm (Arch/Artix repo) fallback could silently
+  produce a broken binary for any app whose real Arch/Artix package bakes an
+  absolute path into a `DT_NEEDED` entry instead of a bare soname (found via
+  `fau install neovim`: its lua51-lpeg dependency needs
+  `/usr/lib/lua/5.1/lpeg.so`, a literal absolute path, not `liblpeg.so`).
+  That's invisible for a system-root bootstrap merge (`FAU_ROOT` really is
+  `/`, so the absolute path happens to resolve) but breaks an isolated
+  app-install outright: the dynamic linker only consults
+  `LD_LIBRARY_PATH`/RPATH for a *bare* soname, so an absolute `DT_NEEDED`
+  bypasses the app wrapper's own `LD_LIBRARY_PATH` entirely and fails with
+  "cannot open shared object file" even though the dependency is correctly
+  bundled inside the app's own directory — reproduced directly in a real
+  chroot of the built rootfs (`nvim -h` failing on exactly that path), not
+  inferred from reading the code. Fixed with a new small from-scratch tool,
+  **fauelf** (`tools/fauelf`, same "small, auditable, purpose-built instead
+  of vendoring patchelf" philosophy as `fau`/floralogin themselves): rewrites
+  any absolute `DT_NEEDED` string to its bare basename in place (always
+  safe — strictly shorter, NUL-padded into the same slot, no relocation).
+  Wired into `app_install_one_alpm` (tools/fau/fau), run over every
+  extracted file before the merge into the app's own directory.
+- DONE: `alpm_find_provider`'s PROVIDES fallback (tools/fau/fau) used to do
+  a plain bash `while read` linear scan over a whole repo's index (thousands
+  of packages) for every dependency spec that isn't found by exact name --
+  which in practice is nearly every real Arch/Artix dependency, since those
+  are mostly soname specs (`libc.so=6-64`) rather than the package's own
+  name. Found resolving a large closure (`fau install neovim`, ~50+
+  packages) taking noticeably long. Fixed the same way `alpm_repo_index`
+  itself already solved the equivalent problem for exact-name lookups (one
+  `awk`-processed index up front instead of spawning per-package processes,
+  see this file's own fau section, "building the sync-db index" bullet):
+  added `alpm_repo_provides_index`, a second index keyed by *provided*
+  name (one row per provided-name/provider-package pair, built from the
+  same cached by-name index in one more `awk` pass), so the PROVIDES
+  fallback is now an `awk` lookup (returning only the handful of rows that
+  actually provide the wanted name) followed by a bash loop over just
+  those few rows, not the whole repo. Verified two ways: resolving
+  neovim's real ~50+ package closure against the exact same warm sync-db
+  cache, old code vs new, byte-identical output (`diff` clean) at 6.9s vs
+  1.1s (~6x); and a fully cold-cache `fau install neovim` (no cached
+  index/provides-index at all) still installs and runs correctly.
+- TODO: `fau backup` — a full-root snapshot (not just `system.json` + app
+  configs, which `fau export`/`fau import` already cover) that's restorable
+  from the GRUB boot menu. Deliberately not attempted yet: FloraOS has no
+  persistent disk install (it boots and runs entirely from RAM, see
+  `scripts/build-iso.sh`'s own header comment), `scripts/build-iso.sh`
+  regenerates a single hardcoded GRUB `menuentry` from scratch on every build
+  (see its heredoc) with no multi-entry support, and there is no `/init` or
+  other early-userspace step that reads `/proc/cmdline` for a custom
+  parameter — the kernel execs `/sbin/init` (sysvinit) directly out of the
+  unpacked initramfs. A real implementation needs all three solved first
+  (somewhere persistent to store a snapshot, a second GRUB entry, and a
+  boot-time hook to actually apply it before sysvinit starts) — bigger than a
+  `tools/fau/fau` change, and not worth guessing at unverified boot-time
+  plumbing.
 - DONE: `depends=` entries can now carry an optional version constraint --
   `name`, `name>=1.2`, or `name==1.2` (comma-separated, as always). If an
   already-installed dependency doesn't satisfy it, fau reinstalls it from
@@ -239,13 +293,77 @@ build path that would've required compiling 16-bit real-mode boot code.
   named pipe (see `scripts/test-iso.sh`, which now does this on every
   `./floraiso test` run instead of just watching for the shell to appear on
   its own).
-- TODO: no GUI/display server (X11 or Wayland) -- `fau install`'s
-  alpm (Arch/Artix repo) fallback (see tools/fau/fau) can fetch GUI apps' files, but
-  they have nowhere to draw pixels without this. Separate, larger project.
-  kitty specifically was left out of the default ISO build for this reason:
-  its dependency closure (Python3 + Mesa + X11/Wayland) is ~773MB with
-  nothing to run it on yet -- `fau install kitty` works today if you
-  want the files anyway, it's just not baked in by default.
+- PARTIAL (was: no GUI/display server at all): the three system-level
+  primitives a Wayland WM/DE needs that `fau install <wm>`'s own alpm
+  fallback can't provide by itself (it can fetch wlroots/mesa/sway/mango's
+  *files* fine, but they had nowhere to draw pixels or manage input/seat
+  access) are now in place:
+  - **eudev** (`scripts/recipes/eudev.sh`): libinput/mesa/wlroots hard-require
+    libudev at build and run time, no supported fallback exists upstream.
+    Built `--disable-blkid --disable-selinux --disable-kmod` (all three
+    degrade gracefully, none needed for device nodes/hotplug). The
+    `--disable-kmod` choice means no module-autoload capability -- see the
+    linux-lts point below for the other half of that tradeoff. Adds exactly
+    one new build-host requirement (`gperf`), confirmed directly against the
+    real eudev 3.2.14 tarball (every other configure check already passes
+    with this project's existing build-host tooling).
+  - **floraseat** (`tools/floraseat`): FloraOS's own seat-management daemon,
+    written from scratch instead of building real seatd -- seatd is
+    meson/ninja-only upstream, and this project deliberately avoids
+    cmake/meson everywhere else (see mbedtls's own recipe). Speaks the real
+    seatd wire protocol (verified directly against upstream
+    kennylevinsen/seatd source -- protocol.h, client.c, seat.c, drm.c,
+    evdev.c, hidraw.c -- not reconstructed from memory), so precompiled
+    wlroots/libseat fetched via `fau install <wm>` talks to it unmodified.
+    Same "reimplement the wire protocol/data format, not the codebase" idea
+    as fau's own alpm fallback reading pacman's sync-db format without
+    vendoring pacman. Single seat0, non-VT-bound; device access is an
+    allowlist (`/dev/dri/`, `/dev/input/event`, `/dev/hidraw` prefixes only,
+    checked *after* `realpath(3)` canonicalization) gated by the socket's
+    own permissions (`/run/seatd.sock`, 0660 root:seat), same access-control
+    model as real seatd. Protocol correctness verified with a hand-written
+    test client exercising open_seat/enable_seat/disallowed-path
+    rejection/ping-pong end-to-end against the actual compiled binary (not
+    just read-through) -- see the daemon's own file header for the full
+    scope writeup and what's deliberately smaller than upstream.
+  - **linux-lts** (`scripts/recipes/linux-lts.sh`): now enables
+    `CONFIG_SYSFB_SIMPLEFB`+`CONFIG_DRM_SIMPLEDRM` (generic
+    firmware-framebuffer-based KMS, works on essentially any x86_64 machine
+    and under QEMU with zero hardware-specific driver code -- enough for a
+    software-rendered/llvmpipe Wayland session) plus
+    `CONFIG_INPUT_EVDEV`/`CONFIG_USB_HID`/`CONFIG_HID_GENERIC`/
+    `CONFIG_USB_XHCI_HCD` as **built-in** (not modules) via `scripts/config`
+    + `olddefconfig` after `defconfig`, since there's no kmod to autoload a
+    module in the first place (see eudev's `--disable-kmod` above). NOT
+    independently build-verified in this project's own sandbox this round --
+    a full kernel compile wasn't practical there; option names are correct
+    to the best of available knowledge for the pinned 6.18.38 tree, but
+    treat this the same as any other unverified change (check the real
+    `.config`/dmesg on an actual `./floraiso build`).
+  - **floralogin** (`tools/floralogin/floralogin.c`): now also creates
+    `/run/user/<uid>` (0700, chowned) and exports `XDG_RUNTIME_DIR` before
+    exec'ing the login shell -- every Wayland compositor hard-requires this
+    at startup and nothing else sets it up yet (no logind/elogind, see
+    fau's own package list).
+  - **New group**: `/etc/group` now has a `seat:x:11:` entry
+    (`scripts/apply-skeleton.sh`). Only root logs in today so this is a
+    formality -- the day FloraOS gets real user management (`useradd`/
+    `usermod` don't exist yet either, see below), `usermod -aG seat <user>`
+    is the entire migration path for that user to reach the compositor's
+    seat socket.
+  - Still explicitly NOT done, on purpose rather than by oversight:
+    **no VT-switching** (floraseat is non-VT-bound -- fine for one login
+    session at a time, a real gap once a second concurrent graphical
+    session exists); **no real GPU acceleration driver** (i915/amdgpu/
+    nouveau deliberately left out of linux-lts -- built-in would bloat
+    vmlinuz with drivers most machines don't have, as modules they're
+    useless without kmod -- add the one your hardware needs via
+    EXTRA_PACKAGES-style kernel config once this actually blocks someone);
+    **still no actual WM/DE in the base image** -- `fau install <wm>`
+    (mango, sway, ...) stays purely opt-in, matching every other app;
+    kitty is still left out of the default ISO build for the same
+    ~773MB-dependency-closure reason as before, though it now has
+    somewhere to actually draw once installed.
 - DONE: `sysctl` (procps-ng), `hostname` (Debian's standalone package, not
   inetutils -- see docs/MANIFEST.md), and `loadkeys`/`dumpkeys` (kbd) are now
   built and shipped; their openrc sysinit services run successfully instead

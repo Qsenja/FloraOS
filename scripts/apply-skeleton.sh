@@ -74,17 +74,21 @@ export PS1='floraos-boot-ok # '
 # install`, which is exactly the state a fresh boot should already be in
 # for the default (unoverridden) FAU_APPS_DIR.
 export PATH=/usr/bin:$HOME/apps/.bin
-command -v fastfetch >/dev/null 2>&1 && fastfetch --config /etc/fastfetch/config.jsonc
+command -v fastfetch >/dev/null 2>&1 && fastfetch --config "$HOME/apps/fastfetch/config/fastfetch/config.jsonc"
 EOF
 
 # FloraOS branding: custom logo + fastfetch config, run once per login shell
-# above. fastfetch itself is fetched via fau's alpm (Arch/Artix repo) fallback (see
-# build-rootfs.sh) rather than built from source -- it's not part of the
-# minimal base manifest, just an identity/branding touch.
-if [ -f "$FLORA_ROOT/assets/floraos-logo.txt" ]; then
-	mkdir -p "$ROOTFS/etc/fastfetch"
-	cp "$FLORA_ROOT/assets/floraos-logo.txt" "$ROOTFS/etc/fastfetch/floraos-logo.txt"
-	cp "$FLORA_ROOT/assets/fastfetch-config.jsonc" "$ROOTFS/etc/fastfetch/config.jsonc"
+# above. fastfetch itself is installed as an isolated app (fau install
+# fastfetch, see build-rootfs.sh), not merged into the system root -- so its
+# config lives inside that same app's own directory (its XDG_CONFIG_HOME,
+# per the app wrapper -- see app_wrapper_write in tools/fau/fau), not /etc,
+# matching fau's own "fau remove fastfetch deletes exactly that directory"
+# promise. Only applies if the fastfetch app install above actually
+# happened (skipped entirely on a build host with no pacman mirrorlist).
+if [ -f "$FLORA_ROOT/assets/floraos-logo.txt" ] && [ -d "$ROOTFS/root/apps/fastfetch" ]; then
+	mkdir -p "$ROOTFS/root/apps/fastfetch/config/fastfetch"
+	cp "$FLORA_ROOT/assets/floraos-logo.txt" "$ROOTFS/root/apps/fastfetch/config/fastfetch/floraos-logo.txt"
+	cp "$FLORA_ROOT/assets/fastfetch-config.jsonc" "$ROOTFS/root/apps/fastfetch/config/fastfetch/config.jsonc"
 fi
 
 # kbd's loadkeys shells out to `gzip` (via /bin/sh -c) to decompress .gz
@@ -114,6 +118,7 @@ EOF
 cat > "$ROOTFS/etc/group" <<'EOF'
 root:x:0:
 uucp:x:10:
+seat:x:11:
 EOF
 
 cat > "$ROOTFS/etc/shadow" <<'EOF'
@@ -176,6 +181,26 @@ l6:6:wait:/usr/bin/openrc reboot
 # non-zero and are visible via `rc-service dhcpcd status`.
 dh:2345:once:/etc/init.d/dhcpcd start >/dev/null 2>&1
 
+# GUI-readiness (see ARCHITECTURE.md): udevd needs to be up, and an initial
+# coldplug pass (trigger + settle) run, before anything -- floraseat
+# included -- tries to open /dev/dri or /dev/input nodes for devices that
+# were already present at boot (hotplug uevents alone only cover devices
+# that appear *after* udevd starts listening). udevd forks itself into the
+# background with --daemon (same "once, self-backgrounds" shape as dhcpcd
+# above, same reason it's driven directly from inittab rather than through
+# openrc's own runlevel dependency resolution -- see the dhcpcd comment
+# above, which applies identically here: a custom-authored openrc-run
+# script in etc/runlevels/default never actually got scheduled in this
+# project's own testing).
+ud:2345:once:/usr/bin/udevd --daemon && /usr/bin/udevadm trigger --action=add --type=subsystems && /usr/bin/udevadm trigger --action=add --type=devices && /usr/bin/udevadm settle >/dev/null 2>&1
+
+# floraseat (tools/floraseat, see ARCHITECTURE.md): FloraOS's own
+# seatd-wire-protocol-compatible seat daemon -- runs in the foreground
+# (unlike udevd/dhcpcd above, it does not background itself), so it needs
+# "respawn" like the agetty lines below, not "once". Started before login
+# so the socket exists by the time anything tries to connect to it.
+fs:2345:respawn:/usr/bin/floraseat >/dev/null 2>&1
+
 1:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin --noclear tty1 linux
 s0:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin ttyS0 115200 vt100
 EOF
@@ -207,6 +232,37 @@ depend() {
 }
 EOF
 chmod 755 "$ROOTFS/etc/init.d/dhcpcd"
+
+# init.d scripts for udevd/floraseat, same "manual rc-service start/stop
+# only, actual boot-time start driven from inittab" reasoning as dhcpcd's
+# own script above -- not symlinked into etc/runlevels/default/.
+cat > "$ROOTFS/etc/init.d/udevd" <<'EOF'
+#!/usr/bin/openrc-run
+description="Device manager (eudev)"
+command=/usr/bin/udevd
+command_args="--daemon"
+pidfile="/run/udevd.pid"
+
+depend() {
+	need sysfs
+}
+EOF
+chmod 755 "$ROOTFS/etc/init.d/udevd"
+
+cat > "$ROOTFS/etc/init.d/floraseat" <<'EOF'
+#!/usr/bin/openrc-run
+description="Seat management daemon (floraseat, seatd-protocol-compatible)"
+command=/usr/bin/floraseat
+pidfile="/run/floraseat.pid"
+# No command_background here, unlike a self-daemonizing command -- floraseat
+# stays in the foreground (see tools/floraseat/floraseat.c), so openrc-run's
+# own default start-stop-daemon --background handles backgrounding it.
+
+depend() {
+	need udevd
+}
+EOF
+chmod 755 "$ROOTFS/etc/init.d/floraseat"
 
 # openrc's own baselayout ships etc/init.d/network (generic static
 # ifconfig/ip-file interface bringup) and etc/init.d/staticroute enabled in

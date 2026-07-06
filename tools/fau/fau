@@ -26,6 +26,16 @@ FAU_APPS_DIR="${FAU_APPS_DIR:-$HOME/apps}"
 FAU_APPS_BIN_DIR="${FAU_APPS_DIR}/.bin"
 FAU_APPS_JSON="${FAU_APPS_DIR}/.fau-apps.json"
 
+# fauelf (tools/fauelf, see its own header comment): rewrites absolute-path
+# DT_NEEDED entries to bare basenames in an isolated app's own binaries --
+# needed because those paths bypass LD_LIBRARY_PATH/RPATH entirely and only
+# happen to resolve for a system-root (FAU_ROOT="/") merge, not an isolated
+# app directory. Plain command name by default (found via PATH once shipped
+# at /usr/bin/fauelf); build-rootfs.sh overrides this to a build-host path
+# since fauelf's app-install call happens before the compiled binary is
+# anywhere on this build host's own PATH.
+FAU_ELF_PATCH="${FAU_ELF_PATCH:-fauelf}"
+
 die() { echo "fau: error: $*" >&2; exit 1; }
 log() { echo "fau: $*" >&2; }
 
@@ -40,6 +50,13 @@ commands:
 
   repo-add <archive>        add a built .fau.tar.zst to the local repo and index it
   repo-index                rebuild repo.json from the archives present in the repo dir
+
+  export [file]             bundle every installed app's config/ files plus a
+                              full system.json (base packages + apps + config
+                              file list) into file (default: system.flora)
+  import [file]             reinstall any missing app named in file's manifest,
+                              then restore every config file it lists back into
+                              place under FAU_APPS_DIR (default: system.flora)
 
 build-time only (used by scripts/build-rootfs.sh, not meant for end users):
   bootstrap <pkg> [pkg ...] install system package(s) into FAU_ROOT, with dependencies
@@ -813,6 +830,49 @@ alpm_repo_index() {
 	echo "$index"
 }
 
+alpm_repo_provides_index() {
+	# alpm_repo_provides_index <repo> -> path to a cached index keyed by
+	# *provided* (virtual/soname) name, one line per (provided-name,
+	# provider-package) pair:
+	#   provname<FS>provver<FS>name<FS>version<FS>depends<FS>filename<FS>sha256
+	# Exists so alpm_find_provider's PROVIDES fallback can do a single awk
+	# lookup instead of a plain bash `while read` linear scan over the
+	# *entire* by-name index (thousands of lines) for every dependency spec
+	# that isn't a real package name -- which in practice is nearly every
+	# real Arch/Artix dependency, since those are mostly soname/virtual
+	# specs like "libc.so=6-64" rather than the package's own name. Found
+	# resolving a large closure (`fau install neovim`, ~50+ packages)
+	# taking noticeably long; this is the same fix alpm_repo_index itself
+	# already applied to the equivalent by-name problem (one awk pass
+	# instead of per-package forks) -- see that function's own comment.
+	local repo=$1
+	local cache_dir; cache_dir=$(alpm_db_cache_dir)
+	local index; index=$(alpm_repo_index "$repo")
+	local pindex="$cache_dir/$repo.provides.index"
+	if [ ! -s "$pindex" ]; then
+		local tmp; tmp=$(mktemp)
+		awk -F"$ALPM_FS" -v ofs="$ALPM_FS" '
+			{
+				name=$1; version=$2; depends=$3; provides=$4; filename=$5; sha256=$6
+				if (provides == "") next
+				n = split(provides, parts, ",")
+				for (i = 1; i <= n; i++) {
+					p = parts[i]
+					if (p == "") continue
+					eq = index(p, "=")
+					if (eq > 0) { pname = substr(p, 1, eq - 1); pver = substr(p, eq + 1) }
+					else        { pname = p; pver = "" }
+					if (pname == "") continue
+					printf "%s%s%s%s%s%s%s%s%s%s%s%s%s\n", \
+						pname, ofs, pver, ofs, name, ofs, version, ofs, depends, ofs, filename, ofs, sha256
+				}
+			}
+		' "$index" > "$tmp"
+		mv "$tmp" "$pindex"
+	fi
+	echo "$pindex"
+}
+
 # --- version comparison (alpm's own version-comparison algorithm) ---
 # Arch dependency constraints look like "glibc>=2.38-1" or "libfoo=1.2-3".
 # Verified against the real `vercmp` binary across ~300 real package
@@ -972,24 +1032,25 @@ alpm_find_provider() {
 		fi
 	done
 	for repo in $(alpm_repo_names); do
-		index=$(alpm_repo_index "$repo")
-		while IFS="$ALPM_FS" read -r name version depends provides filename sha256; do
-			[ -z "$name" ] || [ -z "$provides" ] && continue
-			local prov
-			for prov in $(printf '%s' "$provides" | tr ',' ' '); do
-				local prov_name prov_ver
-				case "$prov" in
-					*=*) prov_name=${prov%%=*}; prov_ver=${prov#*=} ;;
-					*) prov_name=$prov; prov_ver="" ;;
-				esac
-				[ "$prov_name" = "$want" ] || continue
-				if [ -z "$op" ] && [ -n "$prov_ver" ] || version_satisfies_alpm "$prov_ver" "$op" "$ver"; then
-					printf "%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s\n" \
-						"$repo" "$name" "$version" "$depends" "$filename" "$sha256"
-					return 0
-				fi
-			done
-		done < "$index"
+		local pindex; pindex=$(alpm_repo_provides_index "$repo")
+		# The awk call does the O(repo size) filtering (fast, a compiled
+		# loop, not a bash one); the bash loop below only ever walks the
+		# handful of rows that actually provide $want, not the whole repo --
+		# that's the whole fix. Ordering is preserved: the provides index
+		# was built from the same per-repo desc ordering as the by-name
+		# index, so "first matching row" here means the same thing it did
+		# in the old linear scan.
+		local matches; matches=$(awk -F"$ALPM_FS" -v n="$want" '$1==n' "$pindex")
+		[ -z "$matches" ] && continue
+		local prov_ver name version depends filename sha256
+		while IFS="$ALPM_FS" read -r _ prov_ver name version depends filename sha256; do
+			[ -z "$name" ] && continue
+			if [ -z "$op" ] && [ -n "$prov_ver" ] || version_satisfies_alpm "$prov_ver" "$op" "$ver"; then
+				printf "%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s\n" \
+					"$repo" "$name" "$version" "$depends" "$filename" "$sha256"
+				return 0
+			fi
+		done <<< "$matches"
 	done
 	return 1
 }
@@ -1257,18 +1318,38 @@ app_install_one_alpm() {
 	rm -rf "$app_dir"
 	mkdir -p "$app_dir" "$app_dir/config" "$app_dir/cache" "$app_dir/data" "$app_dir/logs"
 	local jobs_dir; jobs_dir=$(mktemp -d)
-	local target_files version="" cached=0 fetched=0
+	local target_files version="" cached=0 fetched=0 skipped=0
 	local -a queue=()
 	local i; for i in $(seq 1 "$total"); do
-		[ -n "${pkg_filename[$i]}" ] && [ -n "${pkg_sha256[$i]}" ] || die "missing metadata for ${pkg_name[$i]} in repo ${pkg_repo[$i]}"
+		pkgname=${pkg_name[$i]}
+		# Same two guards install_one_alpm applies to a system bootstrap
+		# merge, mirrored here: without them, an app whose real dependency
+		# closure includes glibc (fastfetch does) ends up with a full
+		# *second* copy of it -- headers, static libs, locale/zoneinfo data,
+		# glibc's own utility binaries -- duplicated into its own directory
+		# even though FloraOS's own from-source glibc is already on the
+		# system's default library search path (see app_wrapper_write's
+		# LD_LIBRARY_PATH, which is additive, not exclusive). Found by
+		# actually measuring `fau install fastfetch`'s own app dir: 75MB for
+		# what should be a small login-banner tool, ~14MB of it glibc's own
+		# headers alone. "filesystem" is Arch/Artix's own base-bootstrap
+		# noise (see install_one_alpm's own comment) -- never wanted in an
+		# app dir any more than in FAU_ROOT.
+		if { [ "$pkgname" != "$name" ] && [ -n "$(system_get_version "$pkgname")" ]; } || [ "$pkgname" = "filesystem" ]; then
+			skipped=$((skipped + 1))
+			continue
+		fi
+		[ -n "${pkg_filename[$i]}" ] && [ -n "${pkg_sha256[$i]}" ] || die "missing metadata for $pkgname in repo ${pkg_repo[$i]}"
 		queue+=("$i")
 	done
 
 	# Fetch every queued package's *compressed* archive in parallel first;
 	# extract+merge strictly one at a time after -- see install_one_alpm's
-	# own comment (and alpm_fetch_job's) for why. No etc/usr-include strip
-	# here (unlike install_one_alpm): an isolated app directory never
-	# touches the real /etc, so there's nothing to guard against.
+	# own comment (and alpm_fetch_job's) for why. No etc/ strip here (unlike
+	# install_one_alpm): an isolated app directory never touches the real
+	# /etc, so there's nothing to guard against there. usr/include *is*
+	# stripped, same as install_one_alpm -- dev headers are never needed by
+	# an app at runtime, isolated or not.
 	alpm_parallel_fetch "$jobs_dir" 4 "${queue[@]}"
 
 	for i in "${queue[@]}"; do
@@ -1286,6 +1367,25 @@ app_install_one_alpm() {
 		# what we just extracted. u+rX ensures we always can.
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
+		rm -rf "$extract_dir/usr/include"
+		# Some Arch/Artix packages (found via neovim's lua51-lpeg dependency)
+		# bake an absolute path into a DT_NEEDED entry (e.g.
+		# "/usr/lib/lua/5.1/lpeg.so") instead of a bare soname. That's
+		# invisible for a system-root merge (FAU_ROOT really is "/") but
+		# breaks an isolated app outright: the dynamic linker only consults
+		# LD_LIBRARY_PATH/RPATH for a *bare* soname, so an absolute
+		# DT_NEEDED bypasses the app wrapper's own LD_LIBRARY_PATH entirely
+		# and fails with "cannot open shared object file" even though the
+		# dependency is correctly bundled right here -- confirmed by
+		# reproducing it in a real chroot of the built rootfs, not just by
+		# reading the code. fauelf (tools/fauelf) rewrites it to a bare
+		# basename in place; process substitution (not a `find | while`
+		# pipe) keeps this loop in the current shell so a real fauelf
+		# failure's die() actually aborts the install instead of just
+		# exiting an unrelated pipe subshell.
+		while IFS= read -r -d '' f; do
+			"$FAU_ELF_PATCH" "$f" || die "fauelf failed patching $f"
+		done < <(find "$extract_dir" -type f -print0)
 		if [ "${pkg_name[$i]}" = "$name" ]; then
 			version=${pkg_version[$i]}
 			target_files=$(cd "$extract_dir" && find usr/bin bin -maxdepth 1 -type f 2>/dev/null; true)
@@ -1294,7 +1394,7 @@ app_install_one_alpm() {
 		rm -rf "$extract_dir"
 	done
 	rm -rf "$jobs_dir"
-	log "$name: fetched $fetched, used cache for $cached -- merged into $app_dir"
+	log "$name: fetched $fetched, used cache for $cached, skipped $skipped (already provided by the base system or base-system bootstrap noise) -- merged into $app_dir"
 
 	for relbin in $target_files; do
 		app_wrapper_write "$name" "$app_dir" "$relbin"
@@ -1360,6 +1460,194 @@ cmd_list() {
 	done
 }
 
+# --- export/import (system.json + app configs, bundled as one .flora file) --
+# A "system.flora" is a tar+zstd archive (same format as fau's own
+# .fau.tar.zst packages -- just given a .flora extension so it reads as a
+# system-level artifact, not a package) containing:
+#   system.json    base packages (from FAU_SYSTEM_JSON) + installed apps
+#                  (from FAU_APPS_JSON) + a configs map of every config file
+#                  path found under each installed app's own config/ dir,
+#                  e.g. "configs":{"kitty":["kitty.conf","startup.conf"]}
+#   configs/<app>/<relpath>   the actual config file contents, relpath
+#                             matching the manifest's configs entry for <app>
+# No zip/unzip anywhere in FloraOS (would be a new, otherwise-unjustified
+# dependency) -- tar+zstd is already required for fau itself, so this reuses
+# it rather than vendoring an archiver purely for this.
+#
+# Each of the three top-level keys is written on its own single line with no
+# embedded newlines, so manifest_section_get can pull one out with a plain
+# grep/sed instead of a real JSON parser (consistent with json_get_version's
+# own hand-rolled approach elsewhere in this file).
+
+manifest_section_packages() {
+	local first=1
+	printf '{'
+	local n
+	for n in $(system_list_names); do
+		[ "$first" -eq 1 ] || printf ','
+		first=0
+		printf '"%s":{"version":"%s"}' "$(json_escape "$n")" "$(json_escape "$(system_get_version "$n")")"
+	done
+	printf '}'
+}
+
+manifest_section_apps() {
+	local first=1
+	printf '{'
+	local n
+	for n in $(json_list_names "$FAU_APPS_JSON"); do
+		[ "$first" -eq 1 ] || printf ','
+		first=0
+		printf '"%s":{"version":"%s"}' "$(json_escape "$n")" "$(json_escape "$(json_get_version "$FAU_APPS_JSON" "$n")")"
+	done
+	printf '}'
+}
+
+manifest_section_configs() {
+	# manifest_section_configs <dest-dir> -- as a side effect, copies every
+	# config file found under each installed app's config/ dir into
+	# <dest-dir>/<app>/<relpath>; prints the matching configs JSON object.
+	local dest_root=$1 first=1
+	printf '{'
+	local n
+	for n in $(json_list_names "$FAU_APPS_JSON"); do
+		local app_dir="${FAU_APPS_DIR%/}/$n" cfg_dir
+		cfg_dir="$app_dir/config"
+		[ -d "$cfg_dir" ] || continue
+		local relpaths; relpaths=$(cd "$cfg_dir" && find . -type f -printf '%P\n' 2>/dev/null)
+		[ -n "$relpaths" ] || continue
+		mkdir -p "$dest_root/$n"
+		local rel
+		while IFS= read -r rel; do
+			[ -z "$rel" ] && continue
+			mkdir -p "$dest_root/$n/$(dirname "$rel")"
+			cp -a "$cfg_dir/$rel" "$dest_root/$n/$rel"
+		done <<< "$relpaths"
+		[ "$first" -eq 1 ] || printf ','
+		first=0
+		printf '"%s":[' "$(json_escape "$n")"
+		local rfirst=1
+		while IFS= read -r rel; do
+			[ -z "$rel" ] && continue
+			[ "$rfirst" -eq 1 ] || printf ','
+			rfirst=0
+			printf '"%s"' "$(json_escape "$rel")"
+		done <<< "$relpaths"
+		printf ']'
+	done
+	printf '}'
+}
+
+manifest_section_get() {
+	# manifest_section_get <file> <key> -> the raw value for a top-level key
+	# written on its own line by cmd_export (e.g. `{"a":{"version":"1"}}`),
+	# trailing comma stripped
+	local file=$1 key=$2
+	grep "^\"$key\":" "$file" | sed -E "s/^\"$key\"://; s/,\$//"
+}
+
+configs_names() {
+	# configs_names <configs-section-value> -> app names (keys) in it, one
+	# per line -- value looks like {"kitty":["kitty.conf","x/y.conf"],...}
+	printf '%s' "$1" | grep -oE '"[^"]+":\[' | sed -E 's/^"//; s/":\[$//'
+}
+
+configs_files_for() {
+	# configs_files_for <configs-section-value> <name> -> relpaths, one per line
+	local value=$1 name=$2
+	local bracket; bracket=$(printf '%s' "$value" | grep -oE "\"$name\":\[[^]]*\]")
+	[ -n "$bracket" ] || return 0
+	bracket=${bracket#*[}
+	bracket=${bracket%]}
+	[ -z "$bracket" ] && return 0
+	printf '%s' "$bracket" | grep -oE '"[^"]*"' | sed -E 's/^"//; s/"$//'
+}
+
+cmd_export() {
+	[ $# -le 1 ] || die "export takes at most one output file"
+	local out=${1:-system.flora}
+	state_init
+	apps_state_init
+
+	local work; work=$(mktemp -d)
+	mkdir -p "$work/configs"
+	{
+		echo '{'
+		printf '"packages":%s,\n' "$(manifest_section_packages)"
+		printf '"apps":%s,\n' "$(manifest_section_apps)"
+		printf '"configs":%s\n' "$(manifest_section_configs "$work/configs")"
+		echo '}'
+	} > "$work/system.json"
+
+	tar -I zstd -cf "$out" -C "$work" system.json configs
+	rm -rf "$work"
+	log "exported system.json + app configs to $out"
+}
+
+cmd_import() {
+	[ $# -le 1 ] || die "import takes at most one archive file"
+	local archive=${1:-system.flora}
+	[ -f "$archive" ] || die "no such file: $archive"
+	apps_state_init
+
+	local work; work=$(mktemp -d)
+	tar -I zstd -xf "$archive" -C "$work"
+	[ -f "$work/system.json" ] || die "$archive has no system.json -- not a fau export"
+
+	# Reinstall any app the manifest lists that isn't installed here yet, so
+	# there's somewhere for its config to land; an already-installed app is
+	# left as-is (only its config gets restored) rather than force-reinstalled
+	# over a version the user may have deliberately changed since export.
+	local apps_tmp; apps_tmp=$(mktemp)
+	manifest_section_get "$work/system.json" apps > "$apps_tmp"
+	local n
+	for n in $(json_list_names "$apps_tmp"); do
+		local want; want=$(json_get_version "$apps_tmp" "$n")
+		local have; have=$(json_get_version "$FAU_APPS_JSON" "$n")
+		if [ -z "$have" ]; then
+			log "app $n isn't installed -- installing it so its exported config has somewhere to go"
+			# Run in a subshell: app_install_one can die() (e.g. package not
+			# found in any repo), which calls exit directly and would abort
+			# this whole import instead of just skipping one app's config --
+			# exit inside a subshell only ends the subshell, so the loop
+			# continues to restore whatever it still can.
+			if ! (app_install_one "$n"); then
+				log "warning: couldn't install $n -- its exported config will be skipped"
+			fi
+		elif [ -n "$want" ] && [ "$have" != "$want" ]; then
+			log "note: $n is installed at $have, export was made at $want -- leaving the installed version as-is, only restoring its config"
+		fi
+	done
+	rm -f "$apps_tmp"
+
+	local configs_value; configs_value=$(manifest_section_get "$work/system.json" configs)
+	local restored=0 skipped=0
+	for n in $(configs_names "$configs_value"); do
+		local app_dir="${FAU_APPS_DIR%/}/$n"
+		if [ ! -d "$app_dir" ]; then
+			log "warning: app $n has no directory under $FAU_APPS_DIR -- skipping its config"
+			skipped=$((skipped + 1))
+			continue
+		fi
+		mkdir -p "$app_dir/config"
+		local rel
+		while IFS= read -r rel; do
+			[ -z "$rel" ] && continue
+			local src="$work/configs/$n/$rel"
+			if [ ! -f "$src" ]; then
+				log "warning: $archive is missing $n/$rel -- skipping"
+				continue
+			fi
+			mkdir -p "$app_dir/config/$(dirname "$rel")"
+			cp -a "$src" "$app_dir/config/$rel"
+			restored=$((restored + 1))
+		done <<< "$(configs_files_for "$configs_value" "$n")"
+	done
+
+	rm -rf "$work"
+	log "import complete: restored $restored config file(s), skipped $skipped app(s) with no installed directory"
+}
+
 main() {
 	[ $# -ge 1 ] || { usage; exit 1; }
 	local cmd=$1; shift
@@ -1374,6 +1662,8 @@ main() {
 		bootstrap-apply) cmd_bootstrap_apply "$@" ;;
 		repo-add) repo_add "$@" ;;
 		repo-index) repo_index "$@" ;;
+		export) cmd_export "$@" ;;
+		import) cmd_import "$@" ;;
 		-h|--help|help) usage ;;
 		*) die "unknown command: $cmd (see --help)" ;;
 	esac

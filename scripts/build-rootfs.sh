@@ -60,6 +60,15 @@ MANDATORY_ORDER=(
 	# its staged files directly, see scripts/recipes/curl.sh).
 	mbedtls
 	curl
+	# kmod: must build before eudev -- eudev's own configure links against
+	# kmod's staged pkgconfig file (see eudev.sh's PKG_CONFIG_LIBDIR).
+	# Real GPU driver modules (amdgpu/nouveau, see linux-lts.sh) and
+	# anything else not built into vmlinuz can't be loaded without this.
+	kmod
+	# eudev: libinput (and mesa/wlroots, fetched later via fau's alpm
+	# fallback) hard-require libudev -- see scripts/recipes/eudev.sh and
+	# ARCHITECTURE.md's GUI-readiness section.
+	eudev
 )
 BUILD_ORDER=("${MANDATORY_ORDER[@]}" ${EXTRA_PACKAGES:-})
 
@@ -69,7 +78,11 @@ pinned_kernel=$(version_field linux-lts 1)
 
 # autoreconf: procps-ng only publishes a raw source-archive tarball (no
 # generated configure), unlike every other package here -- see its recipe.
-for cmd in curl tar zstd make gcc sha256sum rsync fakeroot autoreconf; do require_cmd "$cmd"; done
+# gperf: eudev's configure.ac unconditionally requires it (see
+# scripts/recipes/eudev.sh) -- the only new build-host tool this project's
+# GUI-readiness work added; everything else needed (blkid, kmod, selinux)
+# degrades gracefully when absent instead of failing the build.
+for cmd in curl tar zstd make gcc sha256sum rsync fakeroot autoreconf gperf; do require_cmd "$cmd"; done
 
 already_built() {
 	# already_built <name> -- true if the repo already has this exact
@@ -181,7 +194,46 @@ main() {
 		"$FLORA_ROOT/tools/floralogin/floralogin.c" -lcrypt
 	chmod 755 "$ROOTFS_DIR/usr/bin/floralogin"
 
-	log "=== branding: fastfetch (via fau's alpm fallback, not the minimal base) ==="
+	log "=== compiling fauelf (fau's own absolute-DT_NEEDED fixup tool) ==="
+	# Not a fau package either, same reasoning as floralogin above. Unlike
+	# floralogin, fauelf needs no FloraOS-specific header/lib (just plain
+	# libc: stat/open/read/write/malloc/string) and genuinely needs to run
+	# in both places: right here on this *build host* (fau's own
+	# app_install_one_alpm calls it below, before this rootfs is ever
+	# booted) and later inside the booted image itself (an end user running
+	# `fau install <pkg>` after boot). One plain build covers both --
+	# relies on the same build-host/FloraOS glibc ABI compatibility this
+	# project's alpm fallback already depends on everywhere else (see
+	# ARCHITECTURE.md).
+	gcc -Wall -Wextra -O2 \
+		-o "$ROOTFS_DIR/usr/bin/fauelf" \
+		"$FLORA_ROOT/tools/fauelf/fauelf.c"
+	chmod 755 "$ROOTFS_DIR/usr/bin/fauelf"
+
+	log "=== compiling floraseat (FloraOS's own seatd-protocol-compatible seat daemon) ==="
+	# Not a fau package, same reasoning as floralogin/fauelf above: FloraOS-
+	# authored source, not a fetched upstream tarball. Plain libc only --
+	# no FloraOS-specific header/lib to link against (unlike floralogin's
+	# libcrypt), so no -I/-L pointed at $ROOTFS_DIR needed here.
+	gcc -Wall -Wextra -O2 \
+		-o "$ROOTFS_DIR/usr/bin/floraseat" \
+		"$FLORA_ROOT/tools/floraseat/floraseat.c"
+	chmod 755 "$ROOTFS_DIR/usr/bin/floraseat"
+
+	log "=== compiling florauser (FloraOS's own useradd/passwd/groupadd) ==="
+	# Not a fau package, same reasoning as floralogin/fauelf/floraseat above:
+	# FloraOS-authored source, not a fetched upstream tarball. Needs
+	# libcrypt for crypt_gensalt()/crypt_r() (its own `florauser passwd`
+	# command), so it's linked the same way floralogin is above: against
+	# this rootfs's own just-installed crypt.h/libcrypt.so.1 via -I/-L,
+	# not whatever libcrypt the build host happens to have.
+	gcc -Wall -Wextra -O2 \
+		-I"$ROOTFS_DIR/usr/include" -L"$ROOTFS_DIR/usr/lib" \
+		-o "$ROOTFS_DIR/usr/bin/florauser" \
+		"$FLORA_ROOT/tools/florauser/florauser.c" -lcrypt
+	chmod 755 "$ROOTFS_DIR/usr/bin/florauser"
+
+	log "=== libgcc: base C++ runtime (libgcc_s.so.1), via fau's alpm fallback ==="
 	# kitty was deliberately left out here: its dependency closure (Python3 +
 	# Mesa + X11/Wayland) is ~773MB, and none of it does anything without a
 	# display server FloraOS doesn't have yet (see ARCHITECTURE.md). Install
@@ -192,13 +244,58 @@ main() {
 	# these two files' data, so that's the real precondition for this to
 	# succeed.
 	if [ -f /etc/pacman.d/mirrorlist ] && [ -f /etc/pacman.conf ]; then
-		# libgcc (libgcc_s.so.1, C++ exception-handling runtime) isn't a
-		# declared dependency of fastfetch -- Arch/Artix assume it's always
-		# present as a base-system package, so Arch's own dependency
-		# resolution never lists it explicitly for anything that needs it.
-		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap libgcc fastfetch
+		# libgcc (libgcc_s.so.1, C++ exception-handling runtime) is real
+		# base-system infrastructure -- other C++ binaries can reasonably
+		# assume it's already present, the same way Arch/Artix itself
+		# assumes it (it's not a declared dependency of fastfetch below,
+		# which needs it, for exactly that reason). Stays bootstrapped
+		# (merged into FAU_ROOT), unlike fastfetch itself.
+		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap libgcc
+
+		log "=== branding: fastfetch, installed as an isolated app under root's own ~/apps/ ==="
+		# Unlike libgcc, fastfetch isn't something the system needs to run --
+		# it's a pure cosmetic branding touch, so it goes through the exact
+		# `fau install` path any end user would use for an optional app,
+		# landing in $HOME/apps/fastfetch/ (root's own apps dir, since root
+		# is the only login here -- see README.md/floralogin) instead of
+		# being merged into the system root. It still finds libgcc_s.so.1
+		# fine despite being isolated: the app wrapper's LD_LIBRARY_PATH
+		# (see app_wrapper_write in tools/fau/fau) is additive, prepended in
+		# front of the dynamic linker's own default trusted search path
+		# (ld.so.cache, rebuilt below) -- it doesn't replace it, so a
+		# genuinely base-system library doesn't need to be duplicated into
+		# every isolated app's own directory just to be found.
+		# FAU_ROOT must still be set here even though `install` never merges
+		# into it -- FAU_CACHE_DIR (the alpm sync-db/index cache) derives
+		# from it, defaulting to "/" otherwise, which tried to write into
+		# this *build host's own* /var/cache/fau (permission denied) instead
+		# of staying scoped under work/ like the rest of this script. Reusing
+		# the same ROOTFS_DIR as the libgcc bootstrap call above also means
+		# this reuses that call's already-fetched sync db instead of
+		# re-fetching/re-indexing it a second time.
+		# FAU_ELF_PATCH: fauelf isn't on this build host's own PATH (it's
+		# only ever installed *inside* the rootfs) -- point fau straight at
+		# the copy just compiled above instead.
+		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" FAU_APPS_DIR="$ROOTFS_DIR/root/apps" \
+			FAU_ELF_PATCH="$ROOTFS_DIR/usr/bin/fauelf" "$FAU_BIN" install fastfetch
+
+		# app_wrapper_write (tools/fau/fau) bakes the exact $FAU_APPS_DIR path
+		# it was given straight into the wrapper script's HOME/XDG_*/exec
+		# lines -- correct for the normal case (fau install run on the live
+		# system it'll actually execute on), but here $FAU_APPS_DIR was this
+		# *build host's* staging path ($ROOTFS_DIR/root/apps), not the path
+		# it'll run from once booted (/root/apps). Left alone, the wrapper's
+		# `exec` line pointed at a path that only exists on this build
+		# machine -- confirmed by an actual boot: "No such file or
+		# directory" logging in, from a real ./floraiso test run, not
+		# inferred. Rewriting out the staging-root prefix is exactly enough:
+		# every path the wrapper references is $ROOTFS_DIR plus the same
+		# suffix it'll have at "/" once booted.
+		if [ -f "$ROOTFS_DIR/root/apps/.bin/fastfetch" ]; then
+			sed -i "s|$ROOTFS_DIR||g" "$ROOTFS_DIR/root/apps/.bin/fastfetch"
+		fi
 	else
-		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- skipping fastfetch"
+		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- skipping libgcc/fastfetch"
 	fi
 
 	log "=== applying /etc skeleton ==="
@@ -206,6 +303,20 @@ main() {
 
 	log "=== rebuilding ld.so.cache ==="
 	"$ROOTFS_DIR/usr/sbin/ldconfig" -r "$ROOTFS_DIR"
+
+	log "=== running depmod (modules.dep/modules.alias for kmod/eudev) ==="
+	# Baked in at build time, not left for boot: this image is RAM-resident
+	# and rebuilt from scratch every time anyway (see README.md), so
+	# there's no "the kernel changed since last boot" case depmod would
+	# normally exist to handle. Needs the kernel's own release string
+	# (linux-lts.sh's own `make kernelrelease` output, written to
+	# boot/kernelrelease) -- depmod defaults to `uname -r` of whatever
+	# machine runs it otherwise, which is this *build host's* kernel, not
+	# FloraOS's. Runs cross-root the same way ldconfig -r just did above:
+	# a plain userspace indexing tool over files, no actual module loading
+	# involved.
+	kernel_release=$(cat "$ROOTFS_DIR/boot/kernelrelease")
+	"$ROOTFS_DIR/usr/bin/depmod" -b "$ROOTFS_DIR" "$kernel_release"
 
 	log "rootfs ready at $ROOTFS_DIR"
 }

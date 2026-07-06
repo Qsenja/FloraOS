@@ -20,7 +20,7 @@ login actually succeeds and reaches a shell (driven through QEMU's serial
 console — the test types the login itself, it doesn't just watch for a
 shell to appear on its own). Concretely, right now:
 
-- **29 packages** in the base image, every one built from pinned upstream
+- **30 packages** in the base image, every one built from pinned upstream
   source on this machine (see [docs/MANIFEST.md](docs/MANIFEST.md) for the
   full list and a one-line reason for each) — kernel, glibc, sysvinit,
   OpenRC, ncurses, bash, coreutils, util-linux, e2fsprogs, iproute2, dhcpcd,
@@ -30,7 +30,19 @@ shell to appear on its own). Concretely, right now:
   procps-ng/hostname/kbd so OpenRC's sysctl/hostname/keymaps services
   actually run instead of failing non-fatally, plus libxcrypt for password
   verification, plus curl/mbedtls so `fau` can actually fetch anything after
-  boot (see below), plus fastfetch as a deliberate branding touch.
+  boot (see below), plus eudev (device nodes/hotplug for libinput and any
+  Wayland compositor), plus fastfetch as a deliberate branding touch.
+- **GUI-readiness**: the system-level prerequisites for a Wayland WM/DE now
+  exist — eudev for device nodes, **floraseat**
+  ([tools/floraseat](tools/floraseat)), FloraOS's own from-scratch daemon
+  speaking the real seatd wire protocol (so precompiled wlroots/libseat
+  fetched via `fau install <wm>` talks to it unmodified, without this
+  project taking on meson/ninja just to build real seatd), a generic
+  simpledrm/sysfb KMS driver built into the kernel, and `floralogin` now
+  setting up `XDG_RUNTIME_DIR`. See ARCHITECTURE.md's GUI-readiness section
+  for the full picture and what's still explicitly not done (VT-switching,
+  real GPU-accelerated drivers, and the WM/DE itself — still purely opt-in
+  via `fau install`, same as any other app).
 - **`fau` can install real Arch/Artix packages with zero `pacman` involved**,
   including from inside an already-booted FloraOS system, not just at build
   time. It used to shell out to the real `pacman -Sp` for dependency
@@ -69,12 +81,17 @@ shell to appear on its own). Concretely, right now:
 What's explicitly *not* done yet (all documented with reasoning in
 [ARCHITECTURE.md](ARCHITECTURE.md)'s TODO section):
 
-- **No GUI/display server** (X11 or Wayland). `fau install` can fetch
-  GUI apps' files via its alpm (Arch/Artix repo) fallback, but they have nowhere to
-  render yet. `kitty` was deliberately left out of the default ISO for this
-  reason — its dependency closure is ~773MB of Python3/Mesa/X11/Wayland with
-  nothing to run it on; `fau install kitty` works today if you want the
-  files anyway.
+- **No WM/DE bundled in the base image** (still opt-in via `fau install`,
+  same as any other app) — but the prerequisites now exist (eudev,
+  floraseat, a built-in generic KMS driver; see above and ARCHITECTURE.md).
+  `kitty` is still deliberately left out of the default ISO — its
+  dependency closure is ~773MB of Python3/Mesa/X11/Wayland; `fau install
+  kitty` works today if you want the files.
+- **No VT-switching, no real GPU-accelerated driver** — floraseat is
+  single-seat/non-VT-bound for now (fine for one login session at a time),
+  and the kernel only ships a generic firmware-framebuffer KMS driver, not
+  i915/amdgpu/nouveau (add the one your hardware needs once this actually
+  blocks someone — see ARCHITECTURE.md).
 - No persistent disk install — FloraOS currently only boots as a live,
   RAM-resident image.
 
@@ -122,6 +139,9 @@ ARCHITECTURE.md         # design decisions, why, and the current TODO list
 assets/                 # fastfetch logo + config shipped into the rootfs
 tools/fau/               # FloraOS's package manager
 tools/floralogin/        # FloraOS's own PAM-free login (see ARCHITECTURE.md)
+tools/floraseat/         # FloraOS's own seatd-protocol-compatible seat daemon
+tools/florauser/         # FloraOS's own useradd/passwd/groupadd equivalent
+tools/fauelf/            # FloraOS's own absolute-DT_NEEDED fixup tool
 scripts/                # rootfs + ISO build scripts and per-package build recipes
 work/                   # build output (gitignored) -- sources, staged builds, rootfs, fau repo
 ```
@@ -158,5 +178,24 @@ user needs after boot.
 fau bootstrap-export system.json   # dump the exact base-system package set
 fau bootstrap-apply system.json    # reproduce that exact package set on another machine
 ```
+
+`fau export`/`fau import` are the user-facing counterpart: `fau export` bundles
+a fresh `system.json` (base packages + installed apps + every config file
+found under each app's own `~/apps/<name>/config/`) together with the actual
+config file contents into one `.flora` archive — a tar+zstd archive (the same
+format as fau's own `.fau.tar.zst` packages) rather than a `.zip`, since
+FloraOS ships no zip/unzip and tar+zstd is already a base dependency. `fau
+import` reads that archive back, (re)installing any app it lists that isn't
+already present so there's somewhere for its config to land, then restores
+every listed config file into place under `~/apps/<name>/config/`:
+
+```
+fau export [file]     # -> system.flora by default
+fau import [file]     # <- system.flora by default
+```
+
+A `fau backup` command (a full-root snapshot, restorable from the GRUB boot
+menu) is planned but not yet implemented — see ARCHITECTURE.md's TODO list for
+why it needs more than just `fau` changes.
 
 See `tools/fau/fau --help` for the full command list.

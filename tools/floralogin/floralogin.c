@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
 #include <crypt.h>
@@ -104,6 +106,33 @@ int main(void) {
 		}
 		if (chdir(pw->pw_dir) != 0) {
 			chdir("/");
+		}
+
+		/* XDG_RUNTIME_DIR: no session manager exists yet (no logind, no
+		 * elogind -- see ARCHITECTURE.md) to set this up the usual way,
+		 * but any Wayland compositor (mango, sway, ...) hard-requires it
+		 * at startup. /run is already RAM-backed as part of the whole
+		 * initramfs-resident image (see README.md), so a plain mkdir
+		 * here is enough -- no separate tmpfs mount needed. Root-owned
+		 * 0700 per the XDG base-dir spec; failure here is non-fatal
+		 * (falls through to a login shell either way), same "warn and
+		 * continue" spirit as floraseat's own socket-group setup. */
+		{
+			char rundir[64];
+			int len = snprintf(rundir, sizeof rundir, "/run/user/%d", (int)pw->pw_uid);
+			if (len > 0 && (size_t)len < sizeof rundir) {
+				if (mkdir("/run/user", 0755) != 0 && errno != EEXIST) {
+					/* ignore -- best effort */
+				}
+				if (mkdir(rundir, 0700) != 0 && errno != EEXIST) {
+					fprintf(stderr, "floralogin: warning: could not create %s: %s\n",
+						rundir, strerror(errno));
+				} else {
+					chown(rundir, pw->pw_uid, pw->pw_gid);
+					chmod(rundir, 0700);
+					setenv("XDG_RUNTIME_DIR", rundir, 1);
+				}
+			}
 		}
 
 		const char *shell = (pw->pw_shell[0] != '\0') ? pw->pw_shell : "/usr/bin/bash";
