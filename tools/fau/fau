@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+# fau — FloraOS's package manager.
+# Package format: <name>-<version>.fau.tar.zst, containing:
+#   pkginfo   key=value metadata (name, version, description, depends, bin)
+#   files/    payload
+#
+# Two install modes:
+#   install / remove / list   — system packages, merged into FAU_ROOT (/usr, /etc, ...)
+#   app-install / app-remove / app-list — user apps, each isolated under
+#     FAU_APPS_DIR/<name>/ with its own config/cache/data/logs, never touching
+#     the system root. See "bin" in pkginfo: comma-separated relative paths
+#     under files/ that should get a PATH-visible wrapper.
+set -euo pipefail
+
+FAU_ROOT="${FAU_ROOT:-/}"
+FAU_REPO_DIR="${FAU_REPO_DIR:-/etc/fau/repo}"
+FAU_STATE_DIR="${FAU_ROOT%/}/var/lib/fau"
+FAU_CACHE_DIR="${FAU_ROOT%/}/var/cache/fau/pkg"
+FAU_SYSTEM_JSON="${FAU_STATE_DIR}/system.json"
+
+FAU_APPS_DIR="${FAU_APPS_DIR:-$HOME/apps}"
+FAU_APPS_BIN_DIR="${FAU_APPS_DIR}/.bin"
+FAU_APPS_JSON="${FAU_APPS_DIR}/.fau-apps.json"
+
+die() { echo "fau: error: $*" >&2; exit 1; }
+log() { echo "fau: $*" >&2; }
+
+usage() {
+	cat <<'EOF'
+usage: fau <command> [args]
+
+commands:
+  install <pkg> [pkg ...]   install system package(s) into FAU_ROOT, with dependencies
+  remove <pkg> [pkg ...]    remove system package(s) (files only, no dependency check)
+  list                      list installed system packages and versions
+  export [file]             write system.json to file (default: stdout)
+  apply <file>              install the exact system package set recorded in file
+
+  app-install <pkg> [...]  install user app(s) into FAU_APPS_DIR/<name>/, isolated
+  app-remove <pkg> [...]    remove user app(s) and their PATH wrappers
+  app-list                 list installed user apps and versions
+
+  repo-add <archive>        add a built .fau.tar.zst to the local repo and index it
+  repo-index                rebuild repo.json from the archives present in the repo dir
+
+environment:
+  FAU_ROOT        target root for system packages (default: /)
+  FAU_REPO_DIR    directory holding .fau.tar.zst archives + repo.json (default: /etc/fau/repo)
+  FAU_APPS_DIR    directory for isolated user apps (default: $HOME/apps)
+EOF
+}
+
+json_escape() {
+	# minimal JSON string escaping for the fields we actually emit (no control chars expected)
+	local s=$1
+	s=${s//\\/\\\\}
+	s=${s//\"/\\\"}
+	printf '%s' "$s"
+}
+
+pkginfo_field() {
+	# pkginfo_field <pkginfo-file> <key>
+	grep "^$2=" "$1" 2>/dev/null | head -n1 | cut -d'=' -f2- || true
+}
+
+state_init() {
+	mkdir -p "$FAU_STATE_DIR" "$FAU_CACHE_DIR"
+	[ -f "$FAU_SYSTEM_JSON" ] || printf '{"packages":{}}\n' > "$FAU_SYSTEM_JSON"
+}
+
+apps_state_init() {
+	mkdir -p "$FAU_APPS_DIR" "$FAU_APPS_BIN_DIR"
+	[ -f "$FAU_APPS_JSON" ] || printf '{"packages":{}}\n' > "$FAU_APPS_JSON"
+}
+
+# --- manifest (system.json / apps.json) read/write --------------------------
+# Flat schema only: {"packages":{"name":{"version":"x"},...}}. Hand-rolled
+# parsing is fine at this scale; revisit if the schema grows. Both
+# system.json and the per-user apps.json share this format and these helpers,
+# parameterized by which file to operate on.
+
+json_get_version() {
+	# json_get_version <file> <name>  -> prints version or nothing
+	local file=$1 name=$2
+	grep -o "\"$name\"[[:space:]]*:[[:space:]]*{[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$file" 2>/dev/null \
+		| sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' || true
+}
+
+json_list_names() {
+	local file=$1
+	grep -oE '"[^"]+"[[:space:]]*:[[:space:]]*\{[[:space:]]*"version"' "$file" 2>/dev/null \
+		| sed -E 's/^"([^"]+)".*/\1/' || true
+}
+
+json_set() {
+	# json_set <file> <name> <version>  — add or update an entry
+	local file=$1 name=$2 version=$3
+	local tmp; tmp=$(mktemp)
+	{
+		echo '{"packages":{'
+		local first=1
+		for n in $(json_list_names "$file"); do
+			[ "$n" = "$name" ] && continue
+			local v; v=$(json_get_version "$file" "$n")
+			[ $first -eq 1 ] || echo ','
+			first=0
+			printf '"%s":{"version":"%s"}' "$(json_escape "$n")" "$(json_escape "$v")"
+		done
+		[ $first -eq 1 ] || echo ','
+		printf '"%s":{"version":"%s"}' "$(json_escape "$name")" "$(json_escape "$version")"
+		echo
+		echo '}}'
+	} > "$tmp"
+	mv "$tmp" "$file"
+}
+
+json_unset() {
+	local file=$1 name=$2
+	local tmp; tmp=$(mktemp)
+	{
+		echo '{"packages":{'
+		local first=1
+		for n in $(json_list_names "$file"); do
+			[ "$n" = "$name" ] && continue
+			local v; v=$(json_get_version "$file" "$n")
+			[ $first -eq 1 ] || echo ','
+			first=0
+			printf '"%s":{"version":"%s"}' "$(json_escape "$n")" "$(json_escape "$v")"
+		done
+		echo
+		echo '}}'
+	} > "$tmp"
+	mv "$tmp" "$file"
+}
+
+system_get_version() { json_get_version "$FAU_SYSTEM_JSON" "$1"; }
+system_list_names() { json_list_names "$FAU_SYSTEM_JSON"; }
+system_set() { json_set "$FAU_SYSTEM_JSON" "$1" "$2"; }
+system_unset() { json_unset "$FAU_SYSTEM_JSON" "$1"; }
+
+# --- repo --------------------------------------------------------------------
+
+repo_json() { echo "${FAU_REPO_DIR%/}/repo.json"; }
+
+repo_index() {
+	local repo; repo=$(repo_json)
+	mkdir -p "$FAU_REPO_DIR"
+	local tmp; tmp=$(mktemp)
+	{
+		echo '{"packages":{'
+		local first=1
+		shopt -s nullglob
+		for archive in "$FAU_REPO_DIR"/*.fau.tar.zst; do
+			local work; work=$(mktemp -d)
+			tar -I zstd -xf "$archive" -C "$work" pkginfo
+			local name version sha
+			name=$(pkginfo_field "$work/pkginfo" name)
+			version=$(pkginfo_field "$work/pkginfo" version)
+			sha=$(sha256sum "$archive" | cut -d' ' -f1)
+			rm -rf "$work"
+			[ $first -eq 1 ] || echo ','
+			first=0
+			printf '"%s":{"version":"%s","file":"%s","sha256":"%s"}' \
+				"$(json_escape "$name")" "$(json_escape "$version")" \
+				"$(json_escape "$(basename "$archive")")" "$sha"
+		done
+		echo
+		echo '}}'
+	} > "$tmp"
+	mv "$tmp" "$repo"
+	log "indexed $(basename "$FAU_REPO_DIR")"
+}
+
+repo_lookup_file() {
+	# repo_lookup_file <name> -> prints archive filename
+	local name=$1 repo; repo=$(repo_json)
+	[ -f "$repo" ] || die "no repo index at $repo (run: fau repo-index)"
+	awk -v n="\"$name\"" '
+		index($0, n":{") { in_pkg=1 }
+		in_pkg && match($0, /"file":"[^"]*"/) {
+			s = substr($0, RSTART, RLENGTH)
+			sub(/"file":"/, "", s); sub(/"$/, "", s)
+			print s; exit
+		}
+	' "$repo"
+}
+
+repo_lookup_depends() {
+	local archive=$1
+	local work; work=$(mktemp -d)
+	tar -I zstd -xf "$archive" -C "$work" pkginfo
+	pkginfo_field "$work/pkginfo" depends
+	rm -rf "$work"
+}
+
+repo_add() {
+	local archive=$1
+	[ -f "$archive" ] || die "no such archive: $archive"
+	mkdir -p "$FAU_REPO_DIR"
+	cp "$archive" "$FAU_REPO_DIR/"
+	repo_index
+}
+
+# --- install/remove ----------------------------------------------------------
+
+install_one() {
+	local name=$1
+	local existing; existing=$(system_get_version "$name")
+	local file archive
+	file=$(repo_lookup_file "$name")
+	[ -n "$file" ] || die "package not found in repo: $name"
+	archive="${FAU_REPO_DIR%/}/${file}"
+
+	local depends; depends=$(repo_lookup_depends "$archive")
+	if [ -n "${depends:-}" ]; then
+		local IFS=','
+		for dep in $depends; do
+			dep=$(echo "$dep" | xargs)
+			[ -z "$dep" ] && continue
+			[ -n "$(system_get_version "$dep")" ] || install_one "$dep"
+		done
+	fi
+
+	local work; work=$(mktemp -d)
+	tar -I zstd -xf "$archive" -C "$work"
+	local version; version=$(pkginfo_field "$work/pkginfo" version)
+	mkdir -p "$FAU_ROOT"
+	cp -a "$work/files/." "$FAU_ROOT"
+	rm -rf "$work"
+
+	system_set "$name" "$version"
+	if [ -n "$existing" ]; then
+		log "upgraded $name $existing -> $version"
+	else
+		log "installed $name $version"
+	fi
+}
+
+cmd_install() {
+	[ $# -ge 1 ] || die "install requires at least one package name"
+	state_init
+	for name in "$@"; do install_one "$name"; done
+}
+
+cmd_remove() {
+	[ $# -ge 1 ] || die "remove requires at least one package name"
+	state_init
+	for name in "$@"; do
+		[ -n "$(system_get_version "$name")" ] || { log "$name is not installed, skipping"; continue; }
+		system_unset "$name"
+		log "removed $name from system.json (files left in place — fau does not track individual files yet)"
+	done
+}
+
+cmd_list() {
+	state_init
+	for n in $(system_list_names); do
+		printf '%s %s\n' "$n" "$(system_get_version "$n")"
+	done
+}
+
+cmd_export() {
+	state_init
+	if [ $# -ge 1 ]; then cp "$FAU_SYSTEM_JSON" "$1"; else cat "$FAU_SYSTEM_JSON"; fi
+}
+
+cmd_apply() {
+	[ $# -eq 1 ] || die "apply requires exactly one manifest file"
+	local manifest=$1
+	[ -f "$manifest" ] || die "no such file: $manifest"
+	state_init
+	local names
+	names=$(grep -oE '"[^"]+"[[:space:]]*:[[:space:]]*\{[[:space:]]*"version"' "$manifest" \
+		| sed -E 's/^"([^"]+)".*/\1/')
+	for n in $names; do install_one "$n"; done
+}
+
+# --- app-install/app-remove/app-list -----------------------------------------
+# Each app lives entirely under FAU_APPS_DIR/<name>/: its own files, plus
+# config/cache/data/logs subdirs. Wrapper scripts in FAU_APPS_BIN_DIR (put
+# that on PATH) set HOME/XDG_*_HOME to redirect the app into its own
+# directory before exec'ing the real binary -- works for any app that
+# follows the XDG Base Directory spec (most modern Linux software does).
+# Apps that hardcode absolute paths won't cooperate; that's a known limit,
+# not a bug.
+
+app_wrapper_write() {
+	# app_wrapper_write <name> <app-dir> <relbin>
+	local name=$1 app_dir=$2 relbin=$3
+	local cmd_name; cmd_name=$(basename "$relbin")
+	local wrapper="$FAU_APPS_BIN_DIR/$cmd_name"
+	cat > "$wrapper" <<-EOF
+	#!/bin/sh
+	export HOME="$app_dir"
+	export XDG_CONFIG_HOME="$app_dir/config"
+	export XDG_CACHE_HOME="$app_dir/cache"
+	export XDG_DATA_HOME="$app_dir/data"
+	export XDG_STATE_HOME="$app_dir/logs"
+	exec "$app_dir/$relbin" "\$@"
+	EOF
+	chmod 755 "$wrapper"
+}
+
+app_install_one() {
+	local name=$1
+	local existing; existing=$(json_get_version "$FAU_APPS_JSON" "$name")
+	local file archive
+	file=$(repo_lookup_file "$name")
+	[ -n "$file" ] || die "package not found in repo: $name"
+	archive="${FAU_REPO_DIR%/}/${file}"
+
+	local depends; depends=$(repo_lookup_depends "$archive")
+	if [ -n "${depends:-}" ]; then
+		local IFS=','
+		for dep in $depends; do
+			dep=$(echo "$dep" | xargs)
+			[ -z "$dep" ] && continue
+			[ -n "$(json_get_version "$FAU_APPS_JSON" "$dep")" ] || app_install_one "$dep"
+		done
+	fi
+
+	local work; work=$(mktemp -d)
+	tar -I zstd -xf "$archive" -C "$work"
+	local version bin; version=$(pkginfo_field "$work/pkginfo" version)
+	bin=$(pkginfo_field "$work/pkginfo" bin)
+
+	local app_dir="${FAU_APPS_DIR%/}/${name}"
+	rm -rf "$app_dir"
+	mkdir -p "$app_dir" "$app_dir/config" "$app_dir/cache" "$app_dir/data" "$app_dir/logs"
+	cp -a "$work/files/." "$app_dir"
+	cp "$work/pkginfo" "$app_dir/.pkginfo"
+	rm -rf "$work"
+
+	if [ -z "${bin:-}" ] && [ -d "$app_dir/bin" ]; then
+		bin=$(find "$app_dir/bin" -maxdepth 1 -type f -printf 'bin/%f,' 2>/dev/null)
+	fi
+	if [ -n "${bin:-}" ]; then
+		local IFS=','
+		for relbin in $bin; do
+			relbin=$(echo "$relbin" | xargs)
+			[ -z "$relbin" ] && continue
+			app_wrapper_write "$name" "$app_dir" "$relbin"
+		done
+	fi
+
+	json_set "$FAU_APPS_JSON" "$name" "$version"
+	if [ -n "$existing" ]; then
+		log "upgraded app $name $existing -> $version"
+	else
+		log "installed app $name $version into $app_dir"
+	fi
+	case ":$PATH:" in
+		*":$FAU_APPS_BIN_DIR:"*) ;;
+		*) log "note: $FAU_APPS_BIN_DIR is not on your PATH yet — add it to use $name's commands directly" ;;
+	esac
+}
+
+cmd_app_install() {
+	[ $# -ge 1 ] || die "app-install requires at least one package name"
+	apps_state_init
+	for name in "$@"; do app_install_one "$name"; done
+}
+
+cmd_app_remove() {
+	[ $# -ge 1 ] || die "app-remove requires at least one package name"
+	apps_state_init
+	for name in "$@"; do
+		[ -n "$(json_get_version "$FAU_APPS_JSON" "$name")" ] || { log "app $name is not installed, skipping"; continue; }
+		local app_dir="${FAU_APPS_DIR%/}/${name}"
+		local bin; bin=$([ -f "$app_dir/.pkginfo" ] && pkginfo_field "$app_dir/.pkginfo" bin || true)
+		if [ -n "${bin:-}" ]; then
+			local IFS=','
+			for relbin in $bin; do
+				relbin=$(echo "$relbin" | xargs)
+				[ -z "$relbin" ] && continue
+				rm -f "$FAU_APPS_BIN_DIR/$(basename "$relbin")"
+			done
+		fi
+		rm -rf "$app_dir"
+		json_unset "$FAU_APPS_JSON" "$name"
+		log "removed app $name (including its config/cache/data/logs)"
+	done
+}
+
+cmd_app_list() {
+	apps_state_init
+	for n in $(json_list_names "$FAU_APPS_JSON"); do
+		printf '%s %s\n' "$n" "$(json_get_version "$FAU_APPS_JSON" "$n")"
+	done
+}
+
+main() {
+	[ $# -ge 1 ] || { usage; exit 1; }
+	local cmd=$1; shift
+	case "$cmd" in
+		install) cmd_install "$@" ;;
+		remove) cmd_remove "$@" ;;
+		list) cmd_list "$@" ;;
+		export) cmd_export "$@" ;;
+		apply) cmd_apply "$@" ;;
+		app-install) cmd_app_install "$@" ;;
+		app-remove) cmd_app_remove "$@" ;;
+		app-list) cmd_app_list "$@" ;;
+		repo-add) repo_add "$@" ;;
+		repo-index) repo_index "$@" ;;
+		-h|--help|help) usage ;;
+		*) die "unknown command: $cmd (see --help)" ;;
+	esac
+}
+
+main "$@"

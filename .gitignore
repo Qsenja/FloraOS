@@ -1,0 +1,8 @@
+# All build output lives here — downloaded sources, compiled toolchain,
+# staged rootfs, built fau packages. Nothing here is committed; everything
+# here is reproducible from the scripts + manifest + config.
+/work/
+
+# Final ISO output
+*.iso
+*.iso.sha256

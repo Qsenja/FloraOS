@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# floraiso — build and test the FloraOS ISO. Zero-config: `./floraiso build`
+# builds the rootfs (if needed) and the ISO in one command using the
+# defaults in config/floraos.conf.
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+	cat <<'EOF'
+usage: floraiso <command>
+
+commands:
+  build     build the rootfs (if needed) and the ISO -- config/floraos.conf
+  rootfs    build only the rootfs (work/rootfs), skip the ISO step
+  test      boot the built ISO in QEMU (see scripts/test-iso.sh)
+EOF
+}
+
+[ $# -ge 1 ] || { usage; exit 1; }
+case "$1" in
+	build) exec "$SELF_DIR/scripts/build-iso.sh" ;;
+	rootfs) exec "$SELF_DIR/scripts/build-rootfs.sh" ;;
+	test) shift; exec "$SELF_DIR/scripts/test-iso.sh" "$@" ;;
+	-h|--help|help) usage ;;
+	*) echo "floraiso: unknown command: $1" >&2; usage; exit 1 ;;
+esac
