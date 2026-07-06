@@ -1,4 +1,4 @@
-# mbedTLS: TLS backend for curl (see curl.sh) -- fau's pacman-backed fallback
+# mbedTLS: TLS backend for curl (see curl.sh) -- fau's alpm (Arch/Artix repo) fallback
 # needs an HTTP client to actually fetch anything once running inside a
 # booted FloraOS system (no pacman there to shell out to), and the mirrors
 # are HTTPS-only. Picked over OpenSSL: purpose-built for small/embedded

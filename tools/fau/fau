@@ -208,7 +208,7 @@ repo_lookup_file() {
 	# repo_lookup_file <name> -> prints archive filename, or nothing if
 	# there's no repo index yet or the name isn't in it (not an error here --
 	# callers that need a system package to exist check for an empty result
-	# themselves; app_install_one falls back to pacman on an empty result)
+	# themselves; app_install_one falls back to the alpm (Arch/Artix repo) path on an empty result)
 	local name=$1 repo; repo=$(repo_json)
 	[ -f "$repo" ] || return 0
 	awk -v n="\"$name\"" '
@@ -281,9 +281,9 @@ install_one() {
 	esac
 	local file; file=$(repo_lookup_file "$name")
 	if [ -z "$file" ]; then
-		if pacman_fallback_available; then
-			[ -z "$want_version" ] || log "warning: $name isn't in the fau repo -- falling back to pacman, exact version $want_version can't be guaranteed"
-			install_one_pacman "$name"
+		if alpm_fallback_available; then
+			[ -z "$want_version" ] || log "warning: $name isn't in the fau repo -- falling back to the alpm fallback, exact version $want_version can't be guaranteed"
+			install_one_alpm "$name"
 			return
 		fi
 		die "package not found in repo: $name (and no pacman mirrorlist/repo-list available to fall back to)"
@@ -433,8 +433,8 @@ app_install_one() {
 	esac
 	local file; file=$(repo_lookup_file "$name")
 	if [ -z "$file" ]; then
-		if pacman_fallback_available; then
-			app_install_one_pacman "$name"
+		if alpm_fallback_available; then
+			app_install_one_alpm "$name"
 			return
 		fi
 		die "package not found in repo: $name (and no pacman mirrorlist/repo-list available to fall back to)"
@@ -498,7 +498,7 @@ app_install_one() {
 	esac
 }
 
-# --- pacman-backed fallback ---------------------------------------------------
+# --- alpm (Arch/Artix repo) fallback, no pacman binary ----------------------
 # Until FloraOS has its own curated app catalog, install/app-install fall
 # back to pulling from Arch/Artix's own repos when a package isn't in the
 # local fau repo. This never shells out to the `pacman` binary at all --
@@ -516,7 +516,7 @@ app_install_one() {
 # any guarantee). GUI apps also won't have a display server to draw on yet
 # (see ARCHITECTURE.md) -- this gets you the files, not a running X11.
 
-pacman_mirrorlist_path() {
+alpm_mirrorlist_path() {
 	local candidate
 	for candidate in /etc/pacman.d/mirrorlist "${FAU_ROOT%/}/etc/fau/pacman-mirrorlist"; do
 		[ -f "$candidate" ] && { echo "$candidate"; return 0; }
@@ -524,7 +524,7 @@ pacman_mirrorlist_path() {
 	return 1
 }
 
-pacman_repo_list_path() {
+alpm_repo_list_path() {
 	local candidate
 	for candidate in /etc/pacman.conf "${FAU_ROOT%/}/etc/fau/pacman-repos"; do
 		[ -f "$candidate" ] && { echo "$candidate"; return 0; }
@@ -532,24 +532,24 @@ pacman_repo_list_path() {
 	return 1
 }
 
-pacman_fallback_available() {
-	pacman_mirrorlist_path >/dev/null 2>&1 && pacman_repo_list_path >/dev/null 2>&1
+alpm_fallback_available() {
+	alpm_mirrorlist_path >/dev/null 2>&1 && alpm_repo_list_path >/dev/null 2>&1
 }
 
-pacman_repo_names() {
+alpm_repo_names() {
 	# Priority order matters: the first repo that has a given name wins,
 	# same as pacman.conf's own section ordering.
-	local f; f=$(pacman_repo_list_path) || die "no pacman mirrorlist/repo-list available"
+	local f; f=$(alpm_repo_list_path) || die "no pacman mirrorlist/repo-list available"
 	case "$(basename "$f")" in
 		pacman.conf) grep -oE '^\[[a-zA-Z0-9_.-]+\]' "$f" | tr -d '[]' | grep -vx options ;;
 		*) grep -vE '^[[:space:]]*(#|$)' "$f" ;;
 	esac
 }
 
-pacman_mirror_url() {
-	# pacman_mirror_url <repo> <filename> -> first configured mirror's URL
+alpm_mirror_url() {
+	# alpm_mirror_url <repo> <filename> -> first configured mirror's URL
 	local repo=$1 filename=$2
-	local mirrorlist; mirrorlist=$(pacman_mirrorlist_path) || die "no pacman mirrorlist available"
+	local mirrorlist; mirrorlist=$(alpm_mirrorlist_path) || die "no pacman mirrorlist available"
 	local tmpl; tmpl=$(grep -m1 '^Server' "$mirrorlist" | sed 's/^Server[[:space:]]*=[[:space:]]*//')
 	[ -n "$tmpl" ] || die "no Server= line found in $mirrorlist"
 	local arch; arch=$(uname -m)
@@ -558,34 +558,35 @@ pacman_mirror_url() {
 	echo "$tmpl/$filename"
 }
 
-pacman_db_cache_dir() {
-	local d; d="${FAU_CACHE_DIR%/}/pacman-db"
+alpm_db_cache_dir() {
+	local d; d="${FAU_CACHE_DIR%/}/alpm-db"
 	mkdir -p "$d"
 	echo "$d"
 }
 
-pacman_fetch_repo_db() {
-	# pacman_fetch_repo_db <repo> -> local path to <repo>.db, downloading if
+alpm_fetch_repo_db() {
+	# alpm_fetch_repo_db <repo> -> local path to <repo>.db, downloading if
 	# not already cached. Prefers this build host's own already-synced copy
 	# (fast path, no network needed) over a fresh mirror fetch -- the fresh
 	# fetch is what makes this work from inside a booted FloraOS system,
 	# which has neither pacman nor a populated /var/lib/pacman/sync.
 	local repo=$1
-	local cache_dir; cache_dir=$(pacman_db_cache_dir)
+	local cache_dir; cache_dir=$(alpm_db_cache_dir)
 	local dest="$cache_dir/$repo.db"
 	if [ ! -s "$dest" ]; then
 		if [ -r "/var/lib/pacman/sync/$repo.db" ]; then
 			cp "/var/lib/pacman/sync/$repo.db" "$dest"
 		else
-			local url; url=$(pacman_mirror_url "$repo" "$repo.db")
-			curl -fsSL -o "$dest.part" "$url" || die "failed to fetch $repo.db from $url"
+			local url; url=$(alpm_mirror_url "$repo" "$repo.db")
+			log "fetching $repo.db..."
+			curl -fL --progress-bar -o "$dest.part" "$url" || die "failed to fetch $repo.db from $url"
 			mv "$dest.part" "$dest"
 		fi
 	fi
 	echo "$dest"
 }
 
-# Field separator for fau's own pacman-resolution records (index lines,
+# Field separator for fau's own alpm-resolution records (index lines,
 # resolver output) -- NOT a literal tab. bash's `read` silently collapses
 # *consecutive* IFS-whitespace separators (tab counts as whitespace no
 # matter what IFS is set to), which corrupts parsing the instant a field in
@@ -595,12 +596,12 @@ pacman_fetch_repo_db() {
 # looking like it "depended on" its own filename. \x1f (ASCII unit
 # separator) isn't whitespace, so bash's read preserves empty fields
 # correctly; verified directly (see the fix commit) before relying on it.
-PACMAN_FS=$'\x1f'
+ALPM_FS=$'\x1f'
 
-pacman_repo_index() {
-	# pacman_repo_index <repo> -> path to a cached index of every package in
+alpm_repo_index() {
+	# alpm_repo_index <repo> -> path to a cached index of every package in
 	# that repo's sync db, one line each: name<FS>version<FS>depends<FS>provides<FS>filename<FS>sha256
-	# (FS = $PACMAN_FS). Built once per repo. A real Arch repo can hold
+	# (FS = $ALPM_FS). Built once per repo. A real Arch repo can hold
 	# thousands of packages (the "world" repo here has ~7300) -- spawning a
 	# handful of awk processes per package to pull each field separately
 	# (the first version of this) meant tens of thousands of forks and was
@@ -608,14 +609,15 @@ pacman_repo_index() {
 	# extracted desc file as its argument list, tracking one package's
 	# fields across FNR==1 boundaries, does the entire repo in one process.
 	local repo=$1
-	local cache_dir; cache_dir=$(pacman_db_cache_dir)
+	local cache_dir; cache_dir=$(alpm_db_cache_dir)
 	local index="$cache_dir/$repo.index"
 	if [ ! -s "$index" ]; then
-		local db; db=$(pacman_fetch_repo_db "$repo")
+		local db; db=$(alpm_fetch_repo_db "$repo")
+		log "indexing $repo (first run only, several thousand packages)..."
 		local work; work=$(mktemp -d)
 		tar -xzf "$db" -C "$work"
 		local tmp; tmp=$(mktemp)
-		awk -v ofs="$PACMAN_FS" '
+		awk -v ofs="$ALPM_FS" '
 			function emit() {
 				if (name != "") {
 					printf "%s%s%s%s%s%s%s%s%s%s%s\n", \
@@ -645,7 +647,7 @@ pacman_repo_index() {
 	echo "$index"
 }
 
-# --- version comparison (pacman/alpm's algorithm, no pacman binary needed) ---
+# --- version comparison (alpm's own version-comparison algorithm) ---
 # Arch dependency constraints look like "glibc>=2.38-1" or "libfoo=1.2-3".
 # Verified against the real `vercmp` binary across ~300 real package
 # versions from this host's own sync dbs plus a battery of hand-picked
@@ -764,48 +766,48 @@ version_satisfies_alpm() {
 
 alpm_dep_parse() {
 	# alpm_dep_parse <dep-token> -> "name<FS>op<FS>version" (FS =
-	# $PACMAN_FS; op/version empty for an unconstrained dependency). Longer
+	# $ALPM_FS; op/version empty for an unconstrained dependency). Longer
 	# operators (>=, <=) must be checked before the bare >/< they contain
 	# as a substring.
 	local dep=$1
 	case "$dep" in
-		*'>='*) printf "%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "${dep%%>=*}" '>=' "${dep#*>=}" ;;
-		*'<='*) printf "%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "${dep%%<=*}" '<=' "${dep#*<=}" ;;
-		*'='*)  printf "%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "${dep%%=*}" '=' "${dep#*=}" ;;
-		*'>'*)  printf "%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "${dep%%>*}" '>' "${dep#*>}" ;;
-		*'<'*)  printf "%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "${dep%%<*}" '<' "${dep#*<}" ;;
-		*) printf "%s${PACMAN_FS}${PACMAN_FS}\n" "$dep" ;;
+		*'>='*) printf "%s${ALPM_FS}%s${ALPM_FS}%s\n" "${dep%%>=*}" '>=' "${dep#*>=}" ;;
+		*'<='*) printf "%s${ALPM_FS}%s${ALPM_FS}%s\n" "${dep%%<=*}" '<=' "${dep#*<=}" ;;
+		*'='*)  printf "%s${ALPM_FS}%s${ALPM_FS}%s\n" "${dep%%=*}" '=' "${dep#*=}" ;;
+		*'>'*)  printf "%s${ALPM_FS}%s${ALPM_FS}%s\n" "${dep%%>*}" '>' "${dep#*>}" ;;
+		*'<'*)  printf "%s${ALPM_FS}%s${ALPM_FS}%s\n" "${dep%%<*}" '<' "${dep#*<}" ;;
+		*) printf "%s${ALPM_FS}${ALPM_FS}\n" "$dep" ;;
 	esac
 }
 
 # --- dependency resolution (PROVIDES + version-aware, no pacman binary) -----
 
-pacman_find_provider() {
-	# pacman_find_provider <name> <op> <ver> -> "repo<FS>name<FS>version<FS>depends<FS>filename<FS>sha256"
-	# (FS = $PACMAN_FS) for the first package (searched in repo priority
+alpm_find_provider() {
+	# alpm_find_provider <name> <op> <ver> -> "repo<FS>name<FS>version<FS>depends<FS>filename<FS>sha256"
+	# (FS = $ALPM_FS) for the first package (searched in repo priority
 	# order) satisfying it, by exact name first, then by PROVIDES (virtual
 	# package) if no repo has a real package by that name.
 	local want=$1 op=$2 ver=$3
 	local repo index line
-	for repo in $(pacman_repo_names); do
-		index=$(pacman_repo_index "$repo")
+	for repo in $(alpm_repo_names); do
+		index=$(alpm_repo_index "$repo")
 		# Index lines are name/version/depends/provides/filename/sha256 (6
 		# fields) -- drop the provides field (unused by callers) so both
 		# branches of this function emit the same 6-field shape prefixed
 		# with repo; a mismatch here previously misaligned every field
 		# after it for the caller (filename/sha256 silently swapped).
-		line=$(awk -F"$PACMAN_FS" -v n="$want" -v fs="$PACMAN_FS" \
+		line=$(awk -F"$ALPM_FS" -v n="$want" -v fs="$ALPM_FS" \
 			'$1==n{print $1 fs $2 fs $3 fs $5 fs $6; exit}' "$index")
 		[ -z "$line" ] && continue
-		local pver; pver=$(printf '%s' "$line" | cut -d "$PACMAN_FS" -f2)
+		local pver; pver=$(printf '%s' "$line" | cut -d "$ALPM_FS" -f2)
 		if version_satisfies_alpm "$pver" "$op" "$ver"; then
-			printf "%s${PACMAN_FS}%s\n" "$repo" "$line"
+			printf "%s${ALPM_FS}%s\n" "$repo" "$line"
 			return 0
 		fi
 	done
-	for repo in $(pacman_repo_names); do
-		index=$(pacman_repo_index "$repo")
-		while IFS="$PACMAN_FS" read -r name version depends provides filename sha256; do
+	for repo in $(alpm_repo_names); do
+		index=$(alpm_repo_index "$repo")
+		while IFS="$ALPM_FS" read -r name version depends provides filename sha256; do
 			[ -z "$name" ] || [ -z "$provides" ] && continue
 			local prov
 			for prov in $(printf '%s' "$provides" | tr ',' ' '); do
@@ -816,7 +818,7 @@ pacman_find_provider() {
 				esac
 				[ "$prov_name" = "$want" ] || continue
 				if [ -z "$op" ] && [ -n "$prov_ver" ] || version_satisfies_alpm "$prov_ver" "$op" "$ver"; then
-					printf "%s${PACMAN_FS}%s${PACMAN_FS}%s${PACMAN_FS}%s${PACMAN_FS}%s${PACMAN_FS}%s\n" \
+					printf "%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s\n" \
 						"$repo" "$name" "$version" "$depends" "$filename" "$sha256"
 					return 0
 				fi
@@ -826,7 +828,7 @@ pacman_find_provider() {
 	return 1
 }
 
-_pacman_resolve_one() {
+_alpm_resolve_one() {
 	# Appends "repo\tname\tversion\tfilename\tsha256" lines to out_file for
 	# spec and everything it (transitively) depends on, dependencies before
 	# dependents, each name resolved at most once (seen_file). Returns 1
@@ -836,22 +838,23 @@ _pacman_resolve_one() {
 	# doesn't need to take literally.
 	local spec=$1 seen_file=$2 out_file=$3
 	local name op ver
-	IFS="$PACMAN_FS" read -r name op ver <<< "$(alpm_dep_parse "$spec")"
+	IFS="$ALPM_FS" read -r name op ver <<< "$(alpm_dep_parse "$spec")"
 
 	grep -qxF "$name" "$seen_file" 2>/dev/null && return 0
 
 	local found
-	found=$(pacman_find_provider "$name" "$op" "$ver") || return 1
+	found=$(alpm_find_provider "$name" "$op" "$ver") || return 1
 	local repo pname pversion pdepends pfilename psha256
-	IFS="$PACMAN_FS" read -r repo pname pversion pdepends pfilename psha256 <<< "$found"
+	IFS="$ALPM_FS" read -r repo pname pversion pdepends pfilename psha256 <<< "$found"
 
 	echo "$name" >> "$seen_file"
+	log "resolving dependencies: $(wc -l < "$seen_file") found so far (latest: $pname)"
 	# A dependency spec doesn't always name the real package directly -- it
 	# can reference a virtual/soname alias (e.g. "libz.so=1-64") that
 	# resolves to a differently-named real package (zlib). Without also
 	# tracking the *resolved* name, that real package gets reprocessed (and
 	# printed) once per distinct alias it's reached through -- found by
-	# comparing cava's full closure against real pacman's own resolution:
+	# comparing cava's full closure against real pacman's own resolution (used only to validate correctness, never invoked at runtime):
 	# unique package counts matched exactly, but the raw output had ~40
 	# duplicate lines.
 	if [ "$pname" != "$name" ]; then
@@ -863,21 +866,21 @@ _pacman_resolve_one() {
 		local d
 		for d in $(printf '%s' "$pdepends" | tr ',' ' '); do
 			[ -z "$d" ] && continue
-			_pacman_resolve_one "$d" "$seen_file" "$out_file" \
+			_alpm_resolve_one "$d" "$seen_file" "$out_file" \
 				|| log "warning: couldn't resolve '$d' (a dependency of $pname) in any repo -- skipping it"
 		done
 	fi
-	printf "%s${PACMAN_FS}%s${PACMAN_FS}%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "$repo" "$pname" "$pversion" "$pfilename" "$psha256" >> "$out_file"
+	printf "%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s${ALPM_FS}%s\n" "$repo" "$pname" "$pversion" "$pfilename" "$psha256" >> "$out_file"
 	return 0
 }
 
-pacman_resolve() {
-	# pacman_resolve <name> -> prints "repo<FS>name<FS>version<FS>filename<FS>sha256"
-	# (FS = $PACMAN_FS) lines for name and its full transitive closure, deps before dependents
+alpm_resolve() {
+	# alpm_resolve <name> -> prints "repo<FS>name<FS>version<FS>filename<FS>sha256"
+	# (FS = $ALPM_FS) lines for name and its full transitive closure, deps before dependents
 	local name=$1
 	local seen; seen=$(mktemp)
 	local out; out=$(mktemp)
-	if ! _pacman_resolve_one "$name" "$seen" "$out"; then
+	if ! _alpm_resolve_one "$name" "$seen" "$out"; then
 		rm -f "$seen" "$out"
 		return 1
 	fi
@@ -885,23 +888,23 @@ pacman_resolve() {
 	rm -f "$seen" "$out"
 }
 
-install_one_pacman() {
-	# System-side counterpart to app_install_one_pacman: merges into
+install_one_alpm() {
+	# System-side counterpart to app_install_one_alpm: merges into
 	# FAU_ROOT (rsync -aK, same as install_one's own merge) and records into
 	# system.json, instead of isolating into FAU_APPS_DIR. Used for base
 	# packages fetched straight from Arch/Artix's own repos rather than
 	# compiled from source (e.g. fastfetch during rootfs build).
 	local name=$1
-	local resolved; resolved=$(pacman_resolve "$name") \
-		|| die "couldn't resolve '$name' in any configured pacman repo"
+	local resolved; resolved=$(alpm_resolve "$name") \
+		|| die "couldn't resolve '$name' in any configured Arch/Artix repo"
 
 	mkdir -p "$FAU_ROOT"
 	local fetch_dir; fetch_dir=$(mktemp -d)
 	local version=""
 
-	while IFS="$PACMAN_FS" read -r repo pkgname pkgversion filename sha256; do
+	while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
 		[ -n "$pkgname" ] || continue
-		# pacman_resolve's closure for a package like fastfetch/libgcc also
+		# alpm_resolve's closure for a package like fastfetch/libgcc also
 		# includes glibc, filesystem, tzdata, etc: things FloraOS already
 		# built from its own pinned source. Without this guard those get
 		# rsync-merged over FAU_ROOT too, silently replacing FloraOS's own
@@ -935,7 +938,7 @@ install_one_pacman() {
 		if [ -r "/var/cache/pacman/pkg/$filename" ]; then
 			cp "/var/cache/pacman/pkg/$filename" "$dest"
 		else
-			local url; url=$(pacman_mirror_url "$repo" "$filename")
+			local url; url=$(alpm_mirror_url "$repo" "$filename")
 			curl -fsSL -o "$dest" "$url" || die "failed to fetch $pkgname from $url"
 		fi
 		local actual; actual=$(sha256sum "$dest" | cut -d' ' -f1)
@@ -951,7 +954,7 @@ install_one_pacman() {
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
 		# FloraOS's own skeleton (apply-skeleton.sh) is the sole source of
-		# truth for /etc -- a pacman-resolved dependency like Arch's
+		# truth for /etc -- an alpm-resolved dependency like Arch's
 		# "filesystem" package ships its own /etc/artix-release,
 		# /etc/shells, /etc/securetty, /etc/host.conf, etc, which would
 		# otherwise land straight in FAU_ROOT/etc right alongside (and
@@ -972,14 +975,14 @@ install_one_pacman() {
 	done <<< "$resolved"
 	rm -rf "$fetch_dir"
 
-	system_set "$name" "${version:-unknown (via pacman)}"
-	log "installed $name ${version:-(via pacman)} into $FAU_ROOT"
+	system_set "$name" "${version:-unknown (via alpm)}"
+	log "installed $name ${version:-(via alpm)} into $FAU_ROOT"
 }
 
-app_install_one_pacman() {
+app_install_one_alpm() {
 	local name=$1
-	local resolved; resolved=$(pacman_resolve "$name") \
-		|| die "couldn't resolve '$name' in any configured pacman repo"
+	local resolved; resolved=$(alpm_resolve "$name") \
+		|| die "couldn't resolve '$name' in any configured Arch/Artix repo"
 
 	local app_dir="${FAU_APPS_DIR%/}/${name}"
 	rm -rf "$app_dir"
@@ -987,7 +990,7 @@ app_install_one_pacman() {
 	local fetch_dir; fetch_dir=$(mktemp -d)
 	local target_files version=""
 
-	while IFS="$PACMAN_FS" read -r repo pkgname pkgversion filename sha256; do
+	while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
 		[ -n "$pkgname" ] || continue
 		[ -n "$filename" ] && [ -n "$sha256" ] || die "missing metadata for $pkgname in repo $repo"
 
@@ -995,7 +998,7 @@ app_install_one_pacman() {
 		if [ -r "/var/cache/pacman/pkg/$filename" ]; then
 			cp "/var/cache/pacman/pkg/$filename" "$dest"
 		else
-			local url; url=$(pacman_mirror_url "$repo" "$filename")
+			local url; url=$(alpm_mirror_url "$repo" "$filename")
 			curl -fsSL -o "$dest" "$url" || die "failed to fetch $pkgname from $url"
 		fi
 		local actual; actual=$(sha256sum "$dest" | cut -d' ' -f1)
@@ -1030,14 +1033,14 @@ app_install_one_pacman() {
 	# failed with "No such file or directory" on next use.
 	{
 		echo "name=$name"
-		echo "version=${version:-unknown (via pacman)}"
+		echo "version=${version:-unknown (via alpm)}"
 		printf 'bin='
 		printf '%s' "$target_files" | tr '\n' ','
 		echo
 	} > "$app_dir/.pkginfo"
 
-	json_set "$FAU_APPS_JSON" "$name" "${version:-unknown (via pacman)}"
-	log "installed app $name (via pacman) into $app_dir"
+	json_set "$FAU_APPS_JSON" "$name" "${version:-unknown (via alpm)}"
+	log "installed app $name (via alpm) into $app_dir"
 	[ -n "$target_files" ] || log "note: couldn't find any usr/bin or bin entrypoint owned by $name to wrap"
 	case ":$PATH:" in
 		*":$FAU_APPS_BIN_DIR:"*) ;;

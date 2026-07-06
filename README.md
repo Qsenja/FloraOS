@@ -70,7 +70,7 @@ What's explicitly *not* done yet (all documented with reasoning in
 [ARCHITECTURE.md](ARCHITECTURE.md)'s TODO section):
 
 - **No GUI/display server** (X11 or Wayland). `fau app-install` can fetch
-  GUI apps' files via its pacman-backed fallback, but they have nowhere to
+  GUI apps' files via its alpm (Arch/Artix repo) fallback, but they have nowhere to
   render yet. `kitty` was deliberately left out of the default ISO for this
   reason — its dependency closure is ~773MB of Python3/Mesa/X11/Wayland with
   nothing to run it on; `fau app-install kitty` works today if you want the
@@ -101,7 +101,7 @@ extra base packages, or rename the output ISO, edit `config/floraos.conf`
   system: everything downloads and builds under `work/` (gitignored).
 - `./floraiso build` — runs the rootfs build if needed, then packs the whole
   rootfs as an initramfs and calls `grub-mkrescue` to produce a hybrid
-  BIOS+UEFI bootable `floraos.iso` (name configurable, currently 154MB).
+  BIOS+UEFI bootable `floraos.iso` (name configurable, currently 164MB).
   FloraOS currently boots and runs entirely from RAM as a live image —
   persistent disk installs are a documented TODO, not yet scripted (see
   ARCHITECTURE.md).

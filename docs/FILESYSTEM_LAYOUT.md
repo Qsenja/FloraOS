@@ -21,7 +21,7 @@ Standard FHS layout, nothing exotic. Only the parts worth calling out:
 │   ├── fstab
 │   ├── fau/
 │   │   ├── pacman-mirrorlist  # copy of the build host's mirrorlist -- lets
-│   │   │                      #   fau's pacman-backed fallback resolve/fetch
+│   │   │                      #   fau's alpm fallback resolve/fetch
 │   │   │                      #   after boot, where /etc/pacman.d doesn't exist
 │   │   └── pacman-repos       # copy of the build host's pacman.conf repo names
 │   ├── ssl/certs/
@@ -36,7 +36,7 @@ Standard FHS layout, nothing exotic. Only the parts worth calling out:
 │   │   └── fau/
 │   │       └── system.json    # fau's installed-package manifest (see tools/fau)
 │   └── cache/fau/pkg/          # downloaded/built package archives, plus
-│                               #   pacman-db/ (cached sync-db indexes fau builds
+│                               #   alpm-db/ (cached sync-db indexes fau builds
 │                               #   itself when resolving its pacman fallback)
 ├── boot/                        # kernel, initramfs, bootloader files
 ├── home/

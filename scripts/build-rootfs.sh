@@ -51,7 +51,7 @@ MANDATORY_ORDER=(
 	# not a fau package itself) needs it to verify /etc/shadow hashes. See
 	# scripts/recipes/libxcrypt.sh and tools/floralogin.
 	libxcrypt
-	# mbedtls/curl: fau's pacman-backed fallback (tools/fau/fau) needs an
+	# mbedtls/curl: fau's alpm (Arch/Artix repo) fallback (tools/fau/fau) needs an
 	# HTTP client to fetch anything once running inside a booted FloraOS
 	# system (no pacman there to shell out to) -- found by actually running
 	# `fau install` after boot: it failed immediately with "curl: command
@@ -140,7 +140,7 @@ main() {
 	FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" install "${BUILD_ORDER[@]}"
 
 	log "=== shipping a pacman mirrorlist/repo-list for fau's own use ==="
-	# fau's pacman-backed fallback (tools/fau/fau) never shells out to the
+	# fau's alpm (Arch/Artix repo) fallback (tools/fau/fau) never shells out to the
 	# `pacman` binary -- it reads the mirrorlist and sync-db formats
 	# directly -- but it still needs to know which mirror and which repos
 	# to ask, and /etc/pacman.d/mirrorlist + /etc/pacman.conf don't exist
@@ -152,7 +152,7 @@ main() {
 		grep -oE '^\[[a-zA-Z0-9_.-]+\]' /etc/pacman.conf | tr -d '[]' | grep -vx options \
 			> "$ROOTFS_DIR/etc/fau/pacman-repos"
 	else
-		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- fau's pacman fallback won't work after boot"
+		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- fau's alpm fallback won't work after boot"
 	fi
 
 	log "=== installing the CA certificate bundle (curl needs it for HTTPS) ==="
@@ -173,7 +173,7 @@ main() {
 	# -I/-L pointed at $ROOTFS_DIR) rather than whatever libcrypt the build
 	# host happens to have -- linking against the host's copy would bake in
 	# a mismatched SONAME the shipped image doesn't actually provide (the
-	# same class of bug found and fixed in fau's pacman fallback, see
+	# same class of bug found and fixed in fau's alpm fallback, see
 	# ARCHITECTURE.md).
 	gcc -Wall -Wextra -O2 \
 		-I"$ROOTFS_DIR/usr/include" -L"$ROOTFS_DIR/usr/lib" \
@@ -181,19 +181,24 @@ main() {
 		"$FLORA_ROOT/tools/floralogin/floralogin.c" -lcrypt
 	chmod 755 "$ROOTFS_DIR/usr/bin/floralogin"
 
-	log "=== branding: fastfetch (via fau's pacman fallback, not the minimal base) ==="
+	log "=== branding: fastfetch (via fau's alpm fallback, not the minimal base) ==="
 	# kitty was deliberately left out here: its dependency closure (Python3 +
 	# Mesa + X11/Wayland) is ~773MB, and none of it does anything without a
 	# display server FloraOS doesn't have yet (see ARCHITECTURE.md). Install
 	# it yourself later with: fau app-install kitty
-	if command -v pacman >/dev/null 2>&1; then
+	#
+	# Same condition as the mirrorlist-shipping step above, not `command -v
+	# pacman`: fau's alpm fallback never touches the pacman binary, only
+	# these two files' data, so that's the real precondition for this to
+	# succeed.
+	if [ -f /etc/pacman.d/mirrorlist ] && [ -f /etc/pacman.conf ]; then
 		# libgcc (libgcc_s.so.1, C++ exception-handling runtime) isn't a
 		# declared dependency of fastfetch -- Arch/Artix assume it's always
-		# present as a base-system package, so pacman's own dependency
+		# present as a base-system package, so Arch's own dependency
 		# resolution never lists it explicitly for anything that needs it.
 		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" install libgcc fastfetch
 	else
-		log "pacman not available on this build host -- skipping fastfetch"
+		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- skipping fastfetch"
 	fi
 
 	log "=== applying /etc skeleton ==="

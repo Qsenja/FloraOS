@@ -65,7 +65,7 @@ command -v fastfetch >/dev/null 2>&1 && fastfetch --config /etc/fastfetch/config
 EOF
 
 # FloraOS branding: custom logo + fastfetch config, run once per login shell
-# above. fastfetch itself is fetched via fau's pacman-backed fallback (see
+# above. fastfetch itself is fetched via fau's alpm (Arch/Artix repo) fallback (see
 # build-rootfs.sh) rather than built from source -- it's not part of the
 # minimal base manifest, just an identity/branding touch.
 if [ -f "$FLORA_ROOT/assets/floraos-logo.txt" ]; then

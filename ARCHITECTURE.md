@@ -43,14 +43,13 @@ So FloraOS ships **fau**, a small package manager written from scratch
   `repo.json` index (name -> version/filename/sha256).
 - Install/remove: extracts payloads relative to a target root, records the
   package + version + file list, resolves dependencies listed in `pkginfo`.
-- **The pacman-backed fallback needs pacman on whatever machine runs `fau`**:
-  it shells out to the local `pacman`/`/var/lib/pacman/sync` and this build
-  host's mirrorlist. FloraOS itself doesn't ship pacman (shipping it would
-  mean vendoring Arch/Artix's package manager, the thing explicitly ruled
-  out at the start), so this fallback works when building the ISO on a
-  pacman-based host (as here), but *not* from inside an already-booted
-  FloraOS system -- there, `fau install`/`app-install` only have whatever
-  `FAU_REPO_DIR` you point them at.
+- **The alpm (Arch/Artix repo) fallback never shells out to the `pacman`
+  binary** -- it reads the sync-db/mirrorlist/desc formats directly (see
+  further down for the full story of how that came to be and what it took
+  to get there). FloraOS itself still doesn't ship pacman (shipping it
+  would mean vendoring Arch/Artix's package manager, the thing explicitly
+  ruled out at the start) -- it doesn't need to, since fau only ever reads
+  pacman's *data formats*, never invokes the program.
   - **Found and fixed a real integrity bug in this fallback**: the scratch
     pacman db it resolves against has a deliberately *empty* local-package
     state (so `pacman -Sp` resolves the requested package's FULL upstream
@@ -61,7 +60,7 @@ So FloraOS ships **fau**, a small package manager written from scratch
     which **silently replaced FloraOS's own compiled `libc.so.6` with
     Arch's official binary** on every single rootfs build -- caught by
     comparing sha256 before/after a real build, not by inspection. Fixed in
-    three parts, all in `tools/fau/fau`'s `install_one_pacman`: (1) skip any
+    three parts, all in `tools/fau/fau`'s `install_one_alpm`: (1) skip any
     resolved package fau's own `system.json` already has a version for
     (i.e. skip `glibc`, since FloraOS built it), (2) strip `etc/` from
     whatever *does* get merged -- Arch's `filesystem` package ships its own
@@ -80,14 +79,14 @@ So FloraOS ships **fau**, a small package manager written from scratch
     10-artix.conf..."), and openrc's tmpfiles.setup was throwing chown/
     chgrp errors for `/etc/artix-release` and a dozen other files that
     artix.conf expected but FloraOS deliberately doesn't ship. Fixed by
-    skipping the whole `filesystem` package by name in `install_one_pacman`
+    skipping the whole `filesystem` package by name in `install_one_alpm`
     -- unlike `glibc` (skipped because FloraOS already provides it),
     `filesystem` is skipped because *nothing* in it is ever wanted here,
     regardless of what FloraOS itself provides.
-- **The pacman-backed fallback no longer needs pacman at all.** It used to
+- **The alpm fallback no longer needs pacman at all.** It used to
   shell out to the real `pacman -Sp` binary for dependency resolution --
   everything else (sync db parsing, fetching, checksumming) was already
-  fau's own code. Now `tools/fau/fau`'s `pacman_resolve`/`pacman_find_provider`
+  fau's own code. Now `tools/fau/fau`'s `alpm_resolve`/`alpm_find_provider`
   read the sync db and mirrorlist formats directly and do the resolution
   themselves: PROVIDES (virtual packages, e.g. "sdl2" satisfied by
   "sdl2-compat") and version constraints (`glibc>=2.38-1`) both handled,
@@ -241,7 +240,7 @@ build path that would've required compiling 16-bit real-mode boot code.
   `./floraiso test` run instead of just watching for the shell to appear on
   its own).
 - TODO: no GUI/display server (X11 or Wayland) -- `fau app-install`'s
-  pacman-backed fallback (see tools/fau/fau) can fetch GUI apps' files, but
+  alpm (Arch/Artix repo) fallback (see tools/fau/fau) can fetch GUI apps' files, but
   they have nowhere to draw pixels without this. Separate, larger project.
   kitty specifically was left out of the default ISO build for this reason:
   its dependency closure (Python3 + Mesa + X11/Wayland) is ~773MB with
