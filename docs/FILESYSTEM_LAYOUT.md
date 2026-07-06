@@ -20,7 +20,13 @@ Standard FHS layout, nothing exotic. Only the parts worth calling out:
 │   ├── issue                  # shown by agetty before the login prompt
 │   ├── fstab
 │   ├── fau/
-│   │   └── repo.conf         # points fau at the FloraOS package repo
+│   │   ├── pacman-mirrorlist  # copy of the build host's mirrorlist -- lets
+│   │   │                      #   fau's pacman-backed fallback resolve/fetch
+│   │   │                      #   after boot, where /etc/pacman.d doesn't exist
+│   │   └── pacman-repos       # copy of the build host's pacman.conf repo names
+│   ├── ssl/certs/
+│   │   └── ca-certificates.crt # Mozilla's root CA list (curl's default trust
+│   │                           #   store -- see docs/MANIFEST.md)
 │   ├── init.d/                # OpenRC service scripts
 │   ├── conf.d/                 # OpenRC service config
 │   └── runlevels/              # OpenRC runlevel symlinks (sysinit/boot/default)
@@ -29,7 +35,9 @@ Standard FHS layout, nothing exotic. Only the parts worth calling out:
 │   ├── lib/
 │   │   └── fau/
 │   │       └── system.json    # fau's installed-package manifest (see tools/fau)
-│   └── cache/fau/pkg/          # downloaded/built package archives
+│   └── cache/fau/pkg/          # downloaded/built package archives, plus
+│                               #   pacman-db/ (cached sync-db indexes fau builds
+│                               #   itself when resolving its pacman fallback)
 ├── boot/                        # kernel, initramfs, bootloader files
 ├── home/
 ├── root/

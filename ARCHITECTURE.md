@@ -84,6 +84,67 @@ So FloraOS ships **fau**, a small package manager written from scratch
     -- unlike `glibc` (skipped because FloraOS already provides it),
     `filesystem` is skipped because *nothing* in it is ever wanted here,
     regardless of what FloraOS itself provides.
+- **The pacman-backed fallback no longer needs pacman at all.** It used to
+  shell out to the real `pacman -Sp` binary for dependency resolution --
+  everything else (sync db parsing, fetching, checksumming) was already
+  fau's own code. Now `tools/fau/fau`'s `pacman_resolve`/`pacman_find_provider`
+  read the sync db and mirrorlist formats directly and do the resolution
+  themselves: PROVIDES (virtual packages, e.g. "sdl2" satisfied by
+  "sdl2-compat") and version constraints (`glibc>=2.38-1`) both handled,
+  verified by resolving cava (a real package with a ~130-package closure
+  including several PROVIDES hops) and diffing the result against real
+  pacman's own `-Sp` output: exact match, zero missing, zero extra, zero
+  duplicates. Version comparison (`alpm_vercmp`/`_rpmvercmp`) reimplements
+  pacman's own algorithm, checked against the real `vercmp` binary across
+  ~300 real package versions plus hand-picked edge cases (epoch, pkgrel,
+  git-describe-style `+r37+gHASH` suffixes) -- exact match on all of them;
+  the only known divergences are contrived cases (a bare alpha suffix with
+  no separator, tilde pre-release markers) that don't occur in real
+  Arch/Artix version strings, an accepted simplification rather than every
+  rpmvercmp edge case.
+  - This is *why* it can now work from inside an already-booted FloraOS
+    system, not just at build time: FloraOS ships a copy of the mirrorlist
+    and repo list at `/etc/fau/pacman-mirrorlist`/`pacman-repos` (see
+    build-rootfs.sh) since `/etc/pacman.d`/`/etc/pacman.conf` don't exist
+    there, and the sync db itself gets fetched fresh via HTTP if this
+    build host's own `/var/lib/pacman/sync` isn't available.
+  - Two real bugs surfaced building this, both from the same root cause:
+    bash's `read` silently collapses *consecutive* IFS-whitespace
+    separators (tab counts as whitespace regardless of what IFS is set
+    to), corrupting any parse the instant a middle field is empty -- found
+    by tracing a resolution where a package with no depends/provides
+    looked like it "depended on" its own filename. Fixed by switching this
+    subsystem's internal field separator from tab to `\x1f` (verified
+    directly that bash's read does NOT collapse it). Second: the "already
+    resolved" dedup only tracked the originally-*requested* spec name, not
+    the actual resolved package name -- a package reachable via multiple
+    aliases (a soname/virtual reference in one place, its real name in
+    another) got processed and printed once per alias, caught by the same
+    cava-vs-real-pacman diff (matching unique-name count, but 48 duplicate
+    lines).
+  - Also: building the sync-db index by spawning a handful of `awk`
+    processes per package (the first version) meant tens of thousands of
+    forks for a large repo (~7300 packages in Artix's "world") and was
+    slow enough to look hung. Rewritten as one `awk` invocation processing
+    every extracted `desc` file in a single pass.
+  - **New hard requirement this surfaced**: none of this is usable from
+    inside the booted OS without an HTTP client, and FloraOS shipped none
+    (confirmed by literally running `fau install` after boot: "curl:
+    command not found"). Added `curl` + `mbedtls` (its TLS backend --
+    mirrors are HTTPS-only; picked over OpenSSL for a plain-Makefile,
+    no-cmake build and a smaller footprint, matching this project's
+    existing bias) + a CA certificate bundle (curl's own maintained Mozilla
+    root extract, `config/versions.conf`'s `ca-certificates` entry --
+    that's a plain data file, not a compiled package, so it's fetched
+    directly in build-rootfs.sh rather than going through the recipe
+    pipeline, which assumes every pinned download is a tarball). curl is
+    trimmed to exactly what fau's own fetches need: HTTP/HTTPS only (no
+    FTP/telnet/gopher/mqtt/etc), no libpsl, no libidn2, no nghttp2 -- none
+    of that is shipped or needed for fetching from a fixed set of mirror
+    hostnames. Verified with a real end-to-end run inside actual QEMU: real
+    DHCP lease, a real HTTPS request, then `fau install tree` succeeding
+    from inside the booted OS with `pacman` and `/etc/pacman.conf`
+    genuinely absent (not just build-time reasoning).
 - **Reproducibility is native, not bolted on**: every install/remove updates
   `/var/lib/fau/system.json`, an exact manifest of installed package names
   and pinned versions. `fau export` dumps it (e.g. for backup or copying to

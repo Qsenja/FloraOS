@@ -20,7 +20,7 @@ login actually succeeds and reaches a shell (driven through QEMU's serial
 console — the test types the login itself, it doesn't just watch for a
 shell to appear on its own). Concretely, right now:
 
-- **27 packages** in the base image, every one built from pinned upstream
+- **29 packages** in the base image, every one built from pinned upstream
   source on this machine (see [docs/MANIFEST.md](docs/MANIFEST.md) for the
   full list and a one-line reason for each) — kernel, glibc, sysvinit,
   OpenRC, ncurses, bash, coreutils, util-linux, e2fsprogs, iproute2, dhcpcd,
@@ -29,7 +29,18 @@ shell to appear on its own). Concretely, right now:
   during the build — see ARCHITECTURE.md for how that gap got found), plus
   procps-ng/hostname/kbd so OpenRC's sysctl/hostname/keymaps services
   actually run instead of failing non-fatally, plus libxcrypt for password
-  verification, plus fastfetch as a deliberate branding touch.
+  verification, plus curl/mbedtls so `fau` can actually fetch anything after
+  boot (see below), plus fastfetch as a deliberate branding touch.
+- **`fau` can install real Arch/Artix packages with zero `pacman` involved**,
+  including from inside an already-booted FloraOS system, not just at build
+  time. It used to shell out to the real `pacman -Sp` for dependency
+  resolution; now it reads the sync-db/mirrorlist formats itself and
+  resolves PROVIDES (virtual packages) and version constraints
+  (`glibc>=2.38-1`) natively — checked against real `pacman`/`vercmp` output
+  (exact match resolving a real ~130-package closure, and ~300 real package
+  version comparisons) before trusting it. Verified end-to-end in QEMU: a
+  real DHCP lease, a real HTTPS fetch, then `fau install tree` succeeding
+  from inside the booted OS with `pacman` genuinely absent.
 - **Real password-backed login**, PAM-free. util-linux's own login requires
   PAM to build at all (no fallback exists upstream), so FloraOS ships
   **floralogin**, a small from-scratch login (`tools/floralogin`) that
@@ -43,14 +54,15 @@ shell to appear on its own). Concretely, right now:
 - **`fau` runs inside the booted OS**, not just as a build-time tool —
   verified directly with an unprivileged `unshare --user --map-root-user
   --mount chroot` into the built rootfs (no sudo needed): `fau list`
-  correctly prints all 27 installed packages, and ordinary commands like
+  correctly prints all 29 installed packages, and ordinary commands like
   `ls` work.
-- **ISO size: 154MB** (`floraos.iso`, hybrid BIOS+UEFI, boots and runs
-  entirely from RAM as a live image). Grew from an earlier 135MB after
-  fixing a real bug where FloraOS's own compiled glibc was being silently
-  overwritten by Arch's smaller, pre-stripped binary (see ARCHITECTURE.md) —
-  the extra size is FloraOS's own unstripped build correctly winning out,
-  not new bloat.
+- **ISO size: 164MB** (`floraos.iso`, hybrid BIOS+UEFI, boots and runs
+  entirely from RAM as a live image). Grew from an earlier 135MB, mostly
+  from fixing a real bug where FloraOS's own compiled glibc was being
+  silently overwritten by Arch's smaller, pre-stripped binary (see
+  ARCHITECTURE.md) — that extra size is FloraOS's own unstripped build
+  correctly winning out, not new bloat — plus curl/mbedtls, added
+  deliberately so `fau` can fetch packages after boot.
 - **fastfetch** runs at login with a custom ASCII logo and a package count
   read from `fau`'s own list.
 
@@ -124,14 +136,17 @@ fau export system.json     # dump the exact installed package set
 fau apply system.json      # reproduce that exact package set on another machine
 ```
 
-`app-install` first checks FloraOS's own repo; until there's a curated
-catalog of FloraOS-native apps, anything not found there falls back to
-fetching from this machine's pacman/Artix repos (dependency-resolved,
-sha256-verified, merged into the same isolated app directory — no root, and
-nothing gets installed onto your real system). GUI apps will fetch fine but
+`app-install` (and `install`) first checks FloraOS's own repo; until there's
+a curated catalog of FloraOS-native apps, anything not found there falls
+back to fetching straight from Arch/Artix's own repos — dependency-resolved
+(including virtual/PROVIDES packages and version constraints) and
+sha256-verified, merged into the same isolated app directory (no root, and
+nothing gets installed onto your real system). This fallback doesn't shell
+out to `pacman` at all (it reads the sync-db/mirrorlist formats itself), so
+it works both when building the ISO here *and* from inside an
+already-booted FloraOS system, which ships neither `pacman` nor its config
+— see ARCHITECTURE.md for how that's verified. GUI apps will fetch fine but
 have nowhere to render without a display server (not built yet, see
-ARCHITECTURE.md). Note this fallback needs pacman on whatever machine runs
-`fau` — it works when building the ISO here, but not from inside an
-already-booted FloraOS system, which doesn't ship pacman itself.
+ARCHITECTURE.md).
 
 See `tools/fau/fau --help` for the full command list.

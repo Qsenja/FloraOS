@@ -51,6 +51,15 @@ MANDATORY_ORDER=(
 	# not a fau package itself) needs it to verify /etc/shadow hashes. See
 	# scripts/recipes/libxcrypt.sh and tools/floralogin.
 	libxcrypt
+	# mbedtls/curl: fau's pacman-backed fallback (tools/fau/fau) needs an
+	# HTTP client to fetch anything once running inside a booted FloraOS
+	# system (no pacman there to shell out to) -- found by actually running
+	# `fau install` after boot: it failed immediately with "curl: command
+	# not found". mbedtls is curl's TLS backend (mirrors are HTTPS-only);
+	# order matters here, mbedtls must build first (curl.sh links against
+	# its staged files directly, see scripts/recipes/curl.sh).
+	mbedtls
+	curl
 )
 BUILD_ORDER=("${MANDATORY_ORDER[@]}" ${EXTRA_PACKAGES:-})
 
@@ -129,6 +138,32 @@ main() {
 	chmod 755 "$ROOTFS_DIR/usr/bin/fau"
 
 	FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" install "${BUILD_ORDER[@]}"
+
+	log "=== shipping a pacman mirrorlist/repo-list for fau's own use ==="
+	# fau's pacman-backed fallback (tools/fau/fau) never shells out to the
+	# `pacman` binary -- it reads the mirrorlist and sync-db formats
+	# directly -- but it still needs to know which mirror and which repos
+	# to ask, and /etc/pacman.d/mirrorlist + /etc/pacman.conf don't exist
+	# inside a booted FloraOS system. Shipping a copy here is what makes
+	# `fau install <pkg>` work after boot, not just during this build.
+	if [ -f /etc/pacman.d/mirrorlist ] && [ -f /etc/pacman.conf ]; then
+		mkdir -p "$ROOTFS_DIR/etc/fau"
+		cp /etc/pacman.d/mirrorlist "$ROOTFS_DIR/etc/fau/pacman-mirrorlist"
+		grep -oE '^\[[a-zA-Z0-9_.-]+\]' /etc/pacman.conf | tr -d '[]' | grep -vx options \
+			> "$ROOTFS_DIR/etc/fau/pacman-repos"
+	else
+		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- fau's pacman fallback won't work after boot"
+	fi
+
+	log "=== installing the CA certificate bundle (curl needs it for HTTPS) ==="
+	# Not a compiled package -- see config/versions.conf's comment. Reuses
+	# fetch_source (format-agnostic: download + sha256-verify + return the
+	# path) directly rather than going through the normal recipe pipeline,
+	# since extract_source assumes every pinned download is a tarball and
+	# this is a single PEM file.
+	local ca_bundle; ca_bundle=$(fetch_source ca-certificates)
+	mkdir -p "$ROOTFS_DIR/etc/ssl/certs"
+	cp "$ca_bundle" "$ROOTFS_DIR/etc/ssl/certs/ca-certificates.crt"
 
 	log "=== compiling floralogin (FloraOS's own PAM-free login) ==="
 	# Not a fau package: it's FloraOS-authored source, not a fetched upstream

@@ -281,12 +281,12 @@ install_one() {
 	esac
 	local file; file=$(repo_lookup_file "$name")
 	if [ -z "$file" ]; then
-		if command -v pacman >/dev/null 2>&1; then
+		if pacman_fallback_available; then
 			[ -z "$want_version" ] || log "warning: $name isn't in the fau repo -- falling back to pacman, exact version $want_version can't be guaranteed"
 			install_one_pacman "$name"
 			return
 		fi
-		die "package not found in repo: $name (and pacman isn't available to fall back to)"
+		die "package not found in repo: $name (and no pacman mirrorlist/repo-list available to fall back to)"
 	fi
 
 	if [ -n "$want_version" ]; then
@@ -433,11 +433,11 @@ app_install_one() {
 	esac
 	local file; file=$(repo_lookup_file "$name")
 	if [ -z "$file" ]; then
-		if command -v pacman >/dev/null 2>&1; then
+		if pacman_fallback_available; then
 			app_install_one_pacman "$name"
 			return
 		fi
-		die "package not found in repo: $name (and pacman isn't available to fall back to)"
+		die "package not found in repo: $name (and no pacman mirrorlist/repo-list available to fall back to)"
 	fi
 
 	local existing; existing=$(json_get_version "$FAU_APPS_JSON" "$name")
@@ -499,87 +499,415 @@ app_install_one() {
 }
 
 # --- pacman-backed fallback ---------------------------------------------------
-# Until FloraOS has its own curated app catalog, app-install falls back to
-# pulling from this build host's pacman/Artix repos when a package isn't in
-# the local fau repo. This only fetches (no root, no installing onto the
-# real system): a scratch pacman db with an *empty* local-package state is
-# used so `pacman -Sp` resolves the FULL dependency closure regardless of
-# what's already installed on this host, not just what's "missing" here.
-# Real caveat: pacman binaries are built against Artix's glibc -- this only
+# Until FloraOS has its own curated app catalog, install/app-install fall
+# back to pulling from Arch/Artix's own repos when a package isn't in the
+# local fau repo. This never shells out to the `pacman` binary at all --
+# only its *data formats* (sync db, desc files, mirrorlist, pacman.conf's
+# repo list) are read directly, using fau's own fetch/resolve/verify code.
+# That means this fallback works both at build time (reading this build
+# host's own /etc/pacman.d/mirrorlist and /var/lib/pacman/sync as a fast
+# path) and from inside an already-booted FloraOS system, which has neither
+# pacman nor a synced db -- it falls back to fetching the mirrorlist/db
+# fresh from a mirror, using a copy of the mirrorlist/repo-list FloraOS
+# ships at /etc/fau/ specifically for this (see build-rootfs.sh).
+# Real caveat: fetched binaries are built against Artix's glibc -- this only
 # works cleanly as long as that stays ABI-compatible with FloraOS's own
 # from-scratch glibc (currently identical versions by coincidence, not by
 # any guarantee). GUI apps also won't have a display server to draw on yet
 # (see ARCHITECTURE.md) -- this gets you the files, not a running X11.
 
-pacman_scratch_db() {
-	local db_dir="${FAU_APPS_DIR%/}/.pacman-db"
-	if [ ! -d "$db_dir/sync" ] || [ -z "$(ls -A "$db_dir/sync" 2>/dev/null)" ]; then
-		rm -rf "$db_dir"
-		mkdir -p "$db_dir/sync" "$db_dir/local"
-		cp /var/lib/pacman/sync/*.db "$db_dir/sync/" 2>/dev/null \
-			|| die "couldn't read /var/lib/pacman/sync -- is pacman's sync db populated? (pacman -Sy)"
-	fi
-	echo "$db_dir"
-}
-
-pacman_desc_field() {
-	# pacman_desc_field <db-dir> <repo> <pkg-dirname> <KEY> -> prints value
-	local db_dir=$1 repo=$2 pkgdir=$3 key=$4
-	local work; work=$(mktemp -d)
-	tar -xzf "$db_dir/sync/${repo}.db" -C "$work" "$pkgdir/desc" 2>/dev/null
-	awk -v k="%${key}%" 'f{print; f=0} $0==k{f=1}' "$work/$pkgdir/desc" 2>/dev/null
-	rm -rf "$work"
-}
-
-pacman_pkgdir_for() {
-	# pacman_pkgdir_for <db-dir> <repo> <name> -> the "name-version" dir inside repo.db
-	local db_dir=$1 repo=$2 name=$3
-	local work; work=$(mktemp -d)
-	tar -xzf "$db_dir/sync/${repo}.db" -C "$work" 2>/dev/null
-	find "$work" -maxdepth 1 -type d -name "${name}-*" -printf '%f\n' | while read -r d; do
-		[ "$(awk '/%NAME%/{getline;print;exit}' "$work/$d/desc")" = "$name" ] && echo "$d" && break
+pacman_mirrorlist_path() {
+	local candidate
+	for candidate in /etc/pacman.d/mirrorlist "${FAU_ROOT%/}/etc/fau/pacman-mirrorlist"; do
+		[ -f "$candidate" ] && { echo "$candidate"; return 0; }
 	done
-	rm -rf "$work"
+	return 1
+}
+
+pacman_repo_list_path() {
+	local candidate
+	for candidate in /etc/pacman.conf "${FAU_ROOT%/}/etc/fau/pacman-repos"; do
+		[ -f "$candidate" ] && { echo "$candidate"; return 0; }
+	done
+	return 1
+}
+
+pacman_fallback_available() {
+	pacman_mirrorlist_path >/dev/null 2>&1 && pacman_repo_list_path >/dev/null 2>&1
+}
+
+pacman_repo_names() {
+	# Priority order matters: the first repo that has a given name wins,
+	# same as pacman.conf's own section ordering.
+	local f; f=$(pacman_repo_list_path) || die "no pacman mirrorlist/repo-list available"
+	case "$(basename "$f")" in
+		pacman.conf) grep -oE '^\[[a-zA-Z0-9_.-]+\]' "$f" | tr -d '[]' | grep -vx options ;;
+		*) grep -vE '^[[:space:]]*(#|$)' "$f" ;;
+	esac
 }
 
 pacman_mirror_url() {
 	# pacman_mirror_url <repo> <filename> -> first configured mirror's URL
 	local repo=$1 filename=$2
-	local tmpl; tmpl=$(grep -m1 '^Server' /etc/pacman.d/mirrorlist | sed 's/^Server[[:space:]]*=[[:space:]]*//')
-	[ -n "$tmpl" ] || die "no Server= line found in /etc/pacman.d/mirrorlist"
+	local mirrorlist; mirrorlist=$(pacman_mirrorlist_path) || die "no pacman mirrorlist available"
+	local tmpl; tmpl=$(grep -m1 '^Server' "$mirrorlist" | sed 's/^Server[[:space:]]*=[[:space:]]*//')
+	[ -n "$tmpl" ] || die "no Server= line found in $mirrorlist"
 	local arch; arch=$(uname -m)
 	tmpl=${tmpl//\$repo/$repo}
 	tmpl=${tmpl//\$arch/$arch}
 	echo "$tmpl/$filename"
 }
 
+pacman_db_cache_dir() {
+	local d; d="${FAU_CACHE_DIR%/}/pacman-db"
+	mkdir -p "$d"
+	echo "$d"
+}
+
+pacman_fetch_repo_db() {
+	# pacman_fetch_repo_db <repo> -> local path to <repo>.db, downloading if
+	# not already cached. Prefers this build host's own already-synced copy
+	# (fast path, no network needed) over a fresh mirror fetch -- the fresh
+	# fetch is what makes this work from inside a booted FloraOS system,
+	# which has neither pacman nor a populated /var/lib/pacman/sync.
+	local repo=$1
+	local cache_dir; cache_dir=$(pacman_db_cache_dir)
+	local dest="$cache_dir/$repo.db"
+	if [ ! -s "$dest" ]; then
+		if [ -r "/var/lib/pacman/sync/$repo.db" ]; then
+			cp "/var/lib/pacman/sync/$repo.db" "$dest"
+		else
+			local url; url=$(pacman_mirror_url "$repo" "$repo.db")
+			curl -fsSL -o "$dest.part" "$url" || die "failed to fetch $repo.db from $url"
+			mv "$dest.part" "$dest"
+		fi
+	fi
+	echo "$dest"
+}
+
+# Field separator for fau's own pacman-resolution records (index lines,
+# resolver output) -- NOT a literal tab. bash's `read` silently collapses
+# *consecutive* IFS-whitespace separators (tab counts as whitespace no
+# matter what IFS is set to), which corrupts parsing the instant a field in
+# the middle is empty (e.g. a package with no depends or no provides) --
+# every field after it silently shifts by one position. Found by tracing a
+# real resolution: linux-api-headers (empty depends+provides) ended up
+# looking like it "depended on" its own filename. \x1f (ASCII unit
+# separator) isn't whitespace, so bash's read preserves empty fields
+# correctly; verified directly (see the fix commit) before relying on it.
+PACMAN_FS=$'\x1f'
+
+pacman_repo_index() {
+	# pacman_repo_index <repo> -> path to a cached index of every package in
+	# that repo's sync db, one line each: name<FS>version<FS>depends<FS>provides<FS>filename<FS>sha256
+	# (FS = $PACMAN_FS). Built once per repo. A real Arch repo can hold
+	# thousands of packages (the "world" repo here has ~7300) -- spawning a
+	# handful of awk processes per package to pull each field separately
+	# (the first version of this) meant tens of thousands of forks and was
+	# slow enough to look hung. A single awk invocation reading every
+	# extracted desc file as its argument list, tracking one package's
+	# fields across FNR==1 boundaries, does the entire repo in one process.
+	local repo=$1
+	local cache_dir; cache_dir=$(pacman_db_cache_dir)
+	local index="$cache_dir/$repo.index"
+	if [ ! -s "$index" ]; then
+		local db; db=$(pacman_fetch_repo_db "$repo")
+		local work; work=$(mktemp -d)
+		tar -xzf "$db" -C "$work"
+		local tmp; tmp=$(mktemp)
+		awk -v ofs="$PACMAN_FS" '
+			function emit() {
+				if (name != "") {
+					printf "%s%s%s%s%s%s%s%s%s%s%s\n", \
+						name, ofs, version, ofs, depends, ofs, provides, ofs, filename, ofs, sha256
+				}
+			}
+			FNR==1 { emit(); name=""; version=""; depends=""; provides=""; filename=""; sha256=""; field="" }
+			/^%NAME%$/      { field="NAME"; next }
+			/^%VERSION%$/   { field="VERSION"; next }
+			/^%FILENAME%$/  { field="FILENAME"; next }
+			/^%SHA256SUM%$/ { field="SHA256SUM"; next }
+			/^%DEPENDS%$/   { field="DEPENDS"; next }
+			/^%PROVIDES%$/  { field="PROVIDES"; next }
+			/^%/            { field=""; next }
+			/^$/            { field=""; next }
+			field=="NAME"      { name=$0 }
+			field=="VERSION"   { version=$0 }
+			field=="FILENAME"  { filename=$0 }
+			field=="SHA256SUM" { sha256=$0 }
+			field=="DEPENDS"   { depends = (depends=="" ? $0 : depends","$0) }
+			field=="PROVIDES"  { provides = (provides=="" ? $0 : provides","$0) }
+			END { emit() }
+		' "$work"/*/desc > "$tmp"
+		mv "$tmp" "$index"
+		rm -rf "$work"
+	fi
+	echo "$index"
+}
+
+# --- version comparison (pacman/alpm's algorithm, no pacman binary needed) ---
+# Arch dependency constraints look like "glibc>=2.38-1" or "libfoo=1.2-3".
+# Verified against the real `vercmp` binary across ~300 real package
+# versions from this host's own sync dbs plus a battery of hand-picked
+# cases (epoch, pkgrel, git-describe-style "+r37+gHASH" suffixes) -- exact
+# match on all of them. The only known divergences from real vercmp are
+# contrived synthetic cases (a bare alpha suffix directly attached with no
+# separator, e.g. "1.0a" vs "1.0", and tilde pre-release markers) that
+# essentially never occur in real Arch/Artix package version strings, which
+# use "-", "+", "." as explicit separators -- an accepted, documented
+# simplification rather than a full reimplementation of every rpmvercmp
+# edge case.
+
+_rpmvercmp() {
+	local a=$1 b=$2
+	[ "$a" = "$b" ] && { echo 0; return; }
+
+	while [ -n "$a" ] || [ -n "$b" ]; do
+		while [ -n "$a" ]; do
+			case "${a:0:1}" in
+				[A-Za-z0-9~]) break ;;
+				*) a=${a:1} ;;
+			esac
+		done
+		while [ -n "$b" ]; do
+			case "${b:0:1}" in
+				[A-Za-z0-9~]) break ;;
+				*) b=${b:1} ;;
+			esac
+		done
+
+		if [ "${a:0:1}" = "~" ] || [ "${b:0:1}" = "~" ]; then
+			if [ "${a:0:1}" != "~" ]; then echo 1; return; fi
+			if [ "${b:0:1}" != "~" ]; then echo -1; return; fi
+			a=${a:1}; b=${b:1}
+			continue
+		fi
+
+		if [ -z "$a" ] || [ -z "$b" ]; then break; fi
+
+		local seg_a="" seg_b="" isnum=0
+		if [[ "${a:0:1}" =~ [0-9] ]]; then
+			isnum=1
+			while [[ -n "${a:0:1}" && "${a:0:1}" =~ [0-9] ]]; do seg_a="$seg_a${a:0:1}"; a=${a:1}; done
+			while [[ -n "${b:0:1}" && "${b:0:1}" =~ [0-9] ]]; do seg_b="$seg_b${b:0:1}"; b=${b:1}; done
+		else
+			while [[ -n "${a:0:1}" && "${a:0:1}" =~ [A-Za-z] ]]; do seg_a="$seg_a${a:0:1}"; a=${a:1}; done
+			while [[ -n "${b:0:1}" && "${b:0:1}" =~ [A-Za-z] ]]; do seg_b="$seg_b${b:0:1}"; b=${b:1}; done
+		fi
+
+		if [ -z "$seg_b" ]; then
+			if [ -z "$seg_a" ]; then continue; fi
+			if [ "$isnum" -eq 1 ]; then echo 1; else echo -1; fi
+			return
+		fi
+		if [ -z "$seg_a" ]; then echo -1; return; fi
+
+		if [ "$isnum" -eq 1 ]; then
+			seg_a=$(printf '%s' "$seg_a" | sed 's/^0*//')
+			seg_b=$(printf '%s' "$seg_b" | sed 's/^0*//')
+			if [ "${#seg_a}" -gt "${#seg_b}" ]; then echo 1; return; fi
+			if [ "${#seg_b}" -gt "${#seg_a}" ]; then echo -1; return; fi
+		fi
+
+		if [ "$seg_a" != "$seg_b" ]; then
+			if [[ "$seg_a" < "$seg_b" ]]; then echo -1; else echo 1; fi
+			return
+		fi
+	done
+
+	if [ -z "$a" ] && [ -z "$b" ]; then echo 0; return; fi
+	if [ -z "$a" ]; then echo -1; else echo 1; fi
+}
+
+alpm_vercmp() {
+	# alpm_vercmp <v1> <v2> -> -1, 0, or 1. Format: [epoch:]pkgver[-pkgrel]
+	local v1=$1 v2=$2
+	[ "$v1" = "$v2" ] && { echo 0; return; }
+
+	local e1 e2 pv1 pv2 pr1 pr2
+	case "$v1" in *:*) e1=${v1%%:*}; pv1=${v1#*:} ;; *) e1=0; pv1=$v1 ;; esac
+	case "$v2" in *:*) e2=${v2%%:*}; pv2=${v2#*:} ;; *) e2=0; pv2=$v2 ;; esac
+
+	if [ "$e1" != "$e2" ]; then
+		if [ "$e1" -gt "$e2" ] 2>/dev/null; then echo 1; else echo -1; fi
+		return
+	fi
+
+	case "$pv1" in *-*) pr1=${pv1##*-}; pv1=${pv1%-*} ;; *) pr1="" ;; esac
+	case "$pv2" in *-*) pr2=${pv2##*-}; pv2=${pv2%-*} ;; *) pr2="" ;; esac
+
+	local cmp; cmp=$(_rpmvercmp "$pv1" "$pv2")
+	if [ "$cmp" -ne 0 ]; then echo "$cmp"; return; fi
+
+	if [ -n "$pr1" ] && [ -n "$pr2" ]; then
+		_rpmvercmp "$pr1" "$pr2"
+		return
+	fi
+	echo 0
+}
+
+version_satisfies_alpm() {
+	# version_satisfies_alpm <installed> <op> <required> -- op empty means
+	# an unconstrained dependency, always satisfied
+	local installed=$1 op=$2 required=$3
+	[ -z "$op" ] && return 0
+	local cmp; cmp=$(alpm_vercmp "$installed" "$required")
+	case "$op" in
+		'<') [ "$cmp" -lt 0 ] ;;
+		'<=') [ "$cmp" -le 0 ] ;;
+		'='|'==') [ "$cmp" -eq 0 ] ;;
+		'>=') [ "$cmp" -ge 0 ] ;;
+		'>') [ "$cmp" -gt 0 ] ;;
+		*) return 0 ;;
+	esac
+}
+
+alpm_dep_parse() {
+	# alpm_dep_parse <dep-token> -> "name<FS>op<FS>version" (FS =
+	# $PACMAN_FS; op/version empty for an unconstrained dependency). Longer
+	# operators (>=, <=) must be checked before the bare >/< they contain
+	# as a substring.
+	local dep=$1
+	case "$dep" in
+		*'>='*) printf "%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "${dep%%>=*}" '>=' "${dep#*>=}" ;;
+		*'<='*) printf "%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "${dep%%<=*}" '<=' "${dep#*<=}" ;;
+		*'='*)  printf "%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "${dep%%=*}" '=' "${dep#*=}" ;;
+		*'>'*)  printf "%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "${dep%%>*}" '>' "${dep#*>}" ;;
+		*'<'*)  printf "%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "${dep%%<*}" '<' "${dep#*<}" ;;
+		*) printf "%s${PACMAN_FS}${PACMAN_FS}\n" "$dep" ;;
+	esac
+}
+
+# --- dependency resolution (PROVIDES + version-aware, no pacman binary) -----
+
+pacman_find_provider() {
+	# pacman_find_provider <name> <op> <ver> -> "repo<FS>name<FS>version<FS>depends<FS>filename<FS>sha256"
+	# (FS = $PACMAN_FS) for the first package (searched in repo priority
+	# order) satisfying it, by exact name first, then by PROVIDES (virtual
+	# package) if no repo has a real package by that name.
+	local want=$1 op=$2 ver=$3
+	local repo index line
+	for repo in $(pacman_repo_names); do
+		index=$(pacman_repo_index "$repo")
+		# Index lines are name/version/depends/provides/filename/sha256 (6
+		# fields) -- drop the provides field (unused by callers) so both
+		# branches of this function emit the same 6-field shape prefixed
+		# with repo; a mismatch here previously misaligned every field
+		# after it for the caller (filename/sha256 silently swapped).
+		line=$(awk -F"$PACMAN_FS" -v n="$want" -v fs="$PACMAN_FS" \
+			'$1==n{print $1 fs $2 fs $3 fs $5 fs $6; exit}' "$index")
+		[ -z "$line" ] && continue
+		local pver; pver=$(printf '%s' "$line" | cut -d "$PACMAN_FS" -f2)
+		if version_satisfies_alpm "$pver" "$op" "$ver"; then
+			printf "%s${PACMAN_FS}%s\n" "$repo" "$line"
+			return 0
+		fi
+	done
+	for repo in $(pacman_repo_names); do
+		index=$(pacman_repo_index "$repo")
+		while IFS="$PACMAN_FS" read -r name version depends provides filename sha256; do
+			[ -z "$name" ] || [ -z "$provides" ] && continue
+			local prov
+			for prov in $(printf '%s' "$provides" | tr ',' ' '); do
+				local prov_name prov_ver
+				case "$prov" in
+					*=*) prov_name=${prov%%=*}; prov_ver=${prov#*=} ;;
+					*) prov_name=$prov; prov_ver="" ;;
+				esac
+				[ "$prov_name" = "$want" ] || continue
+				if [ -z "$op" ] && [ -n "$prov_ver" ] || version_satisfies_alpm "$prov_ver" "$op" "$ver"; then
+					printf "%s${PACMAN_FS}%s${PACMAN_FS}%s${PACMAN_FS}%s${PACMAN_FS}%s${PACMAN_FS}%s\n" \
+						"$repo" "$name" "$version" "$depends" "$filename" "$sha256"
+					return 0
+				fi
+			done
+		done < "$index"
+	done
+	return 1
+}
+
+_pacman_resolve_one() {
+	# Appends "repo\tname\tversion\tfilename\tsha256" lines to out_file for
+	# spec and everything it (transitively) depends on, dependencies before
+	# dependents, each name resolved at most once (seen_file). Returns 1
+	# only if *this exact* spec can't be found anywhere; a failure deeper in
+	# the tree is logged and skipped rather than propagated, since Arch
+	# dependency graphs commonly reference optional/soft deps this fallback
+	# doesn't need to take literally.
+	local spec=$1 seen_file=$2 out_file=$3
+	local name op ver
+	IFS="$PACMAN_FS" read -r name op ver <<< "$(alpm_dep_parse "$spec")"
+
+	grep -qxF "$name" "$seen_file" 2>/dev/null && return 0
+
+	local found
+	found=$(pacman_find_provider "$name" "$op" "$ver") || return 1
+	local repo pname pversion pdepends pfilename psha256
+	IFS="$PACMAN_FS" read -r repo pname pversion pdepends pfilename psha256 <<< "$found"
+
+	echo "$name" >> "$seen_file"
+	# A dependency spec doesn't always name the real package directly -- it
+	# can reference a virtual/soname alias (e.g. "libz.so=1-64") that
+	# resolves to a differently-named real package (zlib). Without also
+	# tracking the *resolved* name, that real package gets reprocessed (and
+	# printed) once per distinct alias it's reached through -- found by
+	# comparing cava's full closure against real pacman's own resolution:
+	# unique package counts matched exactly, but the raw output had ~40
+	# duplicate lines.
+	if [ "$pname" != "$name" ]; then
+		grep -qxF "$pname" "$seen_file" 2>/dev/null && return 0
+		echo "$pname" >> "$seen_file"
+	fi
+
+	if [ -n "$pdepends" ]; then
+		local d
+		for d in $(printf '%s' "$pdepends" | tr ',' ' '); do
+			[ -z "$d" ] && continue
+			_pacman_resolve_one "$d" "$seen_file" "$out_file" \
+				|| log "warning: couldn't resolve '$d' (a dependency of $pname) in any repo -- skipping it"
+		done
+	fi
+	printf "%s${PACMAN_FS}%s${PACMAN_FS}%s${PACMAN_FS}%s${PACMAN_FS}%s\n" "$repo" "$pname" "$pversion" "$pfilename" "$psha256" >> "$out_file"
+	return 0
+}
+
+pacman_resolve() {
+	# pacman_resolve <name> -> prints "repo<FS>name<FS>version<FS>filename<FS>sha256"
+	# (FS = $PACMAN_FS) lines for name and its full transitive closure, deps before dependents
+	local name=$1
+	local seen; seen=$(mktemp)
+	local out; out=$(mktemp)
+	if ! _pacman_resolve_one "$name" "$seen" "$out"; then
+		rm -f "$seen" "$out"
+		return 1
+	fi
+	cat "$out"
+	rm -f "$seen" "$out"
+}
+
 install_one_pacman() {
 	# System-side counterpart to app_install_one_pacman: merges into
 	# FAU_ROOT (rsync -aK, same as install_one's own merge) and records into
 	# system.json, instead of isolating into FAU_APPS_DIR. Used for base
-	# packages fetched straight from this build host's pacman/Artix repos
-	# rather than compiled from source (e.g. fastfetch during rootfs build).
+	# packages fetched straight from Arch/Artix's own repos rather than
+	# compiled from source (e.g. fastfetch during rootfs build).
 	local name=$1
-	local db_dir; db_dir=$(pacman_scratch_db)
-
-	local resolved; resolved=$(pacman -Sp --dbpath "$db_dir" --print-format '%n %r' "$name" 2>&1) \
-		|| die "pacman couldn't resolve '$name': $resolved"
+	local resolved; resolved=$(pacman_resolve "$name") \
+		|| die "couldn't resolve '$name' in any configured pacman repo"
 
 	mkdir -p "$FAU_ROOT"
 	local fetch_dir; fetch_dir=$(mktemp -d)
 	local version=""
 
-	while read -r pkgname repo; do
+	while IFS="$PACMAN_FS" read -r repo pkgname pkgversion filename sha256; do
 		[ -n "$pkgname" ] || continue
-		# pacman_scratch_db's local-package state is deliberately empty (so
-		# `pacman -Sp` resolves the FULL upstream closure, not just what's
-		# missing) -- but for a package like fastfetch/libgcc that closure
-		# also includes glibc, filesystem, tzdata, etc: things FloraOS
-		# already built from its own pinned source. Without this guard
-		# those get rsync-merged over FAU_ROOT too, silently replacing
-		# FloraOS's own compiled binaries with Arch's official ones --
-		# found by comparing libc.so.6's sha256 before/after a real build:
-		# the shipped one turned out to be Arch's, not FloraOS's own.
+		# pacman_resolve's closure for a package like fastfetch/libgcc also
+		# includes glibc, filesystem, tzdata, etc: things FloraOS already
+		# built from its own pinned source. Without this guard those get
+		# rsync-merged over FAU_ROOT too, silently replacing FloraOS's own
+		# compiled binaries with Arch's official ones -- found by comparing
+		# libc.so.6's sha256 before/after a real build: the shipped one
+		# turned out to be Arch's, not FloraOS's own.
 		if [ "$pkgname" != "$name" ] && [ -n "$(system_get_version "$pkgname")" ]; then
 			log "skipping $pkgname -- already provided by FloraOS's own build"
 			continue
@@ -601,12 +929,7 @@ install_one_pacman() {
 			log "skipping $pkgname -- Arch/Artix base-system bootstrap package, not something $name needs to run"
 			continue
 		fi
-		local pkgdir; pkgdir=$(pacman_pkgdir_for "$db_dir" "$repo" "$pkgname")
-		[ -n "$pkgdir" ] || die "couldn't find $pkgname in repo $repo's sync db"
-		local filename sha256
-		filename=$(pacman_desc_field "$db_dir" "$repo" "$pkgdir" FILENAME)
-		sha256=$(pacman_desc_field "$db_dir" "$repo" "$pkgdir" SHA256SUM)
-		[ -n "$filename" ] && [ -n "$sha256" ] || die "missing metadata for $pkgname in sync db"
+		[ -n "$filename" ] && [ -n "$sha256" ] || die "missing metadata for $pkgname in repo $repo"
 
 		local dest="$fetch_dir/$filename"
 		if [ -r "/var/cache/pacman/pkg/$filename" ]; then
@@ -641,7 +964,7 @@ install_one_pacman() {
 		# build-time dependencies on Arch, and it alone added 15MB of unused
 		# kernel headers to the shipped image (measured on a real build).
 		rm -rf "$extract_dir/usr/include"
-		[ "$pkgname" = "$name" ] && version=$(pacman_desc_field "$db_dir" "$repo" "$pkgdir" VERSION)
+		[ "$pkgname" = "$name" ] && version=$pkgversion
 		# --checksum: see install_one's own merge for why plain -aK isn't
 		# enough on an upgrade.
 		rsync -aK --checksum "$extract_dir/" "$FAU_ROOT/"
@@ -655,10 +978,8 @@ install_one_pacman() {
 
 app_install_one_pacman() {
 	local name=$1
-	local db_dir; db_dir=$(pacman_scratch_db)
-
-	local resolved; resolved=$(pacman -Sp --dbpath "$db_dir" --print-format '%n %r' "$name" 2>&1) \
-		|| die "pacman couldn't resolve '$name': $resolved"
+	local resolved; resolved=$(pacman_resolve "$name") \
+		|| die "couldn't resolve '$name' in any configured pacman repo"
 
 	local app_dir="${FAU_APPS_DIR%/}/${name}"
 	rm -rf "$app_dir"
@@ -666,19 +987,10 @@ app_install_one_pacman() {
 	local fetch_dir; fetch_dir=$(mktemp -d)
 	local target_files version=""
 
-	while read -r pkgname repo; do
+	while IFS="$PACMAN_FS" read -r repo pkgname pkgversion filename sha256; do
 		[ -n "$pkgname" ] || continue
-		local pkgdir; pkgdir=$(pacman_pkgdir_for "$db_dir" "$repo" "$pkgname")
-		[ -n "$pkgdir" ] || die "couldn't find $pkgname in repo $repo's sync db"
-		local filename sha256
-		filename=$(pacman_desc_field "$db_dir" "$repo" "$pkgdir" FILENAME)
-		sha256=$(pacman_desc_field "$db_dir" "$repo" "$pkgdir" SHA256SUM)
-		[ -n "$filename" ] && [ -n "$sha256" ] || die "missing metadata for $pkgname in sync db"
+		[ -n "$filename" ] && [ -n "$sha256" ] || die "missing metadata for $pkgname in repo $repo"
 
-		# Resolved directly, not via another `pacman -Sp <pkgname>` call --
-		# that re-resolves *that* package's own sub-dependencies too and can
-		# print several lines, making "the first line" ambiguous (caught by
-		# the checksum check below the hard way once already).
 		local dest="$fetch_dir/$filename"
 		if [ -r "/var/cache/pacman/pkg/$filename" ]; then
 			cp "/var/cache/pacman/pkg/$filename" "$dest"
@@ -699,7 +1011,7 @@ app_install_one_pacman() {
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
 		if [ "$pkgname" = "$name" ]; then
-			version=$(pacman_desc_field "$db_dir" "$repo" "$pkgdir" VERSION)
+			version=$pkgversion
 			target_files=$(cd "$extract_dir" && find usr/bin bin -maxdepth 1 -type f 2>/dev/null; true)
 		fi
 		cp -a "$extract_dir/." "$app_dir"
