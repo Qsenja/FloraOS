@@ -160,7 +160,16 @@ l6:6:wait:/usr/bin/openrc reboot
 # directly from inittab -- the same pattern already used below for
 # floralogin -- sidesteps whatever that is entirely and just guarantees it
 # runs once per boot.
-dh:2345:once:/etc/init.d/dhcpcd start
+#
+# Output redirected to /dev/null: sysvinit starts this "once" entry
+# concurrently with the "respawn" agetty entries below rather than
+# sequentially, so its ebegin/eend/dhcpcd-privsep-warning output otherwise
+# races the login prompt on the same console and garbles both (seen
+# directly: "floraos login:  * Starting dhcpcd ..." interleaved
+# mid-prompt). The startup itself doesn't depend on anything in that
+# output -- dhcpcd's own actual failures (lease errors etc) still exit
+# non-zero and are visible via `rc-service dhcpcd status`.
+dh:2345:once:/etc/init.d/dhcpcd start >/dev/null 2>&1
 
 1:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin --noclear tty1 linux
 s0:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin ttyS0 115200 vt100
