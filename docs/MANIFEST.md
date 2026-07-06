@@ -31,7 +31,7 @@ in the base.
 | grep | fau's own JSON parsing and package lookup logic uses grep — without it fau is broken *inside the running OS* (it only worked at build time because the build host has it) |
 | sed | fau's JSON read/write functions use sed — same reasoning as grep |
 | gawk | fau's repo/desc field parsing uses awk — same reasoning as grep |
-| findutils | fau's app-install bin-entrypoint detection uses find; dependency-list parsing uses xargs — same reasoning as grep |
+| findutils | fau's install (app) bin-entrypoint detection uses find; dependency-list parsing uses xargs — same reasoning as grep |
 | tar | fau's own package format (.fau.tar.zst) is a tar archive; fau extracts/builds these with tar — same reasoning as grep |
 | zstd | fau's package format is .fau.tar.zst — fau can't extract or build any package without it — same reasoning as grep |
 | rsync | fau's system-package installs merge via `rsync -aK` (needed to merge into the merged-/usr symlinks without replacing them) — same reasoning as grep |

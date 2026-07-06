@@ -137,7 +137,7 @@ main() {
 	cp "$FAU_BIN" "$ROOTFS_DIR/usr/bin/fau"
 	chmod 755 "$ROOTFS_DIR/usr/bin/fau"
 
-	FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" install "${BUILD_ORDER[@]}"
+	FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap "${BUILD_ORDER[@]}"
 
 	log "=== shipping a pacman mirrorlist/repo-list for fau's own use ==="
 	# fau's alpm (Arch/Artix repo) fallback (tools/fau/fau) never shells out to the
@@ -185,7 +185,7 @@ main() {
 	# kitty was deliberately left out here: its dependency closure (Python3 +
 	# Mesa + X11/Wayland) is ~773MB, and none of it does anything without a
 	# display server FloraOS doesn't have yet (see ARCHITECTURE.md). Install
-	# it yourself later with: fau app-install kitty
+	# it yourself later with: fau install kitty
 	#
 	# Same condition as the mirrorlist-shipping step above, not `command -v
 	# pacman`: fau's alpm fallback never touches the pacman binary, only
@@ -196,7 +196,7 @@ main() {
 		# declared dependency of fastfetch -- Arch/Artix assume it's always
 		# present as a base-system package, so Arch's own dependency
 		# resolution never lists it explicitly for anything that needs it.
-		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" install libgcc fastfetch
+		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap libgcc fastfetch
 	else
 		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- skipping fastfetch"
 	fi

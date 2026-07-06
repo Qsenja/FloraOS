@@ -54,7 +54,7 @@ So FloraOS ships **fau**, a small package manager written from scratch
     pacman db it resolves against has a deliberately *empty* local-package
     state (so `pacman -Sp` resolves the requested package's FULL upstream
     closure, not just what's missing) -- but for something like
-    `fau install fastfetch`, that closure also includes `glibc`,
+    `fau bootstrap fastfetch`, that closure also includes `glibc`,
     `filesystem`, `tzdata`, etc: packages FloraOS already built from its own
     pinned source. Left unguarded, those got merged into `FAU_ROOT` too,
     which **silently replaced FloraOS's own compiled `libc.so.6` with
@@ -144,14 +144,14 @@ So FloraOS ships **fau**, a small package manager written from scratch
     DHCP lease, a real HTTPS request, then `fau install tree` succeeding
     from inside the booted OS with `pacman` and `/etc/pacman.conf`
     genuinely absent (not just build-time reasoning).
-- **Reproducibility is native, not bolted on**: every install/remove updates
-  `/var/lib/fau/system.json`, an exact manifest of installed package names
-  and pinned versions. `fau export` dumps it (e.g. for backup or copying to
-  another machine); `fau apply system.json` installs the exact package set
-  from that manifest onto a fresh root. This gives declarative,
-  versioned reproducibility — not Nix-style content-addressed/bit-identical
-  builds, which was explicitly scoped out as too large for a lean,
-  auditable, purpose-built tool.
+- **Reproducibility is native, not bolted on**: every bootstrap/bootstrap-remove
+  updates `/var/lib/fau/system.json`, an exact manifest of installed
+  package names and pinned versions. `fau bootstrap-export` dumps it (e.g.
+  for backup or copying to another machine); `fau bootstrap-apply
+  system.json` installs the exact package set from that manifest onto a
+  fresh root. This gives declarative, versioned reproducibility — not
+  Nix-style content-addressed/bit-identical builds, which was explicitly
+  scoped out as too large for a lean, auditable, purpose-built tool.
 
 ## App isolation: per-app directories under ~/apps/
 
@@ -159,14 +159,14 @@ The base OS (kernel, glibc, coreutils, bash, util-linux, sysvinit, openrc,
 etc.) uses the standard FHS layout described above — it has to, since it's
 needed to boot and run the system before any user or home directory exists.
 
-User-facing software installed later is different: `fau app-install <name>`
+User-facing software installed later is different: `fau install <name>`
 puts everything for that app under `~/apps/<name>/` (files, plus its own
 `config/`, `cache/`, `data/`, `logs/` subdirectories) instead of merging it
 into `/usr` and `/etc`. A generated wrapper script in `~/apps/.bin/` sets
 `HOME`/`XDG_CONFIG_HOME`/`XDG_CACHE_HOME`/`XDG_DATA_HOME`/`XDG_STATE_HOME` to
 point inside that directory before exec'ing the real binary, so an app like
 Firefox ends up with everything — binary, config, cache, logs — contained in
-one place, and `fau app-remove firefox` deletes exactly that one directory
+one place, and `fau remove firefox` deletes exactly that one directory
 with nothing left behind elsewhere.
 
 This is the same idea as GoboLinux's per-program filesystem, scoped to user
@@ -239,12 +239,12 @@ build path that would've required compiling 16-bit real-mode boot code.
   named pipe (see `scripts/test-iso.sh`, which now does this on every
   `./floraiso test` run instead of just watching for the shell to appear on
   its own).
-- TODO: no GUI/display server (X11 or Wayland) -- `fau app-install`'s
+- TODO: no GUI/display server (X11 or Wayland) -- `fau install`'s
   alpm (Arch/Artix repo) fallback (see tools/fau/fau) can fetch GUI apps' files, but
   they have nowhere to draw pixels without this. Separate, larger project.
   kitty specifically was left out of the default ISO build for this reason:
   its dependency closure (Python3 + Mesa + X11/Wayland) is ~773MB with
-  nothing to run it on yet -- `fau app-install kitty` works today if you
+  nothing to run it on yet -- `fau install kitty` works today if you
   want the files anyway, it's just not baked in by default.
 - DONE: `sysctl` (procps-ng), `hostname` (Debian's standalone package, not
   inetutils -- see docs/MANIFEST.md), and `loadkeys`/`dumpkeys` (kbd) are now

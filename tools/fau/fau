@@ -5,11 +5,14 @@
 #   files/    payload
 #
 # Two install modes:
-#   install / remove / list   — system packages, merged into FAU_ROOT (/usr, /etc, ...)
-#   app-install / app-remove / app-list — user apps, each isolated under
+#   install / remove / list — user-facing: each package isolated under
 #     FAU_APPS_DIR/<name>/ with its own config/cache/data/logs, never touching
 #     the system root. See "bin" in pkginfo: comma-separated relative paths
 #     under files/ that should get a PATH-visible wrapper.
+#   bootstrap / bootstrap-remove / bootstrap-list — build-time only: merges
+#     straight into FAU_ROOT (/usr, /etc, ...). This is how build-rootfs.sh
+#     constructs the base rootfs itself (kernel, glibc, coreutils, etc.) --
+#     not meant to be run by an end user after boot.
 set -euo pipefail
 
 FAU_ROOT="${FAU_ROOT:-/}"
@@ -31,24 +34,26 @@ usage() {
 usage: fau <command> [args]
 
 commands:
-  install <pkg> [pkg ...]   install system package(s) into FAU_ROOT, with dependencies
-  remove <pkg> [pkg ...]    remove system package(s): files and system.json entry
-                              (no dependency check; files still owned by another
-                              installed package are left in place)
-  list                      list installed system packages and versions
-  export [file]             write system.json to file (default: stdout)
-  apply [file]              install the exact system package set recorded in file
-                              (default: system.json in the current directory)
-
-  app-install <pkg> [...]  install user app(s) into FAU_APPS_DIR/<name>/, isolated
-  app-remove <pkg> [...]    remove user app(s) and their PATH wrappers
-  app-list                 list installed user apps and versions
+  install <pkg> [pkg ...]   install package(s) into FAU_APPS_DIR/<name>/, isolated
+  remove <pkg> [pkg ...]    remove package(s) and their PATH wrappers
+  list                      list installed packages and versions
 
   repo-add <archive>        add a built .fau.tar.zst to the local repo and index it
   repo-index                rebuild repo.json from the archives present in the repo dir
 
+build-time only (used by scripts/build-rootfs.sh, not meant for end users):
+  bootstrap <pkg> [pkg ...] install system package(s) into FAU_ROOT, with dependencies
+  bootstrap-remove <pkg> [pkg ...]
+                            remove system package(s): files and system.json entry
+                              (no dependency check; files still owned by another
+                              installed package are left in place)
+  bootstrap-list            list installed system packages and versions
+  bootstrap-export [file]   write system.json to file (default: stdout)
+  bootstrap-apply [file]    install the exact system package set recorded in file
+                              (default: system.json in the current directory)
+
 environment:
-  FAU_ROOT        target root for system packages (default: /)
+  FAU_ROOT        target root for bootstrap package(s) (default: /)
   FAU_REPO_DIR    directory holding .fau.tar.zst archives + repo.json (default: /etc/fau/repo)
   FAU_APPS_DIR    directory for isolated user apps (default: $HOME/apps)
 EOF
@@ -266,7 +271,7 @@ repo_add() {
 	repo_index
 }
 
-# --- install/remove ----------------------------------------------------------
+# --- bootstrap/bootstrap-remove (build-time only, merges into FAU_ROOT) ------
 
 record_files() {
 	# record_files <name> <source-dir> -- <source-dir> is a package's
@@ -280,10 +285,10 @@ record_files() {
 
 install_one() {
 	# install_one <name> [want-version] [ancestor-chain] -- want-version,
-	# when given (used by cmd_apply), is enforced against the fau repo's own
-	# recorded version: reproducibility from a system.json manifest is only
-	# real if a version mismatch is a hard error, not a silent "install
-	# whatever's there now". ancestor-chain is the colon-delimited list of
+	# when given (used by cmd_bootstrap_apply), is enforced against the fau
+	# repo's own recorded version: reproducibility from a system.json
+	# manifest is only real if a version mismatch is a hard error, not a
+	# silent "install whatever's there now". ancestor-chain is the colon-delimited list of
 	# packages currently being installed up the call stack -- passed as a
 	# plain argument (not a global) so each recursive branch gets its own
 	# copy with nothing to clean up on return, and detects a circular
@@ -366,8 +371,8 @@ install_one() {
 	fi
 }
 
-cmd_install() {
-	[ $# -ge 1 ] || die "install requires at least one package name"
+cmd_bootstrap() {
+	[ $# -ge 1 ] || die "bootstrap requires at least one package name"
 	state_init
 	local total=$# i=0
 	for name in "$@"; do
@@ -399,8 +404,8 @@ remove_one_file() {
 	fi
 }
 
-cmd_remove() {
-	[ $# -ge 1 ] || die "remove requires at least one package name"
+cmd_bootstrap_remove() {
+	[ $# -ge 1 ] || die "bootstrap-remove requires at least one package name"
 	state_init
 	for name in "$@"; do
 		[ -n "$(system_get_version "$name")" ] || { log "$name is not installed, skipping"; continue; }
@@ -430,20 +435,20 @@ cmd_remove() {
 	done
 }
 
-cmd_list() {
+cmd_bootstrap_list() {
 	state_init
 	for n in $(system_list_names); do
 		printf '%s %s\n' "$n" "$(system_get_version "$n")"
 	done
 }
 
-cmd_export() {
+cmd_bootstrap_export() {
 	state_init
 	if [ $# -ge 1 ]; then cp "$FAU_SYSTEM_JSON" "$1"; else cat "$FAU_SYSTEM_JSON"; fi
 }
 
-cmd_apply() {
-	[ $# -le 1 ] || die "apply takes at most one manifest file"
+cmd_bootstrap_apply() {
+	[ $# -le 1 ] || die "bootstrap-apply takes at most one manifest file"
 	local manifest=${1:-system.json}
 	[ -f "$manifest" ] || die "no such file: $manifest"
 	state_init
@@ -451,15 +456,15 @@ cmd_apply() {
 	# {"packages":{"name":{"version":"x"}}} shape (system.json's own format)
 	# -- reusing them instead of a second hand-rolled regex is also what
 	# surfaced this function used to read names only and silently drop the
-	# version, so "apply" never actually verified it installed what the
-	# manifest recorded.
+	# version, so "bootstrap-apply" never actually verified it installed
+	# what the manifest recorded.
 	local n
 	for n in $(json_list_names "$manifest"); do
 		install_one "$n" "$(json_get_version "$manifest" "$n")"
 	done
 }
 
-# --- app-install/app-remove/app-list -----------------------------------------
+# --- install/remove/list (user-facing, isolated apps) ------------------------
 # Each app lives entirely under FAU_APPS_DIR/<name>/: its own files, plus
 # config/cache/data/logs subdirs. Wrapper scripts in FAU_APPS_BIN_DIR (put
 # that on PATH) set HOME/XDG_*_HOME to redirect the app into its own
@@ -564,9 +569,9 @@ app_install_one() {
 }
 
 # --- alpm (Arch/Artix repo) fallback, no pacman binary ----------------------
-# Until FloraOS has its own curated app catalog, install/app-install fall
-# back to pulling from Arch/Artix's own repos when a package isn't in the
-# local fau repo. This never shells out to the `pacman` binary at all --
+# Until FloraOS has its own curated app catalog, install/bootstrap fall back
+# to pulling from Arch/Artix's own repos when a package isn't in the local
+# fau repo. This never shells out to the `pacman` binary at all --
 # only its *data formats* (sync db, desc files, mirrorlist, pacman.conf's
 # repo list) are read directly, using fau's own fetch/resolve/verify code.
 # That means this fallback works both at build time (reading this build
@@ -1128,9 +1133,9 @@ app_install_one_alpm() {
 		app_wrapper_write "$name" "$app_dir" "$relbin"
 	done
 
-	# Without this, app-remove can't find which wrapper scripts belong to
+	# Without this, `fau remove` can't find which wrapper scripts belong to
 	# this app (it reads bin= from .pkginfo, same as the repo-based
-	# app_install_one does) -- confirmed by a real app-install/app-remove
+	# app_install_one does) -- confirmed by a real install/remove
 	# round-trip: the wrapper in FAU_APPS_BIN_DIR survived "removal" and
 	# failed with "No such file or directory" on next use.
 	{
@@ -1150,8 +1155,8 @@ app_install_one_alpm() {
 	esac
 }
 
-cmd_app_install() {
-	[ $# -ge 1 ] || die "app-install requires at least one package name"
+cmd_install() {
+	[ $# -ge 1 ] || die "install requires at least one package name"
 	apps_state_init
 	local total=$# i=0
 	for name in "$@"; do
@@ -1161,8 +1166,8 @@ cmd_app_install() {
 	done
 }
 
-cmd_app_remove() {
-	[ $# -ge 1 ] || die "app-remove requires at least one package name"
+cmd_remove() {
+	[ $# -ge 1 ] || die "remove requires at least one package name"
 	apps_state_init
 	for name in "$@"; do
 		[ -n "$(json_get_version "$FAU_APPS_JSON" "$name")" ] || { log "app $name is not installed, skipping"; continue; }
@@ -1181,7 +1186,7 @@ cmd_app_remove() {
 	done
 }
 
-cmd_app_list() {
+cmd_list() {
 	apps_state_init
 	for n in $(json_list_names "$FAU_APPS_JSON"); do
 		printf '%s %s\n' "$n" "$(json_get_version "$FAU_APPS_JSON" "$n")"
@@ -1195,11 +1200,11 @@ main() {
 		install) cmd_install "$@" ;;
 		remove) cmd_remove "$@" ;;
 		list) cmd_list "$@" ;;
-		export) cmd_export "$@" ;;
-		apply) cmd_apply "$@" ;;
-		app-install) cmd_app_install "$@" ;;
-		app-remove) cmd_app_remove "$@" ;;
-		app-list) cmd_app_list "$@" ;;
+		bootstrap) cmd_bootstrap "$@" ;;
+		bootstrap-remove) cmd_bootstrap_remove "$@" ;;
+		bootstrap-list) cmd_bootstrap_list "$@" ;;
+		bootstrap-export) cmd_bootstrap_export "$@" ;;
+		bootstrap-apply) cmd_bootstrap_apply "$@" ;;
 		repo-add) repo_add "$@" ;;
 		repo-index) repo_index "$@" ;;
 		-h|--help|help) usage ;;

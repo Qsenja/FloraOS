@@ -6,10 +6,10 @@ pinned upstream source (see `config/versions.conf`). OpenRC + sysvinit for
 init, GNU userland (bash/coreutils/util-linux), and `fau`, FloraOS's own
 package manager, written from scratch rather than forked from an existing one.
 
-What makes FloraOS different: user-installed apps via `fau app-install` live
+What makes FloraOS different: user-installed apps via `fau install` live
 entirely under `~/apps/<name>/` — binary, config, cache, logs, all in one
 self-contained directory, never scattered across `/usr`, `/etc`, `/var/log`.
-`fau app-remove firefox` deletes exactly that directory and nothing else. See
+`fau remove firefox` deletes exactly that directory and nothing else. See
 [ARCHITECTURE.md](ARCHITECTURE.md#app-isolation-per-app-directories-under-apps)
 for how and why, and its real limits.
 
@@ -53,9 +53,9 @@ shell to appear on its own). Concretely, right now:
   yet to set a real one.
 - **`fau` runs inside the booted OS**, not just as a build-time tool —
   verified directly with an unprivileged `unshare --user --map-root-user
-  --mount chroot` into the built rootfs (no sudo needed): `fau list`
-  correctly prints all 29 installed packages, and ordinary commands like
-  `ls` work.
+  --mount chroot` into the built rootfs (no sudo needed): `fau
+  bootstrap-list` correctly prints all 29 installed base packages, and
+  ordinary commands like `ls` work.
 - **ISO size: 164MB** (`floraos.iso`, hybrid BIOS+UEFI, boots and runs
   entirely from RAM as a live image). Grew from an earlier 135MB, mostly
   from fixing a real bug where FloraOS's own compiled glibc was being
@@ -69,11 +69,11 @@ shell to appear on its own). Concretely, right now:
 What's explicitly *not* done yet (all documented with reasoning in
 [ARCHITECTURE.md](ARCHITECTURE.md)'s TODO section):
 
-- **No GUI/display server** (X11 or Wayland). `fau app-install` can fetch
+- **No GUI/display server** (X11 or Wayland). `fau install` can fetch
   GUI apps' files via its alpm (Arch/Artix repo) fallback, but they have nowhere to
   render yet. `kitty` was deliberately left out of the default ISO for this
   reason — its dependency closure is ~773MB of Python3/Mesa/X11/Wayland with
-  nothing to run it on; `fau app-install kitty` works today if you want the
+  nothing to run it on; `fau install kitty` works today if you want the
   files anyway.
 - No persistent disk install — FloraOS currently only boots as a live,
   RAM-resident image.
@@ -129,24 +129,34 @@ work/                   # build output (gitignored) -- sources, staged builds, r
 ## fau, the package manager
 
 ```
-fau install <pkg>          # system package -> merged into FAU_ROOT (/usr, /etc, ...)
-fau app-install <pkg>      # user app -> isolated under ~/apps/<pkg>/
-fau app-remove <pkg>       # deletes that app's directory and its PATH wrapper, nothing else
-fau export system.json     # dump the exact installed package set
-fau apply system.json      # reproduce that exact package set on another machine
+fau install <pkg>          # user app -> isolated under ~/apps/<pkg>/
+fau remove <pkg>           # deletes that app's directory and its PATH wrapper, nothing else
+fau list                   # list installed apps and versions
 ```
 
-`app-install` (and `install`) first checks FloraOS's own repo; until there's
-a curated catalog of FloraOS-native apps, anything not found there falls
-back to fetching straight from Arch/Artix's own repos — dependency-resolved
-(including virtual/PROVIDES packages and version constraints) and
-sha256-verified, merged into the same isolated app directory (no root, and
-nothing gets installed onto your real system). This fallback doesn't shell
-out to `pacman` at all (it reads the sync-db/mirrorlist formats itself), so
-it works both when building the ISO here *and* from inside an
-already-booted FloraOS system, which ships neither `pacman` nor its config
-— see ARCHITECTURE.md for how that's verified. GUI apps will fetch fine but
-have nowhere to render without a display server (not built yet, see
+`install` first checks FloraOS's own repo; until there's a curated catalog
+of FloraOS-native apps, anything not found there falls back to fetching
+straight from Arch/Artix's own repos — dependency-resolved (including
+virtual/PROVIDES packages and version constraints) and sha256-verified,
+merged into the same isolated app directory (no root, and nothing gets
+installed onto your real system). This fallback doesn't shell out to
+`pacman` at all (it reads the sync-db/mirrorlist formats itself), so it
+works both when building the ISO here *and* from inside an already-booted
+FloraOS system, which ships neither `pacman` nor its config — see
+ARCHITECTURE.md for how that's verified. GUI apps will fetch fine but have
+nowhere to render without a display server (not built yet, see
 ARCHITECTURE.md).
+
+There's also a build-time-only counterpart —
+`bootstrap`/`bootstrap-remove`/`bootstrap-list`/`bootstrap-export`/`bootstrap-apply`
+— that merges straight into FAU_ROOT (`/usr`, `/etc`, ...) instead of an
+isolated app directory. It's how `scripts/build-rootfs.sh` constructs the
+base rootfs itself (kernel, glibc, coreutils, etc.); not something an end
+user needs after boot.
+
+```
+fau bootstrap-export system.json   # dump the exact base-system package set
+fau bootstrap-apply system.json    # reproduce that exact package set on another machine
+```
 
 See `tools/fau/fau --help` for the full command list.

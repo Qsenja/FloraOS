@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Applies the FloraOS /etc skeleton, identity files, and the sysvinit/openrc
 # glue (inittab + dhcpcd service) on top of an already fau-installed rootfs.
-# Run after `fau install`, before ldconfig.
+# Run after `fau bootstrap`, before ldconfig.
 set -euo pipefail
 
 ROOTFS=${1:?usage: apply-skeleton.sh <rootfs-dir> [hostname]}

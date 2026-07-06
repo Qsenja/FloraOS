@@ -1,4 +1,4 @@
-# GNU findutils (find, xargs). fau's app-install bin-entrypoint detection
+# GNU findutils (find, xargs). fau's install (app) bin-entrypoint detection
 # uses find; its dependency-list parsing uses xargs -- without these, fau
 # is broken inside the running OS.
 PKG_DESCRIPTION="GNU findutils (find, xargs)"
