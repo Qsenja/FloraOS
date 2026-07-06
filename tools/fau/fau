@@ -992,6 +992,13 @@ _alpm_resolve_one() {
 	IFS="$ALPM_FS" read -r repo pname pversion pdepends pfilename psha256 <<< "$found"
 
 	echo "$name" >> "$seen_file"
+	# A single line, redrawn in place (not one new line per dependency --
+	# that was noisy for a big closure like cowsay's) -- but still real
+	# live output, not silence: resolving a large closure for the first
+	# time (building the alpm repo index, walking many dependencies) can
+	# take several seconds, and with nothing printed at all during that
+	# stretch it looked like fau had simply hung.
+	printf '\rfau: resolving dependencies... %-40s' "$(wc -l < "$seen_file") found (latest: $pname)" >&2
 	# A dependency spec doesn't always name the real package directly -- it
 	# can reference a virtual/soname alias (e.g. "libz.so=1-64") that
 	# resolves to a differently-named real package (zlib). Without also
@@ -1027,6 +1034,11 @@ alpm_resolve() {
 		rm -f "$seen" "$out"
 		return 1
 	fi
+	# Ends the \r-redrawn "resolving dependencies..." line from
+	# _alpm_resolve_one on its own line, so the caller's next log() line
+	# (the "resolved N package(s)..." summary) starts clean instead of
+	# overwriting/trailing it.
+	echo >&2
 	cat "$out"
 	rm -f "$seen" "$out"
 }

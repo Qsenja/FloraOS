@@ -68,7 +68,12 @@ EOF
 
 cat > "$ROOTFS/etc/profile" <<'EOF'
 export PS1='floraos-boot-ok # '
-export PATH=/usr/bin
+# $HOME/apps/.bin: fau install's wrapper scripts (see tools/fau/fau,
+# FAU_APPS_BIN_DIR) -- without this every login otherwise printed "note:
+# .../apps/.bin is not on your PATH yet" after the very first `fau
+# install`, which is exactly the state a fresh boot should already be in
+# for the default (unoverridden) FAU_APPS_DIR.
+export PATH=/usr/bin:$HOME/apps/.bin
 command -v fastfetch >/dev/null 2>&1 && fastfetch --config /etc/fastfetch/config.jsonc
 EOF
 
