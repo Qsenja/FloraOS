@@ -17,7 +17,7 @@ in the base.
 |---|---|
 | linux-lts | kernel; LTS branch means fewer breaking changes to track on a from-scratch distro (see ARCHITECTURE.md) |
 | glibc | libc; standard pairing with GNU userland, which the target spec mandates. `memusagestat` pruned post-install (needs libgd, which FloraOS doesn't ship) |
-| ncurses | terminal capabilities (terminfo) library — bash/readline links against libncursesw.so.6 dynamically; without shipping it ourselves bash can't even load |
+| ncurses | terminal capabilities (terminfo) library — bash/readline links against libncursesw.so.6 dynamically; without shipping it ourselves bash can't even load. Built with `--with-versioned-syms`: without it, every single invocation of anything linking against it warned "no version information available" (bash etc. are built against this build host's own *versioned* ncurses, so they request a version node ours didn't define) — cosmetic, but found on every line of a real interactive boot |
 | bash | required default shell |
 | coreutils | required GNU userland (ls, cp, mv, cat, ...) |
 | util-linux | required GNU userland (mount, fdisk, losetup, ...) |

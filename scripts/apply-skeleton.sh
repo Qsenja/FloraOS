@@ -88,6 +88,7 @@ EOF
 
 cat > "$ROOTFS/etc/group" <<'EOF'
 root:x:0:
+uucp:x:10:
 EOF
 
 cat > "$ROOTFS/etc/shadow" <<'EOF'

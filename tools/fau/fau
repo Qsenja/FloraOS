@@ -584,6 +584,23 @@ install_one_pacman() {
 			log "skipping $pkgname -- already provided by FloraOS's own build"
 			continue
 		fi
+		# "filesystem" is Arch/Artix's own base-system bootstrap package --
+		# never something the *requested* package (fastfetch/libgcc) needs
+		# to run, only ever dragged in because Arch's dependency graph
+		# implies "a base Arch system" underneath everything. Its content
+		# outside etc/ and usr/include (already stripped below) is entirely
+		# Arch/Artix distro integration -- /usr/lib/tmpfiles.d/artix.conf,
+		# /usr/lib/sysctl.d/10-artix.conf, /usr/lib/sysusers.d/artix.conf,
+		# Artix branding pixmaps -- and merging it in silently applied
+		# Artix's own sysctl tuning at boot and threw tmpfiles errors for
+		# /etc files this build deliberately doesn't ship (found on a real
+		# boot, not by inspection). Skipped by name rather than stripping a
+		# fifth individual subdirectory: none of "filesystem" is ever
+		# wanted here, regardless of what FloraOS itself provides.
+		if [ "$pkgname" = "filesystem" ]; then
+			log "skipping $pkgname -- Arch/Artix base-system bootstrap package, not something $name needs to run"
+			continue
+		fi
 		local pkgdir; pkgdir=$(pacman_pkgdir_for "$db_dir" "$repo" "$pkgname")
 		[ -n "$pkgdir" ] || die "couldn't find $pkgname in repo $repo's sync db"
 		local filename sha256

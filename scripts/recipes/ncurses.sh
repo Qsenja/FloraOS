@@ -10,10 +10,20 @@ recipe_build() {
 	local jobs; jobs=$(nproc)
 	(
 		cd "$src"
+		# --with-versioned-syms: bash (and everything else linking against
+		# ncurses here) is built against this build host's own ncurses,
+		# which defines versioned ELF symbols (e.g. NCURSES6_TINFO_...) --
+		# without this flag our own libncursesw.so.6 has no matching
+		# version nodes at all, so every single invocation of anything
+		# linking against it warns "no version information available"
+		# (harmless -- falls back to plain symbol lookup -- but noisy on
+		# every line of a real boot, confirmed by booting the ISO directly
+		# in QEMU rather than just the automated marker check).
 		./configure --prefix=/usr \
 			--with-shared \
 			--enable-widec \
 			--enable-pc-files \
+			--with-versioned-syms \
 			--without-debug \
 			--without-ada \
 			--without-tests

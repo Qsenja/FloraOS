@@ -70,6 +70,20 @@ So FloraOS ships **fau**, a small package manager written from scratch
     the sole source of truth for `/etc`), (3) strip `usr/include` too --
     `linux-api-headers` is a pure build-time artifact that added 15MB of
     unused kernel headers to the shipped image for zero runtime benefit.
+  - **A fourth leak found by actually booting the ISO interactively in
+    QEMU, not just the automated marker check**: even with (2) and (3),
+    Arch's `filesystem` package still contributed `/usr/lib/tmpfiles.d/
+    artix.conf`, `/usr/lib/sysctl.d/10-artix.conf`, and `/usr/lib/
+    sysusers.d/artix.conf` -- none of that is under `etc/` or
+    `usr/include`, so it survived. Result: FloraOS was silently applying
+    Artix's own sysctl tuning at every boot ("Applying /usr/lib/sysctl.d/
+    10-artix.conf..."), and openrc's tmpfiles.setup was throwing chown/
+    chgrp errors for `/etc/artix-release` and a dozen other files that
+    artix.conf expected but FloraOS deliberately doesn't ship. Fixed by
+    skipping the whole `filesystem` package by name in `install_one_pacman`
+    -- unlike `glibc` (skipped because FloraOS already provides it),
+    `filesystem` is skipped because *nothing* in it is ever wanted here,
+    regardless of what FloraOS itself provides.
 - **Reproducibility is native, not bolted on**: every install/remove updates
   `/var/lib/fau/system.json`, an exact manifest of installed package names
   and pinned versions. `fau export` dumps it (e.g. for backup or copying to

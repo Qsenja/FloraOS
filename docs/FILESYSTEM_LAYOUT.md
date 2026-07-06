@@ -50,4 +50,7 @@ Standard FHS layout, nothing exotic. Only the parts worth calling out:
 Minimal set only: `passwd`, `group`, `shadow`, `fstab`, `hostname`, `os-release`,
 `motd`, `issue`, `resolv.conf` (populated by dhcpcd), `init.d/`, `conf.d/`,
 `runlevels/`. No cron, no PAM (floralogin is PAM-free, see ARCHITECTURE.md),
-no extra service config for packages that aren't in the manifest.
+no extra service config for packages that aren't in the manifest. `/etc/group`
+has one non-root entry, `uucp` — openrc's own upstream `init.sh` runs
+`checkpath -o root:uucp /run/lock` unconditionally; without the group it just
+logged "owner not found" every boot.
