@@ -43,6 +43,14 @@ So FloraOS ships **fau**, a small package manager written from scratch
   `repo.json` index (name -> version/filename/sha256).
 - Install/remove: extracts payloads relative to a target root, records the
   package + version + file list, resolves dependencies listed in `pkginfo`.
+- **The pacman-backed fallback needs pacman on whatever machine runs `fau`**:
+  it shells out to the local `pacman`/`/var/lib/pacman/sync` and this build
+  host's mirrorlist. FloraOS itself doesn't ship pacman (shipping it would
+  mean vendoring Arch/Artix's package manager, the thing explicitly ruled
+  out at the start), so this fallback works when building the ISO on a
+  pacman-based host (as here), but *not* from inside an already-booted
+  FloraOS system -- there, `fau install`/`app-install` only have whatever
+  `FAU_REPO_DIR` you point them at.
 - **Reproducibility is native, not bolted on**: every install/remove updates
   `/var/lib/fau/system.json`, an exact manifest of installed package names
   and pinned versions. `fau export` dumps it (e.g. for backup or copying to
@@ -103,11 +111,21 @@ build path that would've required compiling 16-bit real-mode boot code.
 - TODO: no GUI/display server (X11 or Wayland) -- `fau app-install`'s
   pacman-backed fallback (see tools/fau/fau) can fetch GUI apps' files, but
   they have nowhere to draw pixels without this. Separate, larger project.
+  kitty specifically was left out of the default ISO build for this reason:
+  its dependency closure (Python3 + Mesa + X11/Wayland) is ~773MB with
+  nothing to run it on yet -- `fau app-install kitty` works today if you
+  want the files anyway, it's just not baked in by default.
 - TODO: `sysctl`, `hostname`, and `loadkeys`/`keymaps` commands aren't part
   of any built package yet (sysctl is procps-ng; hostname is its own small
   package or part of inetutils; keymaps needs kbd). Their openrc sysinit
   services fail non-fatally (logged, boot continues) -- add these packages
   when their functionality is actually needed.
+- TODO: `memusagestat` (glibc's memory-usage grapher) and `fsck.cramfs`/
+  `mkfs.cramfs` (e2fsprogs' legacy cramfs support) auto-link against
+  libgd and libz respectively, both absent from the base manifest. Left
+  broken rather than adding two more packages for tools that aren't part
+  of FloraOS's actual filesystem (ext4) or debugging workflow -- revisit if
+  either is ever actually needed.
 - TODO: bash lacks job control on the console (`cannot set terminal process
   group`) since /etc/inittab spawns it directly instead of through a real
   getty that opens/attaches the tty properly. Cosmetic for now; would need

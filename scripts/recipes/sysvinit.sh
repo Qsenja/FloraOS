@@ -13,5 +13,10 @@ recipe_build() {
 		cd "$src"
 		make -C src -j"$jobs"
 		make -C src ROOT="$files" base_bindir=/usr/bin base_sbindir=/usr/bin install
+		# sulogin (single-user-mode emergency shell) needs libcrypt for
+		# password checks, but there's no working password-backed login to
+		# check against yet (see ARCHITECTURE.md TODO on PAM/login) -- drop
+		# it rather than ship a binary that can't load.
+		rm -f "$files/usr/bin/sulogin"
 	)
 }

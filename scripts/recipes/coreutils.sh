@@ -6,7 +6,16 @@ recipe_build() {
 	local jobs; jobs=$(nproc)
 	(
 		cd "$src"
-		./configure --prefix=/usr
+		# All three below are optional features coreutils auto-detects and
+		# links against if present on the build host, regardless of the
+		# base actually needing them -- ls's capability display (libcap),
+		# expr/factor's bignum support (libgmp), and a faster sha*sum via
+		# libcrypto. None of these are shipped, so coreutils would fail to
+		# even load without disabling them.
+		./configure --prefix=/usr \
+			--disable-libcap \
+			--without-libgmp \
+			--with-openssl=no
 		make -j"$jobs"
 		fakeroot -- make DESTDIR="$files" install
 	)

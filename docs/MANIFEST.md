@@ -28,7 +28,22 @@ in the base.
 | openrc | runlevel/service manager, started by sysvinit; explicitly no systemd |
 | dhcpcd | DHCP client; base networking as specified in the target spec |
 | iproute2 | `ip` command for manual interface/route configuration when dhcpcd isn't enough |
-| fau | FloraOS's own package manager (see tools/fau) — installs from the FloraOS package repo and owns the `system.json` reproducibility manifest natively |
+| libmd | dhcpcd links against this (BSD message-digest routines) with no configure flag to avoid it, unlike most other auto-detected-optional-lib gaps found here |
+| attr, acl | gnulib-based tools (sed, and potentially others later) auto-detect and link against libattr/libacl if present on whatever machine builds them, regardless of whether their own configure was told to care about xattrs/ACLs. Shipping these once closes that class of gap instead of chasing it per-package |
+| grep | fau's own JSON parsing and package lookup logic uses grep — without it fau is broken *inside the running OS* (it only worked at build time because the build host has it) |
+| sed | fau's JSON read/write functions use sed — same reasoning as grep |
+| gawk | fau's repo/desc field parsing uses awk — same reasoning as grep |
+| findutils | fau's app-install bin-entrypoint detection uses find; dependency-list parsing uses xargs — same reasoning as grep |
+| tar | fau's own package format (.fau.tar.zst) is a tar archive; fau extracts/builds these with tar — same reasoning as grep |
+| zstd | fau's package format is .fau.tar.zst — fau can't extract or build any package without it — same reasoning as grep |
+| rsync | fau's system-package installs merge via `rsync -aK` (needed to merge into the merged-/usr symlinks without replacing them) — same reasoning as grep |
+| fau | FloraOS's own package manager (see tools/fau) — installs from the FloraOS package repo and owns the `system.json` reproducibility manifest natively. (Yes, fau needs the row above to function — a small bootstrapping irony worth naming rather than leaving implicit) |
+
+## Branding (not part of the minimal-base philosophy, added deliberately anyway)
+
+| Package | Reason |
+|---|---|
+| fastfetch | requested identity/branding touch — shown at login via /etc/profile, configured with a custom logo (assets/floraos-logo.txt) and a Packages line reading fau's own list instead of a package manager it doesn't know about. Fetched via fau's pacman-backed fallback, not built from source (small, and not core to the OS) |
 
 ## Build-host tooling (not part of FloraOS, not built from source)
 

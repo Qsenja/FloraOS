@@ -1,0 +1,27 @@
+{
+	"$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+	"logo": {
+		"type": "file",
+		"source": "/etc/fastfetch/floraos-logo.txt"
+	},
+	"modules": [
+		"title",
+		"separator",
+		"os",
+		"kernel",
+		"uptime",
+		"shell",
+		{
+			// fastfetch's built-in "packages" module only knows about
+			// pacman/dpkg/etc, not fau -- this reads the count straight
+			// from fau's own installed-package list instead.
+			"type": "command",
+			"key": "Packages",
+			"text": "fau list | wc -l",
+			"format": "{} (fau)"
+		},
+		"memory",
+		"break",
+		"colors"
+	]
+}

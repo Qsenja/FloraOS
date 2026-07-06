@@ -13,7 +13,8 @@ recipe_build() {
 			--enable-elf-shlibs \
 			--disable-libblkid \
 			--disable-libuuid \
-			--disable-fsck
+			--disable-fsck \
+			--disable-fuse2fs
 		make -j"$jobs"
 		fakeroot -- make DESTDIR="$files" install
 	)

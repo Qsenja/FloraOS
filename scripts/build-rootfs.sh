@@ -25,7 +25,22 @@ MANDATORY_ORDER=(
 	util-linux
 	e2fsprogs
 	iproute2
+	libmd
 	dhcpcd
+	# The rest of these exist for one reason: fau itself needs them at
+	# runtime (grep/sed/gawk/find+xargs/tar/zstd/rsync — see each recipe's
+	# own comment for exactly which fau code path uses it). They only
+	# "worked" during the build because the build host has them; without
+	# shipping them, fau is broken inside the actual booted OS.
+	attr
+	acl
+	grep
+	sed
+	gawk
+	findutils
+	tar
+	zstd
+	rsync
 )
 BUILD_ORDER=("${MANDATORY_ORDER[@]}" ${EXTRA_PACKAGES:-})
 
@@ -93,7 +108,30 @@ main() {
 	# autotools' default sbindir is a separate ${prefix}/sbin; merge it into
 	# usr/bin too so every package lands in one place regardless of flags.
 	ln -s bin "$ROOTFS_DIR/usr/sbin"
+
+	# fau itself: a portable bash script, nothing to compile -- but it must
+	# actually ship in the OS, not just be a build-host tool, since it's
+	# FloraOS's own package manager and the whole point is for the running
+	# system to use it (fastfetch's Packages line depends on this too).
+	cp "$FAU_BIN" "$ROOTFS_DIR/usr/bin/fau"
+	chmod 755 "$ROOTFS_DIR/usr/bin/fau"
+
 	FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" install "${BUILD_ORDER[@]}"
+
+	log "=== branding: fastfetch (via fau's pacman fallback, not the minimal base) ==="
+	# kitty was deliberately left out here: its dependency closure (Python3 +
+	# Mesa + X11/Wayland) is ~773MB, and none of it does anything without a
+	# display server FloraOS doesn't have yet (see ARCHITECTURE.md). Install
+	# it yourself later with: fau app-install kitty
+	if command -v pacman >/dev/null 2>&1; then
+		# libgcc (libgcc_s.so.1, C++ exception-handling runtime) isn't a
+		# declared dependency of fastfetch -- Arch/Artix assume it's always
+		# present as a base-system package, so pacman's own dependency
+		# resolution never lists it explicitly for anything that needs it.
+		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" install libgcc fastfetch
+	else
+		log "pacman not available on this build host -- skipping fastfetch"
+	fi
 
 	log "=== applying /etc skeleton ==="
 	"$SELF_DIR/apply-skeleton.sh" "$ROOTFS_DIR" "${HOSTNAME:-floraos}"

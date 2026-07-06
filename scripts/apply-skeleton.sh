@@ -49,7 +49,18 @@ EOF
 cat > "$ROOTFS/etc/profile" <<'EOF'
 export PS1='floraos-boot-ok # '
 export PATH=/usr/bin
+command -v fastfetch >/dev/null 2>&1 && fastfetch --config /etc/fastfetch/config.jsonc
 EOF
+
+# FloraOS branding: custom logo + fastfetch config, run once per login shell
+# above. fastfetch itself is fetched via fau's pacman-backed fallback (see
+# build-rootfs.sh) rather than built from source -- it's not part of the
+# minimal base manifest, just an identity/branding touch.
+if [ -f "$FLORA_ROOT/assets/floraos-logo.txt" ]; then
+	mkdir -p "$ROOTFS/etc/fastfetch"
+	cp "$FLORA_ROOT/assets/floraos-logo.txt" "$ROOTFS/etc/fastfetch/floraos-logo.txt"
+	cp "$FLORA_ROOT/assets/fastfetch-config.jsonc" "$ROOTFS/etc/fastfetch/config.jsonc"
+fi
 
 cat > "$ROOTFS/etc/nsswitch.conf" <<'EOF'
 passwd: files

@@ -1,5 +1,5 @@
 PKG_DESCRIPTION="DHCP client for base networking"
-PKG_DEPENDS="glibc"
+PKG_DEPENDS="glibc,libmd"
 
 recipe_build() {
 	local src=$1 files=$2
