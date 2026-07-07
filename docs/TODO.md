@@ -21,16 +21,16 @@ file is only for things that could reasonably be finished later.
   GUI-readiness note).
 - **Persistent syslog daemon** — not scripted, no concrete logging
   requirement has shown up yet. See ARCHITECTURE.md/MANIFEST.md.
-- **`loadkeys` (kbd) shells out to `gzip`** to decompress `.gz`-compressed
-  keymaps/fonts, falling back to its own internal decompression when
-  that's missing (FloraOS doesn't ship gzip) — cosmetic stderr noise only,
-  the keymap still loads. Not worth a fourth package for this alone. See
-  ARCHITECTURE.md/MANIFEST.md's kbd row.
-- **`fau backup`'s `restore` rename sequence isn't atomic** — a crash
-  partway through `mv @ -> @pre-restore-*`, flip read-only off, `mv
-  @snapshots/<name> -> @` is a real, documented risk, not a bug to silently
-  fix by adding complexity this project hasn't decided is worth it yet. See
-  ARCHITECTURE.md's fau-backup section.
+- **`fau backup`'s `restore` rename sequence still isn't fully atomic** — a
+  crash between the two renames (`mv @ -> @pre-restore-*` and
+  `mv @snapshots/<name> -> @`) still leaves `@` briefly missing; the only
+  real fix would be a `renameat2(RENAME_EXCHANGE)`-based swap, and no tool
+  this project ships exposes that syscall (adding one — a small compiled
+  helper, same class as `fauelf` — hasn't been decided as worth it yet for
+  this alone). The window is now as narrow as it gets without that, and no
+  longer an unrecoverable brick: `fau backup-repair <name>` completes an
+  interrupted restore after booting the still-working "FloraOS (backup:
+  <name>)" GRUB entry. See ARCHITECTURE.md's fau-backup section.
 
 See ARCHITECTURE.md for the full design-decision history (including
 everything above that's already DONE, and the reasoning behind each).

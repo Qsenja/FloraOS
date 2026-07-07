@@ -206,6 +206,20 @@ case), so plain `mktemp -d` died with "Read-only file system" there.
 `/dev/shm` is its own tmpfs, mounted by devfs's own init script
 independent of whatever's mounted as `/`.
 
+`backup-restore` isn't atomic (no tool here exposes
+`renameat2(RENAME_EXCHANGE)`) — `_backup_restore_do` clears the snapshot's
+read-only property *before* touching `@` at all so a failure there never
+leaves `@` missing, narrowing the real risk to the two renames themselves.
+`backup-repair <name>` (`_backup_repair_do`) completes the interrupted case:
+run after booting the still-working "FloraOS (backup: `<name>`)" GRUB entry
+(whose subvolume is untouched by the failed rename), it refuses outright if
+`@` already exists or if `@snapshots/<name>` is also gone — it only knows
+how to complete this one specific, well-understood state, not guess at
+others. Verified against real btrfs subvolumes (not just read through): both
+the normal-restore path and the induced-crash-then-repair path, plus both
+repair-refusal cases, exercised directly (not via `scripts/test-install.sh`,
+which doesn't yet inject a crash mid-restore).
+
 ## `service-*` — a thin front end over OpenRC
 
 `service-list`/`service-status`/`service-enable`/`service-disable`/

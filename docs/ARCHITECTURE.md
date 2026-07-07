@@ -276,10 +276,44 @@ build path that would've required compiling 16-bit real-mode boot code.
   to be the new `@`, renaming the current root aside as
   `@pre-restore-<name>-<timestamp>` rather than deleting it outright --
   reboot is required afterward to actually boot into the promotion, the
-  running session stays on the old root until then). `restore`'s rename ->
-  flip-read-only-off -> rename sequence is deliberately NOT atomic -- a crash
-  partway through is a real, documented risk (surfaced in both the tool's
-  own error messages and here), not silently glossed over.
+  running session stays on the old root until then). `restore`'s
+  flip-read-only-off -> rename -> rename sequence is NOT atomic -- a crash
+  between the two renames is a real, documented risk (surfaced in both the
+  tool's own error messages and here), not silently glossed over. Since
+  first written, this got two real improvements without solving the
+  underlying problem (no tool this project ships exposes
+  `renameat2(RENAME_EXCHANGE)`, the only way to swap two subvolume names in
+  one syscall -- see docs/TODO.md):
+  - The read-only-clearing `btrfs property set` now runs *before* either
+    rename, not sandwiched between them. It's the one step that can fail
+    for reasons unrelated to a hard crash (e.g. a transient ioctl error),
+    and doing it first means that failure mode never touches `@` at all --
+    only an actual crash landing inside the two-rename window itself is
+    still a risk, which is as narrow as this gets without RENAME_EXCHANGE.
+  - Realized that a crash in that window doesn't actually brick the
+    system, just its *default* boot entry: `@snapshots/<name>` is
+    untouched right up until the very last rename, so the GRUB menu's
+    "FloraOS (backup: `<name>`)" entry still boots fine even when the
+    default "FloraOS" entry (`subvol=@`) can't find `@` anymore. `fau
+    backup-repair <name>`, run after booting that still-working entry,
+    finishes the interrupted promotion (`_backup_repair_do` in
+    `tools/fau/fau`): refuses outright if `@` already exists (nothing to
+    repair, or the wrong command), dies with a clear "recover manually"
+    message if `@snapshots/<name>` is *also* gone (a state repair doesn't
+    know how to fix, since it can't tell what's actually the current
+    state anymore, versus the state it does handle where the crash-time
+    invariant is known: `@` missing, `@snapshots/<name>` still present),
+    otherwise clears read-only and completes the rename. Takes `<name>`
+    as an explicit argument rather than scanning for `@pre-restore-*-*`
+    markers and guessing which one -- the caller already knows which
+    backup they just booted into, so there's no ambiguity to resolve.
+    Not yet exercised against a real induced crash in
+    `scripts/test-install.sh` (that would mean killing QEMU mid-rename at
+    the right instant, which the harness doesn't do yet) -- verified by
+    reasoning through the exact state each `mv`/`btrfs property set` call
+    leaves behind, and by running `backup-repair` by hand against a
+    manually-reproduced "renamed @ aside, snapshot not yet promoted"
+    state, not by an automated crash-injection test.
 
   Boot-tested end-to-end for real, in QEMU/KVM, via the new
   **scripts/test-install.sh** (not just compiled/shellchecked -- this
@@ -517,11 +551,13 @@ build path that would've required compiling 16-bit real-mode boot code.
   vlock/zlib/bzip2/lzma/xkb explicitly off (PAM and libs FloraOS doesn't
   ship; same auto-detected-optional-lib class of issue as iproute2's
   libtirpc).
-- TODO: `loadkeys`/kbd shells out to `gzip` to decompress `.gz`-compressed
-  keymaps/fonts and falls back to its own internal decompression when that's
-  missing -- FloraOS doesn't ship gzip. Cosmetic only (stderr noise, the
-  keymap still loads -- confirmed via `./floraiso test`'s boot log), not
-  worth a fourth package for right now.
+- DONE: `loadkeys`/kbd shelled out to `gzip` to decompress `.gz`-compressed
+  keymaps/fonts and fell back to its own internal decompression when that's
+  missing -- cosmetic (stderr noise, the keymap still loaded -- confirmed via
+  `./floraiso test`'s boot log), but easy enough to close outright. Added
+  **gzip** (`scripts/recipes/gzip.sh`, `config/versions.conf`) as a base
+  package: plain autotools build, no optional deps to turn off, verified with
+  a real `./configure && make` on this build host before pinning the version.
 - DONE: `memusagestat` (glibc's memory-usage grapher) and `fsck.cramfs`/
   `mkfs.cramfs` (e2fsprogs' legacy cramfs support) auto-linked against libgd
   and libz respectively, neither of which FloraOS ships -- both were broken

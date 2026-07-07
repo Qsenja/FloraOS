@@ -232,6 +232,7 @@ fau backup <name>       # full-root btrfs snapshot, restorable from the GRUB boo
 fau backup-list         # list existing backups, newest first
 fau backup-remove <name>
 fau backup-restore <name>  # promote a backup to be the new / (reboot to actually boot into it)
+fau backup-repair <name>   # complete an interrupted backup-restore after a crash (see docs/TODO.md)
 ```
 
 Real disk installs only (see `florainstall` above and docs/ARCHITECTURE.md's

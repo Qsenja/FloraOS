@@ -96,7 +96,14 @@ backup-list               list existing backups, newest first
 backup-remove <name>      delete a backup and its GRUB menu entry
 backup-restore <name>     promote a backup to be the new / (the current root
                             is kept, renamed @pre-restore-<name>-<timestamp>);
-                            reboot afterward to actually boot into it
+                            reboot afterward to actually boot into it. Not
+                            atomic -- a crash mid-restore is a real risk (see
+                            backup-repair below and docs/TODO.md)
+backup-repair <name>      complete an interrupted backup-restore <name> after
+                            a crash left @ missing. Boot the "FloraOS
+                            (backup: <name>)" GRUB entry first (it still
+                            works -- only the default entry is broken), then
+                            run this from there
 EOF
 			;;
 		service)
@@ -1852,15 +1859,20 @@ _backup_restore_do() {
 	local tmp=$1 name=$4
 	[ -e "$tmp/@snapshots/$name" ] || die "no such backup: $name (see 'fau backup-list')"
 	local ts; ts=$(date -u +%Y%m%dT%H%M%SZ)
-	# Not atomic across these three steps -- a crash partway through is a
+	# Not atomic across these two renames -- no tool this project ships
+	# exposes Linux's renameat2(RENAME_EXCHANGE), which is the only way to
+	# swap two subvolume names in one syscall, so a crash between them is a
 	# real, documented risk (see ARCHITECTURE.md's fau-backup section), not
-	# silently glossed over. Renaming @ aside first (rather than flipping
-	# the snapshot's read-only property first) keeps the window where @
-	# doesn't exist at all as short as possible: two renames, no gap for
-	# anything else to run in between.
+	# silently glossed over. Clearing the snapshot's read-only property
+	# *first*, before @ is touched at all, matters: if this step itself
+	# fails or is interrupted, @ was never renamed away, so there's nothing
+	# to repair -- just re-run this command. That narrows the genuinely
+	# dangerous window (@ doesn't exist under any name) down to exactly the
+	# two renames below, as small as it gets without RENAME_EXCHANGE.
+	btrfs property set "$tmp/@snapshots/$name" ro false || die "clearing the snapshot's read-only property failed -- @ is untouched, nothing to repair, just re-run 'fau backup-restore $name'"
 	mv "$tmp/@" "$tmp/@pre-restore-$name-$ts" || die "renaming the current @ aside failed"
-	btrfs property set "$tmp/@snapshots/$name" ro false || die "clearing the snapshot's read-only property failed -- @ is currently MISSING, only @pre-restore-$name-$ts and @snapshots/$name exist; fix by hand: mv @pre-restore-$name-$ts back to @"
-	mv "$tmp/@snapshots/$name" "$tmp/@" || die "promoting $name to @ failed -- @ is currently MISSING; fix by hand: mv @pre-restore-$name-$ts back to @"
+	mv "$tmp/@snapshots/$name" "$tmp/@" \
+		|| die "promoting $name to @ failed -- @ is currently MISSING. The GRUB menu's default entry (subvol=@) won't boot until this is fixed, but \"FloraOS (backup: $name)\" (subvol=@snapshots/$name, untouched by the failed rename) still will -- boot that, then run 'fau backup-repair $name' from there. Or fix by hand: mv @pre-restore-$name-$ts back to @"
 }
 
 cmd_backup_restore() {
@@ -1872,6 +1884,37 @@ cmd_backup_restore() {
 	backup_regen_grub "$device" "$uuid"
 	log "restored '$1' to @ (previous root kept as @pre-restore-$1-*)"
 	log "this session is still running on the OLD root -- reboot to actually boot the restored system"
+}
+
+_backup_repair_do() {
+	local tmp=$1 name=$4
+	# The specific, narrow state this completes: a crash during
+	# _backup_restore_do above, after it renamed @ aside but before it
+	# renamed @snapshots/$name to @. Anything else (an intact @, or @
+	# missing for some unrelated reason) is refused rather than guessed at.
+	[ ! -e "$tmp/@" ] || die "@ already exists -- nothing to repair. If you meant to restore '$name' fresh, use 'fau backup-restore $name' instead"
+	[ -e "$tmp/@snapshots/$name" ] \
+		|| die "@ is missing but @snapshots/$name doesn't exist either -- this isn't the interrupted-restore state backup-repair knows how to fix. Recover manually (see docs/TODO.md's fau-backup entry): the previous root should still be at some @pre-restore-$name-<timestamp>"
+	log "@ is missing and @snapshots/$name still exists -- completing the interrupted 'backup-restore $name'"
+	btrfs property set "$tmp/@snapshots/$name" ro false || die "clearing the snapshot's read-only property failed -- retry 'fau backup-repair $name'"
+	mv "$tmp/@snapshots/$name" "$tmp/@" || die "promoting $name to @ failed -- retry 'fau backup-repair $name'"
+}
+
+cmd_backup_repair() {
+	# Deliberately takes <name> explicitly rather than scanning for
+	# @pre-restore-*-* markers and guessing -- run this after booting the
+	# "FloraOS (backup: <name>)" GRUB entry (see _backup_restore_do's own
+	# error message), which only exists, and only boots successfully, for
+	# the exact backup a crashed restore was promoting. There's no
+	# ambiguity to resolve because the caller already knows which one.
+	[ $# -eq 1 ] || die "usage: fau backup-repair <name>  -- run after booting the \"FloraOS (backup: <name>)\" GRUB entry when a crash interrupted 'backup-restore <name>' (see 'fau help backup')"
+	backup_name_check "$1"
+	backup_with_toplevel _backup_repair_do "$1"
+	local device; device=$(root_device)
+	local uuid; uuid=$(blkid -s UUID -o value "$device") || die "blkid couldn't read $device's UUID"
+	backup_regen_grub "$device" "$uuid"
+	log "repaired: @ now holds '$1'"
+	log "this session is still running on the same mount as before (subvolid-pinned, unaffected by the rename, same as backup-restore) -- reboot to pick up the repaired default entry"
 }
 
 # --- service: a thin front end over OpenRC (rc-update/rc-service), for a
@@ -1998,6 +2041,7 @@ main() {
 		backup-list) cmd_backup_list "$@" ;;
 		backup-remove) cmd_backup_remove "$@" ;;
 		backup-restore) cmd_backup_restore "$@" ;;
+		backup-repair) cmd_backup_repair "$@" ;;
 		service-list) cmd_service_list "$@" ;;
 		service-status) cmd_service_status "$@" ;;
 		service-enable) cmd_service_enable "$@" ;;

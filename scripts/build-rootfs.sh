@@ -47,6 +47,13 @@ MANDATORY_ORDER=(
 	procps-ng
 	hostname
 	kbd
+	# gzip: kbd's loadkeys/dumpkeys shell out to gzip to decompress .gz
+	# keymaps/fonts, falling back to internal decompression (with stderr
+	# noise) when it's missing -- see scripts/recipes/gzip.sh and
+	# docs/TODO.md. Runtime dependency only (kbd doesn't link against it),
+	# so build order relative to kbd doesn't matter; kept adjacent for
+	# readability.
+	gzip
 	# libxcrypt: glibc itself dropped crypt() -- floralogin (compiled below,
 	# not a fau package itself) needs it to verify /etc/shadow hashes. See
 	# scripts/recipes/libxcrypt.sh and tools/floralogin.
