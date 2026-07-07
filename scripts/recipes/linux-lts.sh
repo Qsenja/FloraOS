@@ -98,6 +98,12 @@ recipe_build() {
 	# it can't just run `depmod` with no argument, since that defaults to
 	# `uname -r` of whatever's running depmod (this build host's own
 	# kernel, not FloraOS's). `make kernelrelease` prints the exact string
-	# modules_install just used.
-	make -C "$src" ARCH=x86_64 kernelrelease > "$files/boot/kernelrelease"
+	# modules_install just used. --no-print-directory: `-C` implies GNU
+	# Make's own -w/--print-directory (documented behavior), which without
+	# this flag interleaves "make: Entering directory .../make: Leaving
+	# directory ..." around the version string in this captured output --
+	# reproduced directly (this exact command, piped to `cat -A`), not
+	# assumed; depmod then fails outright on the corrupted multi-line file
+	# ("ERROR: Bad version passed").
+	make --no-print-directory -C "$src" ARCH=x86_64 kernelrelease > "$files/boot/kernelrelease"
 }
