@@ -621,9 +621,28 @@ alpm_sandbox_fetch() {
 		while IFS= read -r -d '' f; do
 			"$FAU_ELF_PATCH" "$f" || die "fauelf failed patching $f"
 		done < <(find "$extract_dir" -type f -print0)
-		# Rewrites absolute-interpreter shebangs (e.g. meson's own) to this sandbox's copy -- see fau.md.
-		local f shebang interp
+		# Rewrites absolute-interpreter shebangs (e.g. meson's own) to this
+		# sandbox's copy -- see fau.md. Cheap `read -N 2` magic-byte check
+		# first, not just `head -c 256 | head -n1` on every file: the vast
+		# majority of files here are ELF binaries, and capturing their raw
+		# bytes via command substitution made bash print "ignored null
+		# byte in input" once per file (thousands of times on a real
+		# closure) -- found by actually running `fau build mangowm`, not
+		# by inspection. `read -N 2` reads bytes directly into a variable,
+		# no command substitution involved, so it never triggers that
+		# warning; the expensive full-line read only runs for the much
+		# smaller set of files that already start with literal "#!".
+		local f magic shebang interp
 		while IFS= read -r -d '' f; do
+			# `|| true`: `read -N 2` returns non-zero on any file under 2
+			# bytes (real packages ship plenty of empty marker files) --
+			# under this script's `set -e`, that bare failure silently
+			# killed the whole `fau build` with no error message at all.
+			# Found by actually running `fau build mangowm` twice, both
+			# times dying at the identical spot with no visible cause,
+			# not by inspection.
+			IFS= read -r -N 2 magic < "$f" 2>/dev/null || true
+			[ "$magic" = "#!" ] || continue
 			shebang=$(head -c 256 "$f" 2>/dev/null | head -n1)
 			case "$shebang" in
 				'#!/'*)
