@@ -304,6 +304,16 @@ relative filename rather than the absolute build path, so
 `sha256sum -c floraos.iso.sha256` still works from a different clone or a
 standalone downloaded copy of the ISO, not just this exact build directory.
 
+`build-iso.sh` used to only invoke `build-rootfs.sh` if `$ROOTFS_DIR` didn't
+already exist -- a real bug, found by actually building and booting the
+result: since `build_package`'s own `already_built` check already makes
+re-running `build-rootfs.sh` cheap when packages haven't changed, that outer
+guard served no purpose except silently shipping a stale rootfs whenever
+`fau`/`floralogin`/`florauser`/etc. source changed without deleting
+`work/rootfs` first (`./floraiso build` reported success and a correct-looking
+ISO size, but it had just repacked hours-old binaries). Fixed by always
+calling `build-rootfs.sh` unconditionally.
+
 `apply-skeleton.sh` applies the `/etc` skeleton, identity files, and the
 sysvinit/OpenRC glue on top of an already fau-bootstrapped rootfs (run after
 `fau bootstrap`, before `ldconfig`). `/usr/bin/sh` is symlinked to bash

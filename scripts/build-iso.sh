@@ -17,10 +17,15 @@ ISO_OUT="$FLORA_ROOT/${ISO_NAME:-floraos.iso}"
 
 for cmd in grub-mkrescue xorriso cpio gzip; do require_cmd "$cmd"; done
 
-if [ ! -d "$ROOTFS_DIR" ] || [ -z "$(ls -A "$ROOTFS_DIR" 2>/dev/null)" ]; then
-	log "no rootfs at $ROOTFS_DIR yet -- building it first"
-	"$SELF_DIR/build-rootfs.sh"
-fi
+# Always run build-rootfs.sh -- it already skips recompiling any package
+# whose pinned version is unchanged (see docs/ARCHITECTURE.md's "Build
+# pipeline" section), so this is cheap when nothing changed. Skipping it
+# outright whenever $ROOTFS_DIR merely exists shipped a stale rootfs the
+# one time it mattered: editing fau/floralogin/florauser/etc. and running
+# `./floraiso build` silently packed the old binaries, since only the
+# "assembling rootfs" step (which copies those fresh) runs unconditionally
+# inside build-rootfs.sh, and this guard was skipping that whole script.
+"$SELF_DIR/build-rootfs.sh"
 
 [ -f "$ROOTFS_DIR/boot/vmlinuz-floraos" ] || die "no kernel at $ROOTFS_DIR/boot/vmlinuz-floraos -- rootfs build looks incomplete"
 [ -x "$ROOTFS_DIR/sbin/init" ] || die "no /sbin/init in rootfs -- sysvinit didn't install correctly"
