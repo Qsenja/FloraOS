@@ -9,6 +9,7 @@ REPO_DIR="$WORK_DIR/repo"
 ROOTFS_DIR="$WORK_DIR/rootfs"
 VERSIONS_CONF="$FLORA_ROOT/config/versions.conf"
 FAU_BIN="$FLORA_ROOT/tools/fau/fau"
+FLORAGRUB_CFG_BIN="$FLORA_ROOT/tools/floragrub-cfg/floragrub-cfg"
 # glibc needs this at build time (see scripts/recipes/glibc.sh). Defined here
 # rather than as a side effect of sourcing linux-lts.sh: build_package()
 # skips sourcing a package's recipe entirely once it's already cached, so if

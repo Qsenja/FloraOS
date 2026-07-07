@@ -58,6 +58,15 @@ commands:
                               then restore every config file it lists back into
                               place under FAU_APPS_DIR (default: system.flora)
 
+  backup <name>             snapshot / (read-only, btrfs) under @snapshots/<name>
+                              and add a GRUB menu entry for it -- real disk
+                              installs only (see florainstall)
+  backup-list               list existing backups, newest first
+  backup-remove <name>      delete a backup and its GRUB menu entry
+  backup-restore <name>     promote a backup to be the new / (the current root
+                              is kept, renamed @pre-restore-<name>-<timestamp>);
+                              reboot afterward to actually boot into it
+
 build-time only (used by scripts/build-rootfs.sh, not meant for end users):
   bootstrap <pkg> [pkg ...] install system package(s) into FAU_ROOT, with dependencies
   bootstrap-remove <pkg> [pkg ...]
@@ -1667,6 +1676,131 @@ cmd_import() {
 	log "import complete: restored $restored config file(s), skipped $skipped app(s) with no installed directory"
 }
 
+# --- backup: full-root btrfs snapshots, restorable by picking an alternate
+# GRUB menu entry instead of `fau export`/`import`'s config-only coverage.
+# Real disk installs only (see tools/florainstall, which now lays the target
+# out as an @ subvolume with @snapshots as its sibling under the
+# filesystem's top-level subvolume, id 5) -- there's no top-level subvolume
+# to snapshot into on the live ISO's own tmpfs/initramfs root. -----------
+
+backup_name_check() {
+	# Also used as a filesystem path segment (@snapshots/<name>) and as GRUB
+	# menu text, so keep it to a safe charset and explicitly reject ".." --
+	# ".." would otherwise still pass the charset check (its characters are
+	# all allowed) and could walk the path outside @snapshots.
+	local name=$1
+	[ -n "$name" ] || die "backup name required"
+	case "$name" in *..*) die "backup name can't contain '..'" ;; esac
+	printf '%s' "$name" | grep -Eq '^[A-Za-z0-9._-]+$' \
+		|| die "backup name must match ^[A-Za-z0-9._-]+\$ (it becomes a GRUB menu entry and a filesystem path segment)"
+}
+
+# backup_with_toplevel <fn> [extra args...] -- mounts the running root
+# filesystem's top-level (subvolid 5) subvolume, where @ and @snapshots live
+# as siblings, at a fresh mktemp -d mountpoint, then runs
+# `<fn> <toplevel-mountpoint> <root-device> <root-uuid> [extra args...]` in a
+# subshell (same reasoning cmd_import's app_install_one subshell already
+# uses: die() calls exit directly, and running the callback in a subshell
+# means a die() partway through only ends the subshell, so the unmount below
+# still runs instead of being skipped) and always unmounts/cleans up
+# afterward, propagating the callback's exit status.
+backup_with_toplevel() {
+	local fn=$1; shift
+	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
+	[ -b "$device" ] || die "$device (source of /) isn't a block device -- fau backup only supports a real disk install"
+	local uuid; uuid=$(blkid -s UUID -o value "$device") || die "blkid couldn't read $device's UUID"
+	local tmp; tmp=$(mktemp -d)
+	mount -o subvolid=5 "$device" "$tmp" || { rmdir "$tmp"; die "mount -o subvolid=5 $device failed"; }
+	local rc=0
+	( "$fn" "$tmp" "$device" "$uuid" "$@" ) || rc=$?
+	umount "$tmp" 2>/dev/null || true
+	rmdir "$tmp" 2>/dev/null || true
+	return $rc
+}
+
+backup_regen_grub() {
+	# $1 device, $2 uuid -- floragrub-cfg (tools/floragrub-cfg) does its own
+	# separate subvolid=5 mount, so this is called after backup_with_toplevel
+	# has already unmounted $tmp, not while it's still held open.
+	floragrub-cfg "$1" "$2" /boot/grub/grub.cfg
+}
+
+_backup_do() {
+	local tmp=$1 name=$4
+	[ -e "$tmp/@snapshots/$name" ] && die "backup '$name' already exists (see 'fau backup-list')"
+	mkdir -p "$tmp/@snapshots"
+	btrfs subvolume snapshot -r / "$tmp/@snapshots/$name" || die "btrfs subvolume snapshot failed"
+	return 0
+}
+
+cmd_backup() {
+	[ $# -eq 1 ] || die "usage: fau backup <name>"
+	backup_name_check "$1"
+	backup_with_toplevel _backup_do "$1"
+	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
+	local uuid; uuid=$(blkid -s UUID -o value "$device") || die "blkid couldn't read $device's UUID"
+	backup_regen_grub "$device" "$uuid"
+	log "backup '$1' created -- pick \"FloraOS (backup: $1)\" at the GRUB menu to boot into it"
+}
+
+_backup_list_do() {
+	local tmp=$1
+	[ -d "$tmp/@snapshots" ] || return 0
+	( cd "$tmp/@snapshots" && ls -1t -- ) 2>/dev/null
+}
+
+cmd_backup_list() {
+	[ $# -eq 0 ] || die "backup-list takes no arguments"
+	local out; out=$(backup_with_toplevel _backup_list_do)
+	if [ -z "$out" ]; then
+		log "no backups yet (see 'fau backup <name>')"
+	else
+		printf '%s\n' "$out"
+	fi
+}
+
+_backup_remove_do() {
+	local tmp=$1 name=$4
+	[ -e "$tmp/@snapshots/$name" ] || die "no such backup: $name (see 'fau backup-list')"
+	btrfs subvolume delete "$tmp/@snapshots/$name" || die "btrfs subvolume delete failed"
+}
+
+cmd_backup_remove() {
+	[ $# -eq 1 ] || die "usage: fau backup-remove <name>"
+	backup_name_check "$1"
+	backup_with_toplevel _backup_remove_do "$1"
+	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
+	local uuid; uuid=$(blkid -s UUID -o value "$device") || die "blkid couldn't read $device's UUID"
+	backup_regen_grub "$device" "$uuid"
+	log "backup '$1' removed"
+}
+
+_backup_restore_do() {
+	local tmp=$1 name=$4
+	[ -e "$tmp/@snapshots/$name" ] || die "no such backup: $name (see 'fau backup-list')"
+	local ts; ts=$(date -u +%Y%m%dT%H%M%SZ)
+	# Not atomic across these three steps -- a crash partway through is a
+	# real, documented risk (see ARCHITECTURE.md's fau-backup section), not
+	# silently glossed over. Renaming @ aside first (rather than flipping
+	# the snapshot's read-only property first) keeps the window where @
+	# doesn't exist at all as short as possible: two renames, no gap for
+	# anything else to run in between.
+	mv "$tmp/@" "$tmp/@pre-restore-$name-$ts" || die "renaming the current @ aside failed"
+	btrfs property set "$tmp/@snapshots/$name" ro false || die "clearing the snapshot's read-only property failed -- @ is currently MISSING, only @pre-restore-$name-$ts and @snapshots/$name exist; fix by hand: mv @pre-restore-$name-$ts back to @"
+	mv "$tmp/@snapshots/$name" "$tmp/@" || die "promoting $name to @ failed -- @ is currently MISSING; fix by hand: mv @pre-restore-$name-$ts back to @"
+}
+
+cmd_backup_restore() {
+	[ $# -eq 1 ] || die "usage: fau backup-restore <name>"
+	backup_name_check "$1"
+	backup_with_toplevel _backup_restore_do "$1"
+	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
+	local uuid; uuid=$(blkid -s UUID -o value "$device") || die "blkid couldn't read $device's UUID"
+	backup_regen_grub "$device" "$uuid"
+	log "restored '$1' to @ (previous root kept as @pre-restore-$1-*)"
+	log "this session is still running on the OLD root -- reboot to actually boot the restored system"
+}
+
 main() {
 	[ $# -ge 1 ] || { usage; exit 1; }
 	local cmd=$1; shift
@@ -1683,6 +1817,10 @@ main() {
 		repo-index) repo_index "$@" ;;
 		export) cmd_export "$@" ;;
 		import) cmd_import "$@" ;;
+		backup) cmd_backup "$@" ;;
+		backup-list) cmd_backup_list "$@" ;;
+		backup-remove) cmd_backup_remove "$@" ;;
+		backup-restore) cmd_backup_restore "$@" ;;
 		-h|--help|help) usage ;;
 		*) die "unknown command: $cmd (see --help)" ;;
 	esac

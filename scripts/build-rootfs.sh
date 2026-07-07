@@ -150,6 +150,13 @@ main() {
 	cp "$FAU_BIN" "$ROOTFS_DIR/usr/bin/fau"
 	chmod 755 "$ROOTFS_DIR/usr/bin/fau"
 
+	# floragrub-cfg (tools/floragrub-cfg): same reasoning as fau just above --
+	# a portable bash script, nothing to compile, but it has to ship in the
+	# running OS since both florainstall and `fau backup` exec it by bare
+	# name (see their own comments) to (re)generate /boot/grub/grub.cfg.
+	cp "$FLORAGRUB_CFG_BIN" "$ROOTFS_DIR/usr/bin/floragrub-cfg"
+	chmod 755 "$ROOTFS_DIR/usr/bin/floragrub-cfg"
+
 	FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap "${BUILD_ORDER[@]}"
 
 	log "=== staging the kernel image for florainstall (tools/florainstall) ==="

@@ -200,8 +200,14 @@ fau export [file]     # -> system.flora by default
 fau import [file]     # <- system.flora by default
 ```
 
-A `fau backup` command (a full-root snapshot, restorable from the GRUB boot
-menu) is planned but not yet implemented — see ARCHITECTURE.md's TODO list for
-why it needs more than just `fau` changes.
+```
+fau backup <name>       # full-root btrfs snapshot, restorable from the GRUB boot menu
+fau backup-list         # list existing backups, newest first
+fau backup-remove <name>
+fau backup-restore <name>  # promote a backup to be the new / (reboot to actually boot into it)
+```
+
+Real disk installs only (see `florainstall` above and ARCHITECTURE.md's fau-backup
+section for the subvolume layout) — not available on the live ISO itself.
 
 See `tools/fau/fau --help` for the full command list.

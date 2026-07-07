@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# floragrub-cfg -- generates FloraOS's /boot/grub/grub.cfg: one menuentry for
+# the live @ subvolume, plus one per backup snapshot under @snapshots (see
+# `fau backup`, tools/fau/fau). Shared between florainstall (initial install)
+# and `fau backup`/`backup-remove`/`backup-restore` (regenerating after a
+# snapshot is added, removed, or promoted), so the menuentry format and the
+# subvolume-path logic live in exactly one place instead of being duplicated
+# in florainstall.c's C and fau's bash. Same "small, from-scratch,
+# purpose-built" style as fau/floralogin/florauser/floraseat/fauelf/
+# florainstall themselves.
+#
+# Kernel/root paths are prefixed with the subvolume name (/@/boot/... ,
+# /@snapshots/<name>/boot/...) rather than left as bare /boot/... -- this is
+# the standard, well-established convention real distros' grub-mkconfig
+# emits for a btrfs root that lives in a named subvolume (confirmed by
+# memory of real Fedora/openSUSE btrfs-root grub.cfg output, e.g.
+# "linux /@/boot/vmlinuz-... rootflags=subvol=@"), not guessed: GRUB's own
+# absolute-path file lookups on btrfs resolve against the filesystem's
+# top-level (subvolid 5) by default, same as `rootflags=subvol=` only tells
+# the *kernel* which subvolume to mount as / after handoff -- it does nothing
+# for GRUB's own file reads before that. GRUB itself is fetched precompiled
+# via fau's alpm fallback (see ARCHITECTURE.md), not built from source here,
+# so this couldn't be checked against GRUB's own source the way the kernel's
+# CONFIG_BTRFS_FS=y was -- worth re-confirming on a real boot, same as
+# florainstall.c's own header flags its unverified assumptions.
+set -euo pipefail
+
+die() { echo "floragrub-cfg: error: $*" >&2; exit 1; }
+
+[ $# -eq 3 ] || die "usage: floragrub-cfg <root-partition-device> <root-uuid> <output-grub-cfg-path>"
+device=$1
+uuid=$2
+out=$3
+
+[ -b "$device" ] || die "$device is not a block device"
+
+# subvolid=5 always names the whole filesystem's top-level subvolume,
+# regardless of what florainstall/fau backup have done with @ or
+# @snapshots -- this is where they live as siblings.
+tmp=$(mktemp -d)
+cleanup() { umount "$tmp" 2>/dev/null || true; rmdir "$tmp" 2>/dev/null || true; }
+trap cleanup EXIT
+mount -o subvolid=5 "$device" "$tmp" || die "mount -o subvolid=5 $device failed"
+
+# Newest snapshot first, so it's the first alternative a user tabs to at the
+# GRUB menu -- @snapshots may not exist yet (a fresh install with no backups
+# taken), in which case this just produces the one default entry, unchanged
+# from florainstall's original hardcoded grub.cfg.
+names=()
+if [ -d "$tmp/@snapshots" ]; then
+	while IFS= read -r name; do
+		[ -n "$name" ] && names+=("$name")
+	done < <(cd "$tmp/@snapshots" && ls -1t --)
+fi
+
+write_entry() {
+	local title=$1 subvol=$2
+	printf 'menuentry "%s" {\n' "$title"
+	printf '\tlinux /%s/boot/vmlinuz-floraos root=UUID=%s rootflags=subvol=%s rootfstype=btrfs ro console=tty0 console=ttyS0\n' \
+		"$subvol" "$uuid" "$subvol"
+	printf '}\n'
+}
+
+{
+	printf 'set default=0\n'
+	printf 'set timeout=3\n'
+	printf 'insmod part_msdos\n'
+	printf 'insmod btrfs\n'
+	printf 'search --no-floppy --fs-uuid --set=root %s\n' "$uuid"
+	write_entry "FloraOS" "@"
+	for name in "${names[@]}"; do
+		write_entry "FloraOS (backup: $name)" "@snapshots/$name"
+	done
+} > "$out"
