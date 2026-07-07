@@ -110,6 +110,15 @@ build_package() {
 		return
 	fi
 	log "=== $name ==="
+	# Reset before each recipe, not just left to whatever the previous
+	# iteration's recipe did or didn't set: PKG_BIN is optional (only a
+	# recipe meant for fau-install's isolated app path sets it, see
+	# package_stage's own comment) and this function runs in one long-lived
+	# loop over BUILD_ORDER, so without this a package after mangowm in the
+	# same run would silently inherit mangowm's own PKG_BIN instead of
+	# having none -- PKG_DESCRIPTION/PKG_DEPENDS don't need this since
+	# every recipe unconditionally sets both already.
+	PKG_BIN=""
 	# shellcheck source=/dev/null
 	source "$SELF_DIR/recipes/$name.sh"
 
@@ -126,7 +135,11 @@ build_package() {
 	mkdir -p "$files"
 
 	recipe_build "$src" "$files"
-	package_stage "$name" "$version" "$PKG_DESCRIPTION" "$PKG_DEPENDS" "$files"
+	# ${PKG_BIN:-}, not $PKG_BIN: only a recipe meant for fau-install's
+	# isolated app path (see package_stage's own comment) ever sets this --
+	# every MANDATORY_ORDER/bootstrap-only recipe doesn't, and set -u makes
+	# a bare reference to that a hard crash.
+	package_stage "$name" "$version" "$PKG_DESCRIPTION" "$PKG_DEPENDS" "$files" "${PKG_BIN:-}"
 }
 
 main() {

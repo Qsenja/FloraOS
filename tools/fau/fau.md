@@ -361,19 +361,34 @@ correctly (confirmed via `seat-status` before/after each), and
 same idea again, this time over `florauser` (tools/florauser) instead of
 OpenRC or floraseat: each command checks only its own argument *count*
 (so a wrong invocation gets fau's own usage line, e.g. `usage: fau
-user-rename <old-name> <new-name>`, instead of florauser's) and then execs
+user-rename <old-name> <new-name>`, instead of florauser's) and then runs
 the real `florauser <cmd> "$@"` — no argument validation, password
-handling, or file editing is duplicated here. `user-passwd`'s interactive
-prompt (termios echo off) works unmodified through this front end since
-bash doesn't redirect stdio for a plain function call.
+handling, or file editing is duplicated here. `user-add`/`user-rename`/
+`user-groupadd`/`user-addtogroup` route through `lib/common.sh`'s
+`relabel_run`, which rewrites florauser's own "florauser: ..." messages to
+say "fau user-add: ..." (etc.) instead, including any inline mention of
+running `florauser <verb>` (e.g. `add`'s own "run: florauser passwd
+alice" advice becomes "run: fau user-passwd alice") — end users only ever
+type `fau user-*`, so florauser's messages should say so too.
+`user-passwd` deliberately skips `relabel_run`: its interactive prompt
+(termios echo off, no trailing newline so the cursor stays on the same
+line) would sit stuck, invisible, in `relabel_run`'s line-oriented sed
+until some later newline flushed it out. It execs `florauser passwd`
+directly instead, working unmodified since bash doesn't redirect stdio
+for a plain function call — its "florauser: password updated for ..."
+confirmation and error messages keep florauser's own naming as the
+tradeoff for a live prompt.
 
-Verified in a real QEMU boot: `fau user-add alice seat` + `fau user-passwd
-alice` + `fau user-rename alice bob`, confirming the renamed
-`passwd`/`shadow`/`group` entries directly and then logging in as `bob`
-with `alice`'s original password — `id` still showed the `seat` group
-membership, proving the whole chain (florauser's own rename logic, exec'd
-through this front end) actually works end-to-end, not just each piece in
-isolation.
+Verified in a real QEMU boot (before `relabel_run` existed): `fau user-add
+alice seat` + `fau user-passwd alice` + `fau user-rename alice bob`,
+confirming the renamed `passwd`/`shadow`/`group` entries directly and then
+logging in as `bob` with `alice`'s original password — `id` still showed
+the `seat` group membership, proving the whole chain (florauser's own
+rename logic, exec'd through this front end) actually works end-to-end,
+not just each piece in isolation. `relabel_run` itself is verified only
+against a throwaway stub standing in for florauser (matching its exact
+message shapes, including the unterminated `user-passwd` prompt) in this
+sandbox, not yet against the real compiled florauser on a real boot.
 
 ## `fau help <topic>` / `fau --help <topic>`
 

@@ -70,11 +70,20 @@ extract_source() {
 	echo "$dest"
 }
 
-# package_stage <name> <version> <description> <depends> <stage-files-dir>
+# package_stage <name> <version> <description> <depends> <stage-files-dir> [bin]
 # -> builds a .fau.tar.zst from a populated $STAGE_DIR/<name>/files tree and
-# adds it to the local fau repo
+# adds it to the local fau repo. <bin>, if given, is fau-install's own
+# comma-separated relative-path list (e.g. "usr/bin/mango,usr/bin/mmsg") --
+# every recipe so far has only ever gone through `fau bootstrap` (merged
+# straight into a shared FAU_ROOT, where a system-wide bin -> usr/bin
+# symlink already exists), never `fau install`'s isolated FAU_APPS_DIR/<name>
+# path, whose own wrapper-generation (app_wrapper_write, tools/fau/fau-install)
+# only auto-detects a bare <app_dir>/bin -- never <app_dir>/usr/bin, which is
+# exactly what every one of this project's own --prefix=/usr recipes
+# produces. Optional and empty by default so every existing recipe (none of
+# which set it) keeps writing the exact same blank `bin=` line as before.
 package_stage() {
-	local name=$1 version=$2 description=$3 depends=$4 files_dir=$5
+	local name=$1 version=$2 description=$3 depends=$4 files_dir=$5 bin=${6:-}
 	local pkg_dir="$STAGE_DIR/$name"
 	rm -rf "$pkg_dir"
 	mkdir -p "$pkg_dir"
@@ -84,6 +93,7 @@ package_stage() {
 	version=$version
 	description=$description
 	depends=$depends
+	bin=$bin
 	EOF
 
 	# Built outside $REPO_DIR -- repo-add copies its argument *into* $REPO_DIR,

@@ -643,7 +643,19 @@ install_one_alpm() {
 		# compiled binaries with Arch's official ones -- found by comparing
 		# libc.so.6's sha256 before/after a real build: the shipped one
 		# turned out to be Arch's, not FloraOS's own.
-		if [ "$pkgname" != "$name" ] && [ -n "$(system_get_version "$pkgname")" ]; then
+		#
+		# "$i" -ne "$total", not "$pkgname" != "$name": alpm_resolve's own
+		# contract (_alpm_resolve_one's header comment) is "dependencies
+		# before dependents", so the actual requested package -- resolved to
+		# its *real* name, which can differ from $name when $name is a
+		# virtual/PROVIDES alias (e.g. "man" resolving to "man-db") -- is
+		# always the very last entry, at index $total. A name-equality check
+		# here silently never matches for a request like `fau install man`:
+		# no $pkgname ever equals the literal string "man", so this guard's
+		# "unless it's the actual requested package" carve-out just never
+		# applied -- found via a real `fau install man` skipping-or-not
+		# quietly going wrong, not by inspection.
+		if [ "$i" -ne "$total" ] && [ -n "$(system_get_version "$pkgname")" ]; then
 			skipped=$((skipped + 1))
 			continue
 		fi
@@ -694,13 +706,17 @@ install_one_alpm() {
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
 		rm -rf "$extract_dir/etc" "$extract_dir/usr/include"
 
-		[ "$pkgname" = "$name" ] && version=${pkg_version[$i]}
+		# "$i" -eq "$total", not "$pkgname" = "$name" -- see the queue-build
+		# loop's own comment above for why (the requested package's real
+		# name can differ from $name, but it's always the last resolved
+		# entry).
+		[ "$i" -eq "$total" ] && version=${pkg_version[$i]}
 		# Only the exact requested package ($name) gets its files recorded,
 		# matching system_set below: transitive alpm dependencies pulled in
 		# via this closure (e.g. libstdc++ for cmatrix) never get their own
 		# system.json entry either, so there'd be nothing sensible for a
 		# later `fau remove` to key their file list off of.
-		[ "$pkgname" = "$name" ] && record_files "$name" "$extract_dir"
+		[ "$i" -eq "$total" ] && record_files "$name" "$extract_dir"
 		# --checksum: see install_one's own merge for why plain -aK isn't
 		# enough on an upgrade. FloraOS's own skeleton (apply-skeleton.sh)
 		# is the sole source of truth for /etc, and /usr/include is
@@ -738,7 +754,13 @@ app_install_one_alpm() {
 	rm -rf "$app_dir"
 	mkdir -p "$app_dir" "$app_dir/config" "$app_dir/cache" "$app_dir/data" "$app_dir/logs"
 	local jobs_dir; jobs_dir=$(mktemp -d)
-	local target_files version="" cached=0 fetched=0 skipped=0
+	# target_files="" explicitly, not just declared bare alongside the
+	# others: a `local a b="" c=0` where only some names get a `=value`
+	# leaves the bare ones (a here) genuinely unbound under `set -u` on this
+	# bash -- confirmed directly (reproduced the exact "target_files:
+	# unbound variable" crash in isolation) -- not implicitly "" the way a
+	# solitary `local target_files` on its own line would be.
+	local target_files="" version="" cached=0 fetched=0 skipped=0
 	local -a queue=()
 	local i; for i in $(seq 1 "$total"); do
 		pkgname=${pkg_name[$i]}
@@ -755,7 +777,18 @@ app_install_one_alpm() {
 		# headers alone. "filesystem" is Arch/Artix's own base-bootstrap
 		# noise (see install_one_alpm's own comment) -- never wanted in an
 		# app dir any more than in FAU_ROOT.
-		if { [ "$pkgname" != "$name" ] && [ -n "$(system_get_version "$pkgname")" ]; } || [ "$pkgname" = "filesystem" ]; then
+		#
+		# "$i" -ne "$total", not "$pkgname" != "$name": see install_one_alpm's
+		# own identical comment -- the requested package's real name (last
+		# resolved entry, $total) can differ from $name when $name is a
+		# virtual/PROVIDES alias (e.g. "man" resolving to "man-db"), and a
+		# name-equality check here silently never matches in that case. This
+		# is the bug `fau install man` actually hit: with target_files never
+		# reaching the assignment below (same root cause, see this
+		# function's own bin-wrapper loop further down), it crashed on the
+		# unbound variable before ever getting to this guard's own
+		# consequence, but the guard was equally wrong underneath that.
+		if { [ "$i" -ne "$total" ] && [ -n "$(system_get_version "$pkgname")" ]; } || [ "$pkgname" = "filesystem" ]; then
 			skipped=$((skipped + 1))
 			continue
 		fi
@@ -806,7 +839,17 @@ app_install_one_alpm() {
 		while IFS= read -r -d '' f; do
 			"$FAU_ELF_PATCH" "$f" || die "fauelf failed patching $f"
 		done < <(find "$extract_dir" -type f -print0)
-		if [ "${pkg_name[$i]}" = "$name" ]; then
+		# "$i" -eq "$total", not "${pkg_name[$i]}" = "$name" -- same reasoning
+		# as this function's queue-build loop above and install_one_alpm's
+		# identical fix: the requested package's real name is always the
+		# last resolved entry, and can differ from $name (a virtual/PROVIDES
+		# alias like "man" resolving to "man-db"). With the old
+		# name-equality check, `fau install man` never matched this branch
+		# at all, so target_files was never assigned -- crashing on the
+		# unbound variable at the wrapper-generation loop below before this
+		# fix (target_files="" above) would even let it silently fall
+		# through empty instead.
+		if [ "$i" -eq "$total" ]; then
 			version=${pkg_version[$i]}
 			target_files=$(cd "$extract_dir" && find usr/bin bin -maxdepth 1 -type f 2>/dev/null; true)
 		fi
@@ -840,4 +883,92 @@ app_install_one_alpm() {
 		*":$FAU_APPS_BIN_DIR:"*) ;;
 		*) log "note: $FAU_APPS_BIN_DIR is not on your PATH yet — add it to use $name's commands directly" ;;
 	esac
+}
+
+# alpm_sandbox_fetch <dest-dir> <name...> -- resolves the combined alpm
+# closure of every given name and extracts it *with usr/include kept* into
+# <dest-dir>, merged flat (no per-package subdirs, no per-name isolation).
+# Used by fau-build (lib/build.sh) for a recipe's PKG_BUILD_DEPS: a
+# disposable compile-time sandbox that needs real dev headers to build
+# against, unlike install_one_alpm/app_install_one_alpm just above, which
+# both unconditionally `rm -rf` usr/include with no bypass -- confirmed by
+# reading both, not assumed. This is a separate function rather than a flag
+# on those two specifically to avoid touching proven, already-tested code
+# for a need neither of them originally had. Never touches FAU_ROOT, any
+# FAU_APPS_DIR/<app>, system.json, or .fau-apps.json -- purely a scratch
+# extraction; the caller (fau-build) is expected to rm -rf <dest-dir> once
+# the build using it is done.
+#
+# Reuses alpm_resolve/alpm_parallel_fetch/alpm_fetch_job as-is -- the
+# resolve/fetch machinery is identical to the other two paths above; only
+# the extract/merge tail differs. Skips "filesystem" (Arch/Artix's own
+# base-bootstrap noise, same reasoning as the other two paths) for speed,
+# but deliberately does NOT skip packages fau's own system.json already
+# provides: that skip exists elsewhere to avoid a second copy of something
+# already on FAU_ROOT's real library search path, which doesn't apply
+# here since a sandbox is never merged into FAU_ROOT at all. Also more
+# self-consistent: a recipe_build linking against a mix of FloraOS's own
+# from-source glibc and Arch's other fetched libraries would be a strictly
+# worse ABI bet than linking against one coherent Arch closure end to end
+# (the same ABI-by-coincidence caveat this whole fallback already accepts
+# elsewhere, not a new risk introduced here).
+alpm_sandbox_fetch() {
+	local dest=$1; shift
+	local total=0
+	local -a pkg_repo=() pkg_name=() pkg_version=() pkg_filename=() pkg_sha256=()
+	local -A seen=()
+	local name repo pkgname pkgversion filename sha256 resolved
+	for name in "$@"; do
+		resolved=$(alpm_resolve "$name") \
+			|| die "couldn't resolve '$name' in any configured Arch/Artix repo"
+		# A build-dep list can legitimately name overlapping closures (e.g.
+		# two build deps both pulling in glibc) -- seen[] skips a package
+		# already queued from an earlier name in "$@" rather than fetching
+		# and extracting it twice.
+		while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
+			[ -n "$pkgname" ] || continue
+			[ -n "${seen[$pkgname]:-}" ] && continue
+			seen[$pkgname]=1
+			total=$((total + 1))
+			pkg_repo[$total]=$repo; pkg_name[$total]=$pkgname; pkg_version[$total]=$pkgversion
+			pkg_filename[$total]=$filename; pkg_sha256[$total]=$sha256
+		done <<< "$resolved"
+	done
+
+	local jobs_dir; jobs_dir=$(mktemp -d)
+	local -a queue=()
+	local i; for i in $(seq 1 "$total"); do
+		[ "${pkg_name[$i]}" = "filesystem" ] && continue
+		queue+=("$i")
+	done
+	alpm_parallel_fetch "$jobs_dir" 4 "${queue[@]}"
+
+	mkdir -p "$dest"
+	for i in "${queue[@]}"; do
+		local archive="$jobs_dir/$i.pkg"
+		[ -f "$archive" ] || die "fetching ${pkg_name[$i]} failed (see errors above)"
+		local extract_dir; extract_dir=$(mktemp -d)
+		tar --zstd -xf "$archive" -C "$extract_dir"
+		rm -f "$archive"
+		# Same two reasons as install_one_alpm/app_install_one_alpm above:
+		# some packages ship unreadable setuid-root helpers (harmless here,
+		# unprivileged sandbox), and neither pacman's own bookkeeping files
+		# nor a bind-mounted-into-nothing .INSTALL script belong in one.
+		chmod -R u+rX "$extract_dir"
+		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
+		# No usr/include strip here -- see this function's own header
+		# comment; keeping headers is the entire reason it exists.
+		#
+		# fauelf, same reasoning as app_install_one_alpm: a sandboxed
+		# build tool (meson, a compiler, ...) gets its own deps found via
+		# PATH/LD_LIBRARY_PATH pointed at this same <dest-dir>, exactly
+		# like an isolated app's wrapper -- an absolute DT_NEEDED entry
+		# would bypass that the same way it would for an app.
+		while IFS= read -r -d '' f; do
+			"$FAU_ELF_PATCH" "$f" || die "fauelf failed patching $f"
+		done < <(find "$extract_dir" -type f -print0)
+		cp -a "$extract_dir/." "$dest"
+		rm -rf "$extract_dir"
+	done
+	rm -rf "$jobs_dir"
 }

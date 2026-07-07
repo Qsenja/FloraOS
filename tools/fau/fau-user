@@ -3,8 +3,11 @@
 # "friendlier fau-native front end, don't reimplement the tool" idea as
 # fau-service/fau-seat. florauser already validates its own arguments and
 # prints its own clear errors -- these just check arg *count* (so a wrong
-# invocation gets fau's own usage line instead of florauser's) and exec the
-# real thing. Called by the `fau` dispatcher; fully runnable standalone too.
+# invocation gets fau's own usage line instead of florauser's), relabel its
+# output (see lib/common.sh's relabel_run: end users only ever type `fau
+# user-add`, not `florauser add`, so its messages should say "fau user-add"
+# too), and run the real thing. Called by the `fau` dispatcher; fully
+# runnable standalone too.
 set -euo pipefail
 
 # readlink -f before dirname: see tools/fau/fau's own comment on this --
@@ -22,10 +25,20 @@ user_check_available() {
 cmd_user_add() {
 	[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: fau user-add <name> [group1,group2,...]"
 	user_check_available
-	"$FLORAUSER_BIN" add "$@"
+	relabel_run user-add florauser "$FLORAUSER_BIN" add "$@"
 }
 
 cmd_user_passwd() {
+	# Deliberately NOT relabel_run: its prompts ("New password: ", no
+	# trailing newline, so the cursor stays put for the user to type on the
+	# same line) would sit stuck in relabel_run's sed *forever* -- sed only
+	# ever emits a complete line, so a prompt with no newline yet just isn't
+	# one. Confirmed with a throwaway C reproducer (printf, fflush, sleep,
+	# more printf) piped through the same relabel_run: the prompt and
+	# everything printed after it arrived in the same instant, well after
+	# the fflush, instead of the prompt appearing immediately -- exactly
+	# the broken interactive experience this avoids by leaving passwd's
+	# florauser-branded messages alone.
 	[ $# -eq 1 ] || die "usage: fau user-passwd <name>"
 	user_check_available
 	"$FLORAUSER_BIN" passwd "$@"
@@ -34,19 +47,19 @@ cmd_user_passwd() {
 cmd_user_rename() {
 	[ $# -eq 2 ] || die "usage: fau user-rename <old-name> <new-name>"
 	user_check_available
-	"$FLORAUSER_BIN" rename "$@"
+	relabel_run user-rename florauser "$FLORAUSER_BIN" rename "$@"
 }
 
 cmd_user_groupadd() {
 	[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: fau user-groupadd <name> [gid]"
 	user_check_available
-	"$FLORAUSER_BIN" groupadd "$@"
+	relabel_run user-groupadd florauser "$FLORAUSER_BIN" groupadd "$@"
 }
 
 cmd_user_addtogroup() {
 	[ $# -eq 2 ] || die "usage: fau user-addtogroup <user> <group>"
 	user_check_available
-	"$FLORAUSER_BIN" addtogroup "$@"
+	relabel_run user-addtogroup florauser "$FLORAUSER_BIN" addtogroup "$@"
 }
 
 cmd=${1:-}; [ $# -ge 1 ] && shift
