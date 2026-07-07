@@ -12,6 +12,10 @@ BUILD_DATE=$(date -u +%Y%m%d 2>/dev/null || echo unknown)
 mkdir -p "$ROOTFS"/{root,home,proc,sys,dev,run,tmp,mnt}
 mkdir -p "$ROOTFS/etc/inittab.d"
 mkdir -p "$ROOTFS/etc/runlevels/default"
+# No persistent syslog daemon (see docs/TODO.md) -- this is just a plain
+# directory for the handful of daemons (floraseat below) that append their
+# own log directly, same as any other file this project writes under /var.
+mkdir -p "$ROOTFS/var/log"
 chmod 1777 "$ROOTFS/tmp"
 
 # The kernel's initramfs unpacker execs /init directly if present.
@@ -198,10 +202,21 @@ ud:2345:once:/usr/bin/udevd --daemon && /usr/bin/udevadm trigger --action=add --
 # seatd-wire-protocol-compatible seat daemon -- runs in the foreground
 # (unlike udevd/dhcpcd above, it does not background itself), so it needs
 # "respawn" like the agetty lines below, not "once". Started before login
-# so the socket exists by the time anything tries to connect to it.
-fs:2345:respawn:/usr/bin/floraseat >/dev/null 2>&1
+# so the socket exists by the time anything tries to connect to it. Logged
+# to a real file rather than /dev/null -- its own VT-bound activate/
+# disable/acquire messages (see floraseat.c) are the only visibility into
+# what a VT switch actually did, with no persistent syslog daemon to
+# otherwise capture them (see docs/TODO.md).
+fs:2345:respawn:/usr/bin/floraseat >>/var/log/floraseat.log 2>&1
 
+# tty1 (physical console, always the active VT at boot) and tty2 (a second
+# VT to switch to -- see floraseat.c's VT-bound seat support) both run a
+# real login; ttyS0 is the serial line QEMU/KVM's own automation drives
+# (scripts/test-install.sh and friends) -- unaffected by VT switches
+# between tty1/tty2, since it isn't part of the kernel's VT subsystem at
+# all, the same reason it stays usable across a `chvt` from either of them.
 1:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin --noclear tty1 linux
+2:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin --noclear tty2 linux
 s0:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin ttyS0 115200 vt100
 EOF
 

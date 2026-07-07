@@ -445,15 +445,68 @@ build path that would've required compiling 16-bit real-mode boot code.
     wlroots/libseat fetched via `fau install <wm>` talks to it unmodified.
     Same "reimplement the wire protocol/data format, not the codebase" idea
     as fau's own alpm fallback reading pacman's sync-db format without
-    vendoring pacman. Single seat0, non-VT-bound; device access is an
-    allowlist (`/dev/dri/`, `/dev/input/event`, `/dev/hidraw` prefixes only,
-    checked *after* `realpath(3)` canonicalization) gated by the socket's
-    own permissions (`/run/seatd.sock`, 0660 root:seat), same access-control
-    model as real seatd. Protocol correctness verified with a hand-written
-    test client exercising open_seat/enable_seat/disallowed-path
-    rejection/ping-pong end-to-end against the actual compiled binary (not
-    just read-through) -- see the daemon's own file header for the full
-    scope writeup and what's deliberately smaller than upstream.
+    vendoring pacman. Single seat0, VT-bound (see the DONE entry just below
+    for how that was added); device access is an allowlist (`/dev/dri/`,
+    `/dev/input/event`, `/dev/hidraw` prefixes only, checked *after*
+    `realpath(3)` canonicalization) gated by the socket's own permissions
+    (`/run/seatd.sock`, 0660 root:seat), same access-control model as real
+    seatd. Protocol correctness verified with a hand-written test client
+    exercising open_seat/enable_seat/disallowed-path rejection/ping-pong
+    end-to-end against the actual compiled binary (not just read-through)
+    -- see the daemon's own file header for the full scope writeup and
+    what's deliberately smaller than upstream.
+  - DONE: **VT-switching in floraseat** (was: single-seat, non-VT-bound --
+    fine for one login session, a real gap once a second concurrent
+    graphical session needs to exist). Ported real seatd's actual VT-bound
+    design (verified directly against upstream's `common/terminal.c` and
+    `seatd/seat.c`, fetched and read, not reconstructed from memory) rather
+    than inventing one: a client's session number now IS the VT number it
+    opened the seat on (`VT_GETSTATE` on `/dev/tty0` at `CLIENT_OPEN_SEAT`
+    time); activating a client puts its VT into `VT_SETMODE(VT_PROCESS)`
+    with `relsig=SIGUSR1`/`acqsig=SIGUSR2`, keyboard raw-passthrough
+    (`KDSKBMODE K_OFF`), and `KD_GRAPHICS`. Both signals are delivered via
+    `signalfd(2)` as just another pollable fd in the daemon's existing
+    `poll(2)` loop, not a classic async-signal handler -- release disables
+    the outgoing client and acks (`VT_RELDISP, 1`) so the kernel proceeds;
+    acquire, once the switch completes, acks (`VT_RELDISP, VT_ACKACQ`) and
+    activates whichever client claims the newly-current VT.
+    `CLIENT_SWITCH_SESSION` no longer touches client state directly -- it
+    only issues `ioctl(VT_ACTIVATE, <target>)` and lets the release/acquire
+    signals drive the actual handoff, the same "one mechanism, not two
+    racing ones" reasoning upstream's own code gives for this. One
+    deliberate, disclosed simplification relative to upstream: real
+    seatd's `seat_add_client` refuses *any* new client while *any* client
+    anywhere on the seat is active and not already mid-disable, regardless
+    of which VT either is on; this project only refuses a new client
+    targeting the exact same VT another still-live client already claims,
+    since blocking unrelated VTs from adding a session while a different
+    VT is merely active elsewhere doesn't fit this project's own
+    multi-VT use case -- see floraseat.c's own header comment.
+    `scripts/apply-skeleton.sh` now also starts a second getty on `tty2`
+    (previously only `tty1` + the serial `ttyS0` test-automation line), so
+    there's an actual second VT to switch to, and logs floraseat's own
+    stderr to `/var/log/floraseat.log` instead of `/dev/null` (still no
+    persistent syslog daemon, see docs/TODO.md, but a daemon's own log
+    shouldn't need one to be readable at all). Boot-tested end-to-end for
+    real in QEMU/KVM: **tools/floraseat/vt-test-client.c** (a small,
+    permanently-checked-in but never rootfs-staged diagnostic -- speaks
+    just enough of the wire protocol to open a seat and print every
+    `SERVER_*` event) run as two separate instances, one per VT, with real
+    `chvt` calls between them over the serial console -- confirmed the
+    real release/disable/ack and acquire/re-enable sequence in
+    `/var/log/floraseat.log`, including the specific edge case where a
+    freshly-switched-to VT that no client has ever opened before produces
+    no acquire signal at all (nobody was ever registered to receive one),
+    which needed `handle_open_seat` to resync the shared current-VT state
+    itself rather than trusting what the last signal had left it at --
+    found by exactly this scenario failing the first test run, not
+    predicted in advance. Not independently exercised: real DRM master
+    handoff between two live GPU clients -- this sandbox's QEMU
+    `-nographic` boot has no framebuffer for `simpledrm` to attach to, so
+    `/dev/dri/card0` never appears at all (confirmed: the test client's own
+    device-open call gets ENOENT), leaving the seat-level enable/disable
+    protocol verified but the device-level master transfer itself
+    unverified against a real DRM node.
   - **linux-lts** (`scripts/recipes/linux-lts.sh`): now enables
     `CONFIG_SYSFB_SIMPLEFB`+`CONFIG_DRM_SIMPLEDRM` (generic
     firmware-framebuffer-based KMS, works on essentially any x86_64 machine
@@ -480,9 +533,7 @@ build path that would've required compiling 16-bit real-mode boot code.
     is the entire migration path for that user to reach the compositor's
     seat socket.
   - Still explicitly NOT done, on purpose rather than by oversight:
-    **no VT-switching** (floraseat is non-VT-bound -- fine for one login
-    session at a time, a real gap once a second concurrent graphical
-    session exists); **no real GPU acceleration driver** (i915/amdgpu/
+    **no real GPU acceleration driver** (i915/amdgpu/
     nouveau deliberately left out of linux-lts -- built-in would bloat
     vmlinuz with drivers most machines don't have, as modules they're
     useless without kmod -- add the one your hardware needs via

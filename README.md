@@ -41,11 +41,15 @@ shell to appear on its own). Concretely, right now:
   fetched via `fau install <wm>` talks to it unmodified, without this
   project taking on meson/ninja just to build real seatd), a generic
   simpledrm/sysfb KMS driver built into the kernel, and `floralogin` now
-  setting up `XDG_RUNTIME_DIR`. See docs/ARCHITECTURE.md's GUI-readiness
-  section for the full picture and [docs/TODO.md](docs/TODO.md) for what's
-  still explicitly not done (VT-switching, real GPU-accelerated drivers) —
-  the WM/DE itself stays purely opt-in via `fau install`, same as any other
-  app, a permanent design choice rather than a gap.
+  setting up `XDG_RUNTIME_DIR`. floraseat is VT-bound — real `chvt`/
+  Ctrl+Alt+Fn switching between concurrent graphical sessions on different
+  VTs, ported from real seatd's own VT-handling code (see
+  [tools/floraseat/floraseat.md](tools/floraseat/floraseat.md)). See
+  docs/ARCHITECTURE.md's GUI-readiness section for the full picture and
+  [docs/TODO.md](docs/TODO.md) for what's still explicitly not done (a real
+  GPU-accelerated driver) — the WM/DE itself stays purely opt-in via
+  `fau install`, same as any other app, a permanent design choice rather
+  than a gap.
 - **`fau` can install real Arch/Artix packages with zero `pacman` involved**,
   including from inside an already-booted FloraOS system, not just at build
   time. It used to shell out to the real `pacman -Sp` for dependency
@@ -108,11 +112,10 @@ bundled" aren't TODOs and aren't listed there):
   out of the default ISO — its dependency closure is ~773MB of
   Python3/Mesa/X11/Wayland; `fau install kitty` works today if you want
   the files.
-- **No VT-switching, no real GPU-accelerated driver** — floraseat is
-  single-seat/non-VT-bound for now (fine for one login session at a time),
-  and the kernel only ships a generic firmware-framebuffer KMS driver, not
-  i915/amdgpu/nouveau (add the one your hardware needs once this actually
-  blocks someone — see docs/TODO.md).
+- **No real GPU-accelerated driver** — the kernel only ships a generic
+  firmware-framebuffer KMS driver, not i915/amdgpu/nouveau (add the one
+  your hardware needs once this actually blocks someone — see
+  docs/TODO.md).
 
 ## Quick start
 

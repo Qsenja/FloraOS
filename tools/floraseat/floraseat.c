@@ -16,12 +16,10 @@
  * without vendoring seatd's C source tree.
  *
  * Scope, deliberately smaller than real seatd:
- *   - One seat ("seat0"), non-VT-bound. Real seatd only ever creates one
- *     seat too (see its own server.c: "TODO: create more seats"), so this
- *     isn't a cut corner relative to upstream. Non-VT-bound means no VT
- *     switching yet -- acceptable today (FloraOS has exactly one login
- *     session at a time), a real gap once a second concurrent graphical
- *     session exists. Documented as a TODO, not silently dropped.
+ *   - One seat ("seat0"), VT-bound (see the "VT-bound seat" section below)
+ *     -- real seatd only ever creates one seat too (see its own server.c:
+ *     "TODO: create more seats"), so this isn't a cut corner relative to
+ *     upstream.
  *   - Device allowlist: /dev/dri/ prefix, /dev/input/event prefix,
  *     /dev/hidraw prefix only,
  *     matching real seatd's path_is_drm/path_is_evdev/path_is_hidraw
@@ -50,6 +48,45 @@
  * implementation -- reproduced here (not copy-pasted from seatd's own
  * protocol.h, though the layout must match it exactly byte-for-byte or
  * nothing fetched via `fau install` can ever draw a pixel).
+ *
+ * VT-bound seat: a client's session number IS the VT number it opened the
+ * seat on (queried via VT_GETSTATE on /dev/tty0 at CLIENT_OPEN_SEAT time),
+ * not an arbitrary counter -- this is real seatd's own VT-bound convention
+ * (verified directly against upstream's common/terminal.c and seatd/seat.c,
+ * fetched and read, not reconstructed from memory), not invented here.
+ * Activating a client puts its VT into VT_SETMODE(VT_PROCESS) with
+ * relsig=SIGUSR1/acqsig=SIGUSR2, keyboard raw-passthrough (KDSKBMODE
+ * K_OFF), and KD_GRAPHICS -- the kernel then notifies this process instead
+ * of switching immediately whenever anything (a physical Ctrl+Alt+Fn, or
+ * this daemon's own CLIENT_SWITCH_SESSION handling of a libseat client's
+ * request) tries to change the active VT. SIGUSR1 (release) disables the
+ * outgoing client (revoke its devices, ST_PENDING_DISABLE, wait for its
+ * CLIENT_DISABLE_SEAT ack, same as any other disable) and acks the release
+ * (VT_RELDISP, 1) so the kernel proceeds with the actual switch; SIGUSR2
+ * (acquire), delivered once the switch completes, acks the acquire
+ * (VT_RELDISP, VT_ACKACQ) and activates whichever client (if any) claims
+ * the newly-current VT. CLIENT_SWITCH_SESSION itself does not touch any
+ * client state directly any more -- it only issues ioctl(VT_ACTIVATE,
+ * <target>) and lets the release/acquire signals drive the actual handoff,
+ * the same "one single mechanism, not two racing ones" reasoning upstream's
+ * own seat_set_next_session comment gives for this. Both signals are
+ * delivered via signalfd(2) (blocked from normal delivery, read as another
+ * pollable fd in the same poll(2) loop as client sockets) rather than a
+ * classic async signal handler, so there's no async-signal-safety
+ * tightrope to walk -- SIGTERM/SIGINT stay on the simpler classic-handler
+ * path (see on_term below), since nothing here needs them to interrupt a
+ * blocking read the way EINTR from poll(2) already handles.
+ *
+ * Deliberately simpler than upstream in one place: seat_add_client
+ * upstream refuses to add *any* new client while *any* client anywhere on
+ * the seat is active and not already mid-disable, regardless of which VT
+ * either one is on. This file only refuses a new client that targets the
+ * exact same VT another still-live client already claims -- the one real
+ * conflict (two clients fighting over one VT) -- since blocking unrelated
+ * VTs from ever adding a session while a different VT is merely active
+ * elsewhere doesn't match this project's own multi-VT use case. Documented
+ * simplification, not a hidden one, same standard as this file's other
+ * disclosed simplifications.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -65,6 +102,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -73,6 +111,8 @@
 
 #include <linux/input.h>   /* EVIOCREVOKE */
 #include <linux/hidraw.h>  /* HIDIOCREVOKE, guarded below */
+#include <linux/kd.h>      /* KDSKBMODE, KDSETMODE */
+#include <linux/vt.h>      /* VT_GETSTATE, VT_SETMODE, VT_ACTIVATE, VT_RELDISP */
 
 #define SEATD_SOCK_PATH "/run/seatd.sock"
 #define SEAT_NAME "seat0"
@@ -162,7 +202,11 @@ struct client {
 
 static struct client clients[MAX_CLIENTS];
 static struct client *active_client; /* NULL if no client currently enabled */
-static int next_session_id = 1;
+/* The currently-active VT (a client's session number, once it has one, IS
+ * this -- see this file's header comment). -1 during the narrow window
+ * between a release ack and the matching acquire signal, mirroring real
+ * seatd's own seat->cur_vt sentinel for "mid-switch, unknown". */
+static int g_cur_vt = -1;
 static volatile sig_atomic_t running = 1;
 
 static void log_msg(const char *fmt, ...) {
@@ -249,6 +293,75 @@ static void device_deactivate(struct device *d) {
 		break;
 	}
 	d->active = false;
+}
+
+/* --- VT-bound seat support: ioctl(2)/tty mechanics, verified directly
+ * against kennylevinsen/seatd's own common/terminal.c and seatd/seat.c
+ * (fetched and read, not reconstructed from memory) -- real seatd's actual
+ * implementation, folded into this file's single-TU style rather than
+ * split across separate terminal.c/seat.c files. See this file's header
+ * comment for the overall design. --- */
+
+static int vt_tty_open(int vt) {
+	char path[32];
+	snprintf(path, sizeof path, "/dev/tty%d", vt);
+	int fd = open(path, O_RDWR | O_NOCTTY);
+	if (fd == -1) log_msg("warn: could not open %s: %s", path, strerror(errno));
+	return fd;
+}
+
+/* VT_GETSTATE on /dev/tty0 (the "whichever VT is currently active" alias)
+ * -- returns -1 on failure, never 0 (VT numbering starts at 1). */
+static int vt_get_current(void) {
+	int fd = open("/dev/tty0", O_RDWR | O_NOCTTY);
+	if (fd == -1) { log_msg("warn: could not open /dev/tty0: %s", strerror(errno)); return -1; }
+	struct vt_stat st;
+	int rc = ioctl(fd, VT_GETSTATE, &st);
+	close(fd);
+	if (rc == -1) { log_msg("warn: VT_GETSTATE failed: %s", strerror(errno)); return -1; }
+	return st.v_active;
+}
+
+/* Puts a VT into (or out of) process-switching mode: while enabled, the
+ * kernel signals this process (SIGUSR1 to release, SIGUSR2 to acquire)
+ * instead of switching immediately, stops the kernel's own text-console
+ * rendering/echo on it (KD_GRAPHICS) and keyboard translation (KDSKBMODE
+ * K_OFF, so a graphical client reads raw evdev via the device fds this
+ * daemon already hands out, instead of the kernel's VT layer consuming
+ * keypresses first). Idempotent -- safe to call again on an already-
+ * (de)activated VT, which real seatd's own vt_open does on every
+ * reactivation, not just the first. */
+static void vt_configure(int vt, bool graphical) {
+	int fd = vt_tty_open(vt);
+	if (fd == -1) return;
+	struct vt_mode mode = {
+		.mode = graphical ? VT_PROCESS : VT_AUTO,
+		.waitv = 0,
+		.relsig = graphical ? SIGUSR1 : 0,
+		.acqsig = graphical ? SIGUSR2 : 0,
+		.frsig = 0,
+	};
+	if (ioctl(fd, VT_SETMODE, &mode) == -1)
+		log_msg("warn: VT_SETMODE(%s) on vt%d failed: %s",
+			graphical ? "VT_PROCESS" : "VT_AUTO", vt, strerror(errno));
+	if (ioctl(fd, KDSKBMODE, graphical ? K_OFF : K_UNICODE) == -1)
+		log_msg("warn: KDSKBMODE on vt%d failed: %s", vt, strerror(errno));
+	if (ioctl(fd, KDSETMODE, graphical ? KD_GRAPHICS : KD_TEXT) == -1)
+		log_msg("warn: KDSETMODE on vt%d failed: %s", vt, strerror(errno));
+	close(fd);
+}
+
+/* Acks a pending VT_PROCESS release (releasing=true, VT_RELDISP 1 -- "go
+ * ahead") or a just-completed acquire (releasing=false, VT_RELDISP
+ * VT_ACKACQ). Required in both directions or the kernel leaves the VT
+ * switch machinery wedged waiting for this process. */
+static void vt_ack(int vt, bool releasing) {
+	int fd = vt_tty_open(vt);
+	if (fd == -1) return;
+	if (ioctl(fd, VT_RELDISP, releasing ? 1 : VT_ACKACQ) == -1)
+		log_msg("warn: VT_RELDISP ack (%s) on vt%d failed: %s",
+			releasing ? "release" : "acquire", vt, strerror(errno));
+	close(fd);
 }
 
 /* --- wire I/O helpers ---
@@ -364,14 +477,18 @@ static void client_close_all_devices(struct client *c) {
 	c->devices = NULL;
 }
 
-/* Picks and enables the next eligible client once the seat is free --
- * non-VT-bound seat: just the first client still waiting (matches real
- * seat_activate's non-VT-bound branch). */
+/* Picks and enables the client claiming the currently-active VT, if the
+ * seat is free and one is waiting -- matches real seat_activate's
+ * vt_bound branch (this file's seat is always VT-bound, see the header
+ * comment): a client whose session doesn't match g_cur_vt is on some
+ * *other* VT and has nothing to do with what's on screen right now. */
 static void seat_activate_next(void) {
 	if (active_client != NULL) return;
+	if (g_cur_vt == -1) return; /* mid-switch -- wait for the acquire signal */
 	for (int i = 0; i < MAX_CLIENTS; i++) {
 		struct client *c = &clients[i];
-		if (c->used && (c->state == ST_NEW || c->state == ST_DISABLED)) {
+		if (c->used && c->session == g_cur_vt && (c->state == ST_NEW || c->state == ST_DISABLED)) {
+			vt_configure(c->session, true);
 			for (struct device *d = c->devices; d; d = d->next) device_activate(d);
 			if (send_msg(c, SERVER_ENABLE_SEAT, NULL, 0) == -1) {
 				log_msg("could not send enable_seat to session %d", c->session);
@@ -379,30 +496,95 @@ static void seat_activate_next(void) {
 			}
 			c->state = ST_ACTIVE;
 			active_client = c;
-			log_msg("session %d activated on %s", c->session, SEAT_NAME);
+			log_msg("session %d activated on %s (vt%d)", c->session, SEAT_NAME, c->session);
 			return;
 		}
 	}
 }
 
-static void client_destroy(struct client *c) {
-	log_msg("session %d disconnected (pid %d)", c->session, c->pid);
+/* Deactivates the currently active client's devices and asks it to
+ * disable (ST_PENDING_DISABLE, SERVER_DISABLE_SEAT) without clearing
+ * active_client -- that only happens once the client's own
+ * CLIENT_DISABLE_SEAT ack arrives (handle_disable_seat below), same as
+ * real seatd's seat_disable_client/seat_ack_disable_client split. Shared
+ * by the VT release-signal handler (on_vt_release) below. */
+static void disable_active_client(void) {
+	struct client *c = active_client;
+	for (struct device *d = c->devices; d; d = d->next) device_deactivate(d);
+	c->state = ST_PENDING_DISABLE;
+	send_msg(c, SERVER_DISABLE_SEAT, NULL, 0);
+	log_msg("session %d disabling (vt switch)", c->session);
+}
+
+/* Shared teardown for both a full client disconnect (client_destroy) and
+ * an explicit CLIENT_CLOSE_SEAT while the connection itself stays open --
+ * real seatd's own handle_close_seat calls the identical seat_remove_client
+ * for the same reason, so this isn't duplicated between the two callers.
+ * Leaves c->fd/c->used untouched; callers decide what happens to the
+ * connection itself. */
+static void seat_remove_client(struct client *c) {
+	int session = c->session;
+	enum client_state prev_state = c->state;
 	client_close_all_devices(c);
-	close(c->fd);
 	bool was_active = (active_client == c);
-	memset(c, 0, sizeof *c);
-	c->used = false;
 	if (was_active) {
 		active_client = NULL;
 		seat_activate_next();
 	}
+	c->state = ST_CLOSED;
+	c->session = -1;
+	if (session == -1) return; /* never actually opened the seat */
+	/* Matches real seatd's seat_remove_client exactly: only reset the VT
+	 * to non-graphical if nothing is taking over it immediately -- either
+	 * this was the active client and no waiting client claimed the VT
+	 * right back, or it was a background client on that VT that's now
+	 * genuinely gone (not just being ack'd through a normal disable,
+	 * which never reaches this function at all). */
+	if (was_active) {
+		if (active_client == NULL) vt_configure(session, false);
+	} else if (prev_state != ST_CLOSED) {
+		vt_configure(session, false);
+	}
+}
+
+static void client_destroy(struct client *c) {
+	log_msg("session %d disconnected (pid %d)", c->session, c->pid);
+	seat_remove_client(c);
+	close(c->fd);
+	memset(c, 0, sizeof *c);
+	c->used = false;
 }
 
 /* --- protocol handlers, mirroring real seatd/client.c's opcode dispatch --- */
 
 static void handle_open_seat(struct client *c) {
 	if (c->session != -1) { send_error(c, EALREADY); return; }
-	c->session = next_session_id++;
+
+	int vt = vt_get_current();
+	if (vt == -1) { send_error(c, EIO); return; }
+	/* Resyncs the shared g_cur_vt to this fresh query, matching real
+	 * seatd's own seat_add_client (which calls seat_update_vt for exactly
+	 * this reason). Needed for the first-ever client on a VT that was
+	 * switched to *before* any client had put it in VT_PROCESS mode: the
+	 * kernel switches such a VT with no signal to anyone (nobody was
+	 * registered to receive one yet), so without this, g_cur_vt would be
+	 * left stuck at -1 from the *previous* VT's release signal, and
+	 * seat_activate_next below would refuse to activate this client at
+	 * all. */
+	g_cur_vt = vt;
+
+	/* The one real conflict this file still guards against -- see the
+	 * header comment for why this is narrower than upstream's own check. */
+	for (int i = 0; i < MAX_CLIENTS; i++) {
+		struct client *other = &clients[i];
+		if (other != c && other->used && other->session == vt &&
+		    (other->state == ST_ACTIVE || other->state == ST_PENDING_DISABLE)) {
+			send_error(c, EBUSY);
+			return;
+		}
+	}
+
+	c->session = vt;
 	c->state = ST_NEW;
 
 	struct proto_server_seat_opened body = { .seat_name_len = (uint16_t)(strlen(SEAT_NAME) + 1) };
@@ -410,19 +592,14 @@ static void handle_open_seat(struct client *c) {
 		log_msg("could not reply to open_seat for session %d", c->session);
 		return;
 	}
-	log_msg("session %d opened %s (pid %d, uid %d)", c->session, SEAT_NAME, c->pid, c->uid);
+	log_msg("session %d (vt%d) opened %s (pid %d, uid %d)", c->session, vt, SEAT_NAME, c->pid, c->uid);
 	seat_activate_next();
 }
 
 static void handle_close_seat(struct client *c) {
 	if (c->session == -1) { send_error(c, EINVAL); return; }
-	client_close_all_devices(c);
-	bool was_active = (active_client == c);
-	c->state = ST_CLOSED;
-	c->session = -1;
-	if (was_active) active_client = NULL;
+	seat_remove_client(c);
 	send_msg(c, SERVER_SEAT_CLOSED, NULL, 0);
-	if (was_active) seat_activate_next();
 }
 
 static void handle_open_device(struct client *c, const char *path) {
@@ -491,28 +668,63 @@ static void handle_disable_seat(struct client *c) {
 	send_msg(c, SERVER_SEAT_DISABLED, NULL, 0);
 }
 
-/* Session switching between two already-open clients on this (non-VT-bound)
- * seat. No VT ioctl dance here -- see the file header's documented TODO. */
+/* Requests a VT switch -- session numbers ARE VT numbers on this seat (see
+ * the header comment), so this is just ioctl(VT_ACTIVATE, session). Does
+ * NOT touch any client state directly: the actual disable/enable handoff
+ * happens asynchronously via on_vt_release/on_vt_acquire below once the
+ * kernel delivers the corresponding signals, matching upstream's own
+ * reasoning for why (one single mechanism drives both a physical
+ * Ctrl+Alt+Fn and this request, instead of two racing ones). */
 static void handle_switch_session(struct client *c, int session) {
 	if (c->state != ST_ACTIVE) { send_error(c, EPERM); return; }
 	if (session == c->session) { send_msg(c, SERVER_SESSION_SWITCHED, NULL, 0); return; }
+	if (session <= 0) { send_error(c, EINVAL); return; }
+	if (g_cur_vt == -1) { send_error(c, EBUSY); return; } /* already mid-switch */
 
-	struct client *target = NULL;
-	for (int i = 0; i < MAX_CLIENTS; i++)
-		if (clients[i].used && clients[i].session == session) target = &clients[i];
-	if (!target) { send_error(c, EINVAL); return; }
+	int fd = vt_tty_open(g_cur_vt);
+	if (fd == -1) { send_error(c, EIO); return; }
+	/* Defensive re-arm, matching real seatd's own vt_switch -- harmless if
+	 * already set, cheap insurance against this VT somehow having reverted
+	 * to VT_AUTO behind our back. */
+	struct vt_mode mode = { .mode = VT_PROCESS, .waitv = 0, .relsig = SIGUSR1, .acqsig = SIGUSR2, .frsig = 0 };
+	ioctl(fd, VT_SETMODE, &mode);
+	int rc = ioctl(fd, VT_ACTIVATE, session);
+	int saved_errno = errno;
+	close(fd);
+	if (rc == -1) { send_error(c, saved_errno); return; }
 
-	for (struct device *d = c->devices; d; d = d->next) device_deactivate(d);
-	c->state = ST_PENDING_DISABLE;
-	send_msg(c, SERVER_DISABLE_SEAT, NULL, 0);
 	send_msg(c, SERVER_SESSION_SWITCHED, NULL, 0);
-	/* target gets activated once c acks the disable via
-	 * handle_disable_seat -> seat_activate_next(), matching upstream's
-	 * ack-driven handoff. */
 }
 
 static void handle_ping(struct client *c) {
 	send_msg(c, SERVER_PONG, NULL, 0);
+}
+
+/* --- VT release/acquire signal handlers -- see the header comment. Called
+ * from main()'s poll loop once a signalfd read reports SIGUSR1/SIGUSR2,
+ * never from an actual signal handler context, so ordinary (non-async-
+ * signal-safe) calls like log_msg/open/close are fine here. --- */
+
+/* The kernel wants to switch away from g_cur_vt -- disable whatever's
+ * active there and ack, letting the switch proceed. Mirrors real seatd's
+ * seat_vt_release. */
+static void on_vt_release(void) {
+	log_msg("vt%d releasing (switch requested)", g_cur_vt);
+	if (active_client != NULL) disable_active_client();
+	if (g_cur_vt != -1) vt_ack(g_cur_vt, true);
+	g_cur_vt = -1;
+}
+
+/* The kernel just finished switching TO the new current VT -- ack, then
+ * activate whatever claims it, if the outgoing client's disable ack has
+ * already arrived (active_client == NULL); otherwise handle_disable_seat's
+ * own trailing seat_activate_next() picks this up once it does. Mirrors
+ * real seatd's seat_vt_activate. */
+static void on_vt_acquire(void) {
+	g_cur_vt = vt_get_current();
+	log_msg("vt%d acquired", g_cur_vt);
+	if (g_cur_vt != -1) vt_ack(g_cur_vt, false);
+	if (active_client == NULL) seat_activate_next();
 }
 
 /* --- per-client connection handling --- */
@@ -601,6 +813,27 @@ static int make_listen_socket(void) {
 	return fd;
 }
 
+/* SIGUSR1 (VT release)/SIGUSR2 (VT acquire) are read through this fd
+ * (blocked from normal async delivery below) so the poll(2) loop handles
+ * them as just another readable fd, alongside client sockets -- no
+ * async-signal-safety constraints to worry about in on_vt_release/
+ * on_vt_acquire, which call log_msg/open/close freely. SIGTERM/SIGINT stay
+ * on the classic signal()+volatile-flag path (on_term) -- poll(2) already
+ * returns EINTR for those, which the loop below handles. */
+static int make_vt_signalfd(void) {
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGUSR1);
+	sigaddset(&mask, SIGUSR2);
+	if (sigprocmask(SIG_BLOCK, &mask, NULL) == -1) {
+		perror("floraseat: sigprocmask");
+		exit(1);
+	}
+	int fd = signalfd(-1, &mask, SFD_CLOEXEC);
+	if (fd == -1) { perror("floraseat: signalfd"); exit(1); }
+	return fd;
+}
+
 int main(void) {
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGTERM, on_term);
@@ -611,14 +844,21 @@ int main(void) {
 	int listen_fd = make_listen_socket();
 	log_msg("listening on %s", SEATD_SOCK_PATH);
 
-	struct pollfd pfds[1 + MAX_CLIENTS];
+	int sigfd = make_vt_signalfd();
+	g_cur_vt = vt_get_current();
+	log_msg("VT-bound seat starting on vt%d", g_cur_vt);
+
+	struct pollfd pfds[2 + MAX_CLIENTS];
 
 	while (running) {
 		int n = 0;
 		pfds[n].fd = listen_fd;
 		pfds[n].events = POLLIN;
 		n++;
-		int client_idx[MAX_CLIENTS];
+		pfds[n].fd = sigfd;
+		pfds[n].events = POLLIN;
+		n++;
+		int client_idx[2 + MAX_CLIENTS];
 		for (int i = 0; i < MAX_CLIENTS; i++) {
 			if (!clients[i].used) continue;
 			pfds[n].fd = clients[i].fd;
@@ -660,7 +900,15 @@ int main(void) {
 			}
 		}
 
-		for (int i = 1; i < n; i++) {
+		if (pfds[1].revents & POLLIN) {
+			struct signalfd_siginfo si;
+			if (read(sigfd, &si, sizeof si) == sizeof si) {
+				if (si.ssi_signo == SIGUSR1) on_vt_release();
+				else if (si.ssi_signo == SIGUSR2) on_vt_acquire();
+			}
+		}
+
+		for (int i = 2; i < n; i++) {
 			if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
 				struct client *c = &clients[client_idx[i]];
 				if (!c->used) continue;

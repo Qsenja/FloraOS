@@ -7,10 +7,6 @@ ARCHITECTURE.md). Deliberate, permanent design choices (e.g. no WM/DE bundled
 in the base image, app isolation under `~/apps/`) are *not* listed here — this
 file is only for things that could reasonably be finished later.
 
-- **No VT-switching** (`tools/floraseat`) — single-seat, non-VT-bound.
-  Fine today (FloraOS only ever has one login session at a time); a real
-  gap once a second concurrent graphical session needs to exist. See
-  MANIFEST.md's floraseat row and the tool's own file header.
 - **No real GPU-accelerated driver** — the kernel only ships a generic
   simpledrm/sysfb KMS driver, not i915/amdgpu/nouveau. Add the one your
   hardware needs once this actually blocks someone (see README.md's
