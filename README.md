@@ -10,7 +10,7 @@ What makes FloraOS different: user-installed apps via `fau install` live
 entirely under `~/apps/<name>/` — binary, config, cache, logs, all in one
 self-contained directory, never scattered across `/usr`, `/etc`, `/var/log`.
 `fau remove firefox` deletes exactly that directory and nothing else. See
-[ARCHITECTURE.md](ARCHITECTURE.md#app-isolation-per-app-directories-under-apps)
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#app-isolation-per-app-directories-under-apps)
 for how and why, and its real limits.
 
 ## Status: boots to a working shell, verified
@@ -26,7 +26,7 @@ shell to appear on its own). Concretely, right now:
   OpenRC, ncurses, bash, coreutils, util-linux, e2fsprogs, iproute2, dhcpcd,
   plus grep/sed/gawk/findutils/tar/zstd/rsync/attr/acl/libmd (all of it
   needed for `fau` itself to actually work *inside* the running OS, not just
-  during the build — see ARCHITECTURE.md for how that gap got found), plus
+  during the build — see docs/ARCHITECTURE.md for how that gap got found), plus
   procps-ng/hostname/kbd so OpenRC's sysctl/hostname/keymaps services
   actually run instead of failing non-fatally, plus libxcrypt for password
   verification, plus curl/mbedtls so `fau` can actually fetch anything after
@@ -39,10 +39,11 @@ shell to appear on its own). Concretely, right now:
   fetched via `fau install <wm>` talks to it unmodified, without this
   project taking on meson/ninja just to build real seatd), a generic
   simpledrm/sysfb KMS driver built into the kernel, and `floralogin` now
-  setting up `XDG_RUNTIME_DIR`. See ARCHITECTURE.md's GUI-readiness section
-  for the full picture and what's still explicitly not done (VT-switching,
-  real GPU-accelerated drivers, and the WM/DE itself — still purely opt-in
-  via `fau install`, same as any other app).
+  setting up `XDG_RUNTIME_DIR`. See docs/ARCHITECTURE.md's GUI-readiness
+  section for the full picture and [docs/TODO.md](docs/TODO.md) for what's
+  still explicitly not done (VT-switching, real GPU-accelerated drivers) —
+  the WM/DE itself stays purely opt-in via `fau install`, same as any other
+  app, a permanent design choice rather than a gap.
 - **`fau` can install real Arch/Artix packages with zero `pacman` involved**,
   including from inside an already-booted FloraOS system, not just at build
   time. It used to shell out to the real `pacman -Sp` for dependency
@@ -68,34 +69,43 @@ shell to appear on its own). Concretely, right now:
   --mount chroot` into the built rootfs (no sudo needed): `fau
   bootstrap-list` correctly prints all 29 installed base packages, and
   ordinary commands like `ls` work.
-- **ISO size: 164MB** (`floraos.iso`, hybrid BIOS+UEFI, boots and runs
+- **ISO size: 192MB** (`floraos.iso`, hybrid BIOS+UEFI, boots and runs
   entirely from RAM as a live image). Grew from an earlier 135MB, mostly
   from fixing a real bug where FloraOS's own compiled glibc was being
   silently overwritten by Arch's smaller, pre-stripped binary (see
-  ARCHITECTURE.md) — that extra size is FloraOS's own unstripped build
+  docs/ARCHITECTURE.md) — that extra size is FloraOS's own unstripped build
   correctly winning out, not new bloat — plus curl/mbedtls, added
-  deliberately so `fau` can fetch packages after boot.
+  deliberately so `fau` can fetch packages after boot, plus florainstall/
+  floragrub-cfg and the rest of the `fau backup` machinery since.
 - **fastfetch** runs at login with a custom ASCII logo and a package count
   read from `fau`'s own list.
+- **Persistent disk install**: run `florainstall` (a TUI, ncurses-based)
+  from a root shell on the live image to partition a real disk, format it
+  (btrfs, an `@` subvolume), and copy the running system onto it — BIOS/MBR
+  only, no UEFI yet (see docs/TODO.md). Boot-tested end-to-end for real in
+  QEMU/KVM, not just compiled (see `scripts/test-install.sh`).
+- **`fau backup`**: a full-root btrfs snapshot restorable by picking an
+  alternate entry at the GRUB menu, `fau backup-restore` to promote one to
+  be the permanent default. Real disk installs only. See "fau, the package
+  manager" below and docs/ARCHITECTURE.md's fau-backup section.
 
-What's explicitly *not* done yet (all documented with reasoning in
-[ARCHITECTURE.md](ARCHITECTURE.md)'s TODO section):
+What's explicitly *not* done yet (the live, current list, kept in
+[docs/TODO.md](docs/TODO.md) — not a wishlist, only things that could
+reasonably be finished later; permanent design choices like "no WM/DE
+bundled" aren't TODOs and aren't listed there):
 
 - **No WM/DE bundled in the base image** (still opt-in via `fau install`,
-  same as any other app) — but the prerequisites now exist (eudev,
-  floraseat, a built-in generic KMS driver; see above and ARCHITECTURE.md).
-  `kitty` is still deliberately left out of the default ISO — its
-  dependency closure is ~773MB of Python3/Mesa/X11/Wayland; `fau install
-  kitty` works today if you want the files.
+  same as any other app, a deliberate permanent choice) — but the
+  prerequisites now exist (eudev, floraseat, a built-in generic KMS driver;
+  see above and docs/ARCHITECTURE.md). `kitty` is still deliberately left
+  out of the default ISO — its dependency closure is ~773MB of
+  Python3/Mesa/X11/Wayland; `fau install kitty` works today if you want
+  the files.
 - **No VT-switching, no real GPU-accelerated driver** — floraseat is
   single-seat/non-VT-bound for now (fine for one login session at a time),
   and the kernel only ships a generic firmware-framebuffer KMS driver, not
   i915/amdgpu/nouveau (add the one your hardware needs once this actually
-  blocks someone — see ARCHITECTURE.md).
-- **Persistent disk install** now exists: run `florainstall` (a TUI, ncurses-
-  based) from a root shell on the live image to partition a real disk,
-  format it, and copy the running system onto it — BIOS/MBR only for now,
-  no UEFI (see ARCHITECTURE.md).
+  blocks someone — see docs/TODO.md).
 
 ## Quick start
 
@@ -123,15 +133,20 @@ extra base packages, or rename the output ISO, edit `config/floraos.conf`
   system: everything downloads and builds under `work/` (gitignored).
 - `./floraiso build` — runs the rootfs build if needed, then packs the whole
   rootfs as an initramfs and calls `grub-mkrescue` to produce a hybrid
-  BIOS+UEFI bootable `floraos.iso` (name configurable, currently 164MB).
-  FloraOS currently boots and runs entirely from RAM as a live image —
-  persistent disk installs are a documented TODO, not yet scripted (see
-  ARCHITECTURE.md).
+  BIOS+UEFI bootable `floraos.iso` (name configurable, currently 192MB).
+  FloraOS boots and runs entirely from RAM as a live image; run
+  `florainstall` from a shell on that image for a persistent disk install
+  (see above).
 - `./floraiso test` — boots that ISO in QEMU with a serial console, drives an
   actual login (root, empty password) through it, and checks the boot log
   for two markers: the kernel actually starting, and the login shell
   actually being reached. Exits non-zero (and prints why) if either is
   missing.
+- `scripts/test-install.sh` — a heavier, separate check: installs onto a
+  scratch disk image via `florainstall` (driven over the serial console,
+  same technique as above), then boots that disk through the whole
+  `fau backup`/`grub-reboot`/`fau backup-restore` cycle in QEMU/KVM. Takes
+  several minutes; not part of `floraiso test`.
 
 ## Layout
 
@@ -140,15 +155,18 @@ config/floraos.conf     # the one config file: hostname, extra packages, kernel 
 config/versions.conf    # pinned source URL + sha256 for every base package
 docs/MANIFEST.md        # every package in the base rootfs, one-line reason each
 docs/FILESYSTEM_LAYOUT.md
-ARCHITECTURE.md         # design decisions, why, and the current TODO list
+docs/ARCHITECTURE.md    # design decisions, why, and the full DONE/TODO history
+docs/TODO.md            # the current, live, open TODO list
 assets/                 # fastfetch logo + config shipped into the rootfs
 tools/fau/               # FloraOS's package manager
-tools/floralogin/        # FloraOS's own PAM-free login (see ARCHITECTURE.md)
+tools/floralogin/        # FloraOS's own PAM-free login (see docs/ARCHITECTURE.md)
 tools/floraseat/         # FloraOS's own seatd-protocol-compatible seat daemon
 tools/florauser/         # FloraOS's own useradd/passwd/groupadd equivalent
 tools/fauelf/            # FloraOS's own absolute-DT_NEEDED fixup tool
 tools/florainstall/      # FloraOS's own TUI disk installer
+tools/floragrub-cfg/     # FloraOS's own /boot/grub/grub.cfg generator (florainstall + fau backup)
 scripts/                # rootfs + ISO build scripts and per-package build recipes
+scripts/test-install.sh # real QEMU/KVM boot test: florainstall + fau backup end-to-end
 work/                   # build output (gitignored) -- sources, staged builds, rootfs, fau repo
 ```
 
@@ -169,9 +187,9 @@ installed onto your real system). This fallback doesn't shell out to
 `pacman` at all (it reads the sync-db/mirrorlist formats itself), so it
 works both when building the ISO here *and* from inside an already-booted
 FloraOS system, which ships neither `pacman` nor its config — see
-ARCHITECTURE.md for how that's verified. GUI apps will fetch fine but have
+docs/ARCHITECTURE.md for how that's verified. GUI apps will fetch fine but have
 nowhere to render without a display server (not built yet, see
-ARCHITECTURE.md).
+docs/ARCHITECTURE.md).
 
 There's also a build-time-only counterpart —
 `bootstrap`/`bootstrap-remove`/`bootstrap-list`/`bootstrap-export`/`bootstrap-apply`
@@ -207,7 +225,7 @@ fau backup-remove <name>
 fau backup-restore <name>  # promote a backup to be the new / (reboot to actually boot into it)
 ```
 
-Real disk installs only (see `florainstall` above and ARCHITECTURE.md's fau-backup
-section for the subvolume layout) — not available on the live ISO itself.
+Real disk installs only (see `florainstall` above and docs/ARCHITECTURE.md's
+fau-backup section for the subvolume layout) — not available on the live ISO itself.
 
 See `tools/fau/fau --help` for the full command list.
