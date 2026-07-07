@@ -29,6 +29,14 @@ file is only for things that could reasonably be finished later.
   turned off in firmware setup to boot a FloraOS install. Fine today (no
   signed-boot requirement has shown up yet, same reasoning as the syslog
   daemon entry above); a real gap once that changes.
+- **Single-user mode (runlevel `S1`) doesn't actually do anything** —
+  `/etc/inittab`'s `l1:S1:wait:/usr/bin/openrc single` has no
+  `etc/runlevels/single/` services defined, so reaching it today invokes
+  neither an emergency shell nor a password prompt of any kind. `sulogin`
+  (see ARCHITECTURE.md/MANIFEST.md's sysvinit entry) now exists, correctly
+  linked and verified working end-to-end, specifically to be usable here —
+  it just isn't wired in yet. Found while restoring `sulogin`, not the
+  thing that restoration fixed.
 
 See ARCHITECTURE.md for the full design-decision history (including
 everything above that's already DONE, and the reasoning behind each).

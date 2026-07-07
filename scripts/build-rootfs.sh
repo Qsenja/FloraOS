@@ -222,6 +222,37 @@ main() {
 		"$FLORA_ROOT/tools/floralogin/floralogin.c" -lcrypt
 	chmod 755 "$ROOTFS_DIR/usr/bin/floralogin"
 
+	log "=== restoring sulogin (sysvinit's own emergency single-user-mode shell) ==="
+	# scripts/recipes/sysvinit.sh drops sulogin from the real sysvinit
+	# package outright: that recipe builds sysvinit early (position 3 in
+	# MANDATORY_ORDER, well before libxcrypt exists anywhere in this
+	# rootfs), against whatever crypt() this *build host* happens to
+	# provide -- which would bake in a mismatched libcrypt SONAME the
+	# shipped image doesn't actually have, the exact class of bug
+	# floralogin's own -I/-L linkage above exists to avoid. That recipe's
+	# own comment used to say this was dropped because "there's no working
+	# password-backed login to check against yet" -- stale now that
+	# floralogin/florauser exist and manage real /etc/shadow entries via
+	# this same libxcrypt. sulogin.c itself was already confirmed to need
+	# nothing but crypt(3) (no PAM at all -- verified by reading sysvinit's
+	# own source, not assumed), so this recompiles it fresh from the same
+	# pinned tarball, now that libxcrypt is actually staged, and installs
+	# it where sysvinit's own base_bindir=/usr/bin override would have.
+	{
+		sulogin_tarball=$(fetch_source sysvinit)
+		# Distinct name from the real "sysvinit" build dir (already
+		# consumed and possibly gone by now, see already_built's own
+		# skip-rebuild path) -- extract_source always wipes+re-extracts
+		# fresh regardless, so this doesn't depend on that earlier build
+		# having actually run this time around.
+		sulogin_src=$(extract_source sysvinit-sulogin "$sulogin_tarball")
+		gcc -Wall -Wextra -O2 -D_GNU_SOURCE -D_XOPEN_SOURCE \
+			-I"$sulogin_src/src" -I"$ROOTFS_DIR/usr/include" -L"$ROOTFS_DIR/usr/lib" \
+			-o "$ROOTFS_DIR/usr/bin/sulogin" \
+			"$sulogin_src/src/sulogin.c" "$sulogin_src/src/consoles.c" -lcrypt
+		chmod 755 "$ROOTFS_DIR/usr/bin/sulogin"
+	}
+
 	log "=== compiling fauelf (fau's own absolute-DT_NEEDED fixup tool) ==="
 	# Not a fau package either, same reasoning as floralogin above. Unlike
 	# floralogin, fauelf needs no FloraOS-specific header/lib (just plain

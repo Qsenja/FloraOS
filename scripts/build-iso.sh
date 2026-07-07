@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Builds a bootable hybrid BIOS+UEFI ISO from the FloraOS rootfs.
 # The whole rootfs is packed as the initramfs and the kernel execs /init
-# from it directly -- FloraOS boots and runs entirely from RAM (a live
-# image; persistent disk installs are a documented future TODO, see
-# ARCHITECTURE.md). grub-mkrescue (a build-host tool, not a FloraOS
+# from it directly -- FloraOS boots and runs entirely from RAM (this is the
+# *live* image; a persistent disk install is a separate, later step run
+# from inside it -- see tools/florainstall and ARCHITECTURE.md's
+# florainstall entry). grub-mkrescue (a build-host tool, not a FloraOS
 # package -- see ARCHITECTURE.md) produces both boot paths in one step.
 set -euo pipefail
 

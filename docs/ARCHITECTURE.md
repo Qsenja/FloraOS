@@ -421,6 +421,34 @@ build path that would've required compiling 16-bit real-mode boot code.
   named pipe (see `scripts/test-iso.sh`, which now does this on every
   `./floraiso test` run instead of just watching for the shell to appear on
   its own).
+- DONE: restored **sulogin** (sysvinit's own emergency single-user-mode
+  shell) -- `scripts/recipes/sysvinit.sh` used to drop it outright, with a
+  comment blaming "no working password-backed login to check against yet."
+  Stale the moment floralogin/libxcrypt landed (the DONE entry just above):
+  sulogin.c itself was confirmed (by reading its actual source, not
+  assumed) to need only `crypt(3)`/`shadow.h`, no PAM at all -- the real
+  reason it stayed dropped was purely build *ordering* (sysvinit builds at
+  position 3 in `MANDATORY_ORDER`, well before libxcrypt exists anywhere in
+  this rootfs, so linking it there would bake in whatever libcrypt SONAME
+  the *build host* happens to provide, the same class of bug floralogin's
+  own `-I/-L$ROOTFS_DIR` linkage exists to avoid). Fixed the same way, not
+  by reordering the whole sysvinit build: `build-rootfs.sh` now re-fetches
+  the same pinned sysvinit tarball into a separate throwaway build dir
+  right after libxcrypt is staged, and recompiles just `sulogin.c`+
+  `consoles.c` correctly linked against it. Verified end-to-end in QEMU,
+  not just compiled: set a real password via `florauser passwd root`, ran
+  `/usr/bin/sulogin` directly, confirmed a wrong password is rejected
+  ("Login incorrect.", re-prompts) and the correct one grants a real root
+  shell -- also cross-checked with `getent shadow root` that the yescrypt
+  hash `florauser` writes resolves correctly through NSS (`/etc/nsswitch.conf`
+  already ships `shadow: files`), since sulogin's own `getrootpwent()`
+  substitutes `getspnam()`'s real hash for `/etc/passwd`'s `"x"` placeholder
+  and needs that path working. **Not wired into anything yet**, though: this
+  is a real, disclosed gap found *while* verifying the above, not the thing
+  being fixed -- `/etc/inittab`'s `l1:S1:wait:/usr/bin/openrc single` runlevel
+  has no `etc/runlevels/single/` services defined (confirmed: the directory
+  doesn't exist), so reaching single-user mode today doesn't invoke
+  `sulogin` or anything else at all. See docs/TODO.md.
 - PARTIAL (was: no GUI/display server at all): the three system-level
   primitives a Wayland WM/DE needs that `fau install <wm>`'s own alpm
   fallback can't provide by itself (it can fetch wlroots/mesa/sway/mango's
