@@ -384,6 +384,32 @@ alpm_resolve() {
 	rm -f "$seen" "$out"
 }
 
+# alpm_resolve_many <name...> -- like alpm_resolve, but resolves every
+# given name's closure into ONE shared "already resolved" cache instead of
+# calling alpm_resolve once per name -- a package needed by more than one
+# of the given names (mesa, zlib, xcb-util-wm, ...) only gets walked once
+# instead of once per name that needs it. Found by actually running `fau
+# build mangowm`'s own 15-name PKG_DEPENDS + 19-name PKG_BUILD_DEPS lists:
+# the same handful of heavily-shared packages were being fully re-resolved
+# dozens of times, each restarting its own "resolving dependencies..."
+# counter from scratch -- correct, but slow and confusing to watch. Used
+# by build_merge_depends/alpm_sandbox_fetch, whose whole point is
+# resolving several overlapping closures together; alpm_resolve itself
+# stays single-name for install_one_alpm/app_install_one_alpm, each of
+# which only ever resolves one top-level install request at a time.
+alpm_resolve_many() {
+	local seen; seen=$(mktemp)
+	local out; out=$(mktemp)
+	local name
+	for name in "$@"; do
+		_alpm_resolve_one "$name" "$seen" "$out" \
+			|| { rm -f "$seen" "$out"; die "couldn't resolve '$name' in any configured Arch/Artix repo"; }
+	done
+	echo >&2
+	cat "$out"
+	rm -f "$seen" "$out"
+}
+
 alpm_fetch_job() {
 	# Fetch-only, no extraction -- extraction happens later, strictly one package at a time (see fau.md).
 	local jobs_dir=$1 idx=$2 repo=$3 filename=$4 sha256=$5
@@ -585,20 +611,16 @@ alpm_sandbox_fetch() {
 	local total=0
 	local -a pkg_repo=() pkg_name=() pkg_version=() pkg_filename=() pkg_sha256=()
 	local -A seen=()
-	local name repo pkgname pkgversion filename sha256 resolved
-	for name in "$@"; do
-		resolved=$(alpm_resolve "$name") \
-			|| die "couldn't resolve '$name' in any configured Arch/Artix repo"
-		# seen[] avoids fetching/extracting a package twice when overlapping closures share it.
-		while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
-			[ -n "$pkgname" ] || continue
-			[ -n "${seen[$pkgname]:-}" ] && continue
-			seen[$pkgname]=1
-			total=$((total + 1))
-			pkg_repo[$total]=$repo; pkg_name[$total]=$pkgname; pkg_version[$total]=$pkgversion
-			pkg_filename[$total]=$filename; pkg_sha256[$total]=$sha256
-		done <<< "$resolved"
-	done
+	local repo pkgname pkgversion filename sha256 resolved
+	resolved=$(alpm_resolve_many "$@")
+	while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
+		[ -n "$pkgname" ] || continue
+		[ -n "${seen[$pkgname]:-}" ] && continue
+		seen[$pkgname]=1
+		total=$((total + 1))
+		pkg_repo[$total]=$repo; pkg_name[$total]=$pkgname; pkg_version[$total]=$pkgversion
+		pkg_filename[$total]=$filename; pkg_sha256[$total]=$sha256
+	done <<< "$resolved"
 
 	local jobs_dir; jobs_dir=$(mktemp -d)
 	local -a queue=()
@@ -652,6 +674,22 @@ alpm_sandbox_fetch() {
 					;;
 			esac
 		done < <(find "$extract_dir" -type f -print0)
+		# Real Arch .pc files assume they're installed at the real /, so a
+		# variable derived from "prefix=/usr" (e.g. wayland-scanner.pc's
+		# own "wayland_scanner=${bindir}/wayland-scanner") resolves to the
+		# literal host path "/usr/bin/wayland-scanner" -- which doesn't
+		# exist on FloraOS at all, only this sandbox's own relocated copy
+		# does. Found on a real FloraOS boot, not in this dev sandbox: this
+		# machine happens to already have the real wayland package
+		# installed, which masked the bug entirely until tested somewhere
+		# that doesn't. Rewriting prefix=/exec_prefix= fixes every variable
+		# derived from them (the common case); a .pc file that hardcodes
+		# some OTHER absolute path independent of prefix (xkbcommon's own
+		# xkb_root, for one) is a smaller, disclosed gap, same class as
+		# mango's own /etc/mango/config.conf one -- not fixed here.
+		while IFS= read -r -d '' f; do
+			sed -E -i "s#^(prefix|exec_prefix)=/#\1=${dest}/#" "$f"
+		done < <(find "$extract_dir" -name '*.pc' -type f -print0)
 		cp -a "$extract_dir/." "$dest"
 		rm -rf "$extract_dir"
 	done

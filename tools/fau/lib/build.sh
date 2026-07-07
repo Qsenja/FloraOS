@@ -36,19 +36,16 @@ build_merge_depends() {
 	local total=0
 	local -a pkg_name=() pkg_repo=() pkg_version=() pkg_filename=() pkg_sha256=()
 	local -A seen=()
-	local name repo pkgname pkgversion filename sha256 resolved
-	for name in "$@"; do
-		resolved=$(alpm_resolve "$name") \
-			|| die "couldn't resolve '$name' in any configured Arch/Artix repo"
-		while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
-			[ -n "$pkgname" ] || continue
-			[ -n "${seen[$pkgname]:-}" ] && continue
-			seen[$pkgname]=1
-			total=$((total + 1))
-			pkg_repo[$total]=$repo; pkg_name[$total]=$pkgname; pkg_version[$total]=$pkgversion
-			pkg_filename[$total]=$filename; pkg_sha256[$total]=$sha256
-		done <<< "$resolved"
-	done
+	local repo pkgname pkgversion filename sha256 resolved
+	resolved=$(alpm_resolve_many "$@")
+	while IFS="$ALPM_FS" read -r repo pkgname pkgversion filename sha256; do
+		[ -n "$pkgname" ] || continue
+		[ -n "${seen[$pkgname]:-}" ] && continue
+		seen[$pkgname]=1
+		total=$((total + 1))
+		pkg_repo[$total]=$repo; pkg_name[$total]=$pkgname; pkg_version[$total]=$pkgversion
+		pkg_filename[$total]=$filename; pkg_sha256[$total]=$sha256
+	done <<< "$resolved"
 
 	local jobs_dir; jobs_dir=$(mktemp -d)
 	local -a queue=()
