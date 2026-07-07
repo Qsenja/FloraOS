@@ -740,3 +740,16 @@ build path that would've required compiling 16-bit real-mode boot code.
   short, scannable overview instead of dumping the entire, ever-growing
   command list every time -- verified against a real boot, including the
   unknown-topic error path.
+- DONE: `fau seat-*` -- same "friendlier fau-native front end, don't
+  reimplement the daemon" idea as `fau service-*` above, this time for
+  `floraseat`'s new VT-bound switching (see that DONE entry). `seat-switch
+  <n>` is a plain `chvt <n>` wrapper (kbd, already a base package),
+  identical to a physical Ctrl+Alt+Fn -- not a seatd-protocol client
+  itself, since floraseat already reacts to any VT switch via its own
+  `VT_PROCESS` release/acquire signal handlers regardless of what
+  triggered it. `seat-status` reads `/sys/class/tty/tty0/active` for the
+  current VT (same "read the real kernel data" convention as `fau
+  service-*`) and tails `/var/log/floraseat.log`. Verified in a real QEMU
+  boot: `seat-switch 2`/`seat-switch 1` round-trip correctly (confirmed
+  via `seat-status` before/after each), non-numeric input rejected with
+  exit status 1. See [tools/fau/fau.md](../tools/fau/fau.md).

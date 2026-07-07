@@ -99,6 +99,9 @@ shell to appear on its own). Concretely, right now:
 - **`fau service-*`**: a thin front end over OpenRC (`rc-update`/
   `rc-service`) — list/enable/disable/start/stop/restart, without
   reimplementing service supervision itself. See below.
+- **`fau seat-*`**: same idea, this time over floraseat's VT-bound
+  switching — `seat-switch <n>` (a `chvt` wrapper) and `seat-status`
+  (current VT + floraseat's own log). See below.
 
 What's explicitly *not* done yet (the live, current list, kept in
 [docs/TODO.md](docs/TODO.md) — not a wishlist, only things that could
@@ -252,6 +255,13 @@ fau service-disable <name> [runlevel]
 fau service-start <name>
 fau service-stop <name>
 fau service-restart <name>
+```
+
+```
+fau seat-status              # active VT + floraseat's own recent log lines
+fau seat-switch <vt-number>  # switch the active VT (chvt) -- floraseat
+                              #   disables/enables sessions automatically,
+                              #   same as a physical Ctrl+Alt+Fn
 ```
 
 A thin front end over OpenRC's own `rc-update`/`rc-service` — service

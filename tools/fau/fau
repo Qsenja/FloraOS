@@ -51,7 +51,7 @@ usage() {
 usage: fau <command> [args]
        fau help [topic]        this command's own commands, in full
 
-topics: install, repo, export, backup, service, bootstrap
+topics: install, repo, export, backup, service, seat, bootstrap
         (or `fau help all` for every topic at once)
 
 environment:
@@ -118,6 +118,16 @@ service-stop <name>       stop now
 service-restart <name>    restart now
 EOF
 			;;
+		seat|vt|floraseat)
+			cat <<'EOF'
+seat-status               currently active VT and floraseat's own recent
+                            activate/disable log lines (/var/log/floraseat.log)
+seat-switch <vt-number>    switch the active VT (chvt) -- floraseat reacts
+                            automatically (VT-bound: disables whatever session
+                            is on the outgoing VT, enables whatever claims the
+                            incoming one), same as a physical Ctrl+Alt+Fn
+EOF
+			;;
 		bootstrap)
 			cat <<'EOF'
 build-time only (used by scripts/build-rootfs.sh, not meant for end users):
@@ -134,7 +144,7 @@ EOF
 			;;
 		all)
 			local t
-			for t in install repo export backup service bootstrap; do
+			for t in install repo export backup service seat bootstrap; do
 				echo "-- $t --"
 				usage_topic "$t"
 				echo
@@ -2021,6 +2031,52 @@ cmd_service_start()   { [ $# -eq 1 ] || die "usage: fau service-start <name>";  
 cmd_service_stop()    { [ $# -eq 1 ] || die "usage: fau service-stop <name>";    service_check_exists "$1"; rc-service "$1" stop; }
 cmd_service_restart() { [ $# -eq 1 ] || die "usage: fau service-restart <name>"; service_check_exists "$1"; rc-service "$1" restart; }
 
+# --- seat: a thin front end over floraseat's VT-bound switching, same
+# "friendlier fau-native front end, don't reimplement the daemon" idea as
+# service-* above (tools/floraseat, docs/ARCHITECTURE.md). Switching a VT
+# itself is a plain kernel operation (`chvt`, from kbd -- already a base
+# package) identical to a physical Ctrl+Alt+Fn; floraseat reacts to it via
+# its own VT_PROCESS release/acquire signal handlers (see floraseat.c's
+# header comment), so there is nothing seatd-protocol-specific to speak
+# here -- this is a convenience wrapper, not a seatd client. Static/dynamic
+# state is read straight from the kernel (`/sys/class/tty/tty0/active`,
+# the same "read the real data" convention service-* above already uses)
+# and floraseat's own log, not reconstructed some other way.
+SEAT_ACTIVE_VT_FILE="/sys/class/tty/tty0/active"
+SEAT_LOG="/var/log/floraseat.log"
+
+# seat_current_vt -> the active VT's bare number ("1", not "tty1")
+seat_current_vt() {
+	[ -r "$SEAT_ACTIVE_VT_FILE" ] \
+		|| die "can't read $SEAT_ACTIVE_VT_FILE -- is this a real console session (not serial-only)?"
+	local active; active=$(cat "$SEAT_ACTIVE_VT_FILE")
+	printf '%s\n' "${active#tty}"
+}
+
+cmd_seat_status() {
+	[ $# -eq 0 ] || die "seat-status takes no arguments"
+	local vt; vt=$(seat_current_vt)
+	echo "active VT: $vt"
+	if [ -r "$SEAT_LOG" ]; then
+		echo "-- last floraseat activity ($SEAT_LOG) --"
+		tail -n 5 "$SEAT_LOG"
+	else
+		echo "(no $SEAT_LOG yet -- floraseat hasn't logged anything)"
+	fi
+}
+
+cmd_seat_switch() {
+	[ $# -eq 1 ] || die "usage: fau seat-switch <vt-number>"
+	case "$1" in
+		''|*[!0-9]*) die "vt-number must be a positive integer, got: $1" ;;
+	esac
+	[ "$1" -ge 1 ] || die "vt-number must be >= 1, got: $1"
+	command -v chvt >/dev/null 2>&1 || die "chvt not found (kbd package) -- can't switch VTs"
+	local from; from=$(seat_current_vt) || from="?"
+	chvt "$1" || die "chvt $1 failed (need root, and vt$1 must actually exist -- see 'fau seat-status')"
+	log "switched from vt$from to vt$1 -- floraseat disables/enables sessions automatically (see $SEAT_LOG)"
+}
+
 main() {
 	[ $# -ge 1 ] || { usage; exit 1; }
 	local cmd=$1; shift
@@ -2049,6 +2105,8 @@ main() {
 		service-start) cmd_service_start "$@" ;;
 		service-stop) cmd_service_stop "$@" ;;
 		service-restart) cmd_service_restart "$@" ;;
+		seat-status) cmd_seat_status "$@" ;;
+		seat-switch) cmd_seat_switch "$@" ;;
 		-h|--help|help)
 			if [ $# -ge 1 ]; then usage_topic "$1"; else usage; fi
 			;;

@@ -258,6 +258,34 @@ explicit `return 0` after the loop — anywhere a shell function's last
 statement is a conditional inside a loop, its implicit exit status is not
 to be trusted as "did the loop's real work succeed".
 
+## `seat-*` — a thin front end over floraseat's VT-bound switching
+
+`seat-status`/`seat-switch <vt-number>`, same "friendlier front end, don't
+reimplement the daemon" idea as `service-*` above, just for `floraseat`
+(tools/floraseat) instead of OpenRC:
+
+- **`seat-switch`** is a plain `chvt <n>` wrapper (from kbd, already a base
+  package) — identical to a physical Ctrl+Alt+Fn. There's no seatd-protocol
+  opcode involved here at all: this is not a seatd client, it's a
+  convenience wrapper around the same kernel VT-switch mechanism floraseat
+  already reacts to via its own `VT_PROCESS` release/acquire signal
+  handlers (see `floraseat.c`'s header comment). If a real seatd client
+  (e.g. a compositor) is active on the outgoing VT, floraseat disables it
+  and enables whatever claims the incoming VT, exactly as if the user had
+  pressed the key combo directly; if neither VT has ever had a client on
+  it, the kernel just switches with no signal to anyone (see
+  `floraseat.c`'s own `g_cur_vt` resync comment for why that's correct,
+  not a bug).
+- **`seat-status`** reads `/sys/class/tty/tty0/active` for the current VT
+  (same "read the real kernel-provided data" convention `service-*` and
+  `florainstall`/`florauser` already use) and tails
+  `/var/log/floraseat.log` for context — no persistent syslog daemon
+  exists to capture that log otherwise (see docs/TODO.md).
+
+Verified in a real QEMU boot: `seat-switch 2` / `seat-switch 1` round-trip
+correctly (confirmed via `seat-status` before/after each), and
+`seat-switch abc` is rejected with a clear error and exit status 1.
+
 ## `fau help <topic>` / `fau --help <topic>`
 
 The top-level `usage()` is deliberately short — an ever-growing flat
