@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# fau-repo -- fau's own local package repo (repo-add/repo-index). Called by
+# the `fau` dispatcher, never meant to be run standalone by an end user, but
+# fully capable of it: `fau-repo repo-add <archive>` works exactly like
+# `fau repo-add <archive>` since it's just a thin argument-count check
+# around lib/repo.sh's own repo_add/repo_index.
+set -euo pipefail
+
+# readlink -f before dirname: see tools/fau/fau's own comment on this --
+# only that file is symlinked today (/usr/bin/fau), but the fix is free.
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SELF_DIR/lib/common.sh"
+# shellcheck source=lib/repo.sh
+source "$SELF_DIR/lib/repo.sh"
+
+cmd=${1:-}; [ $# -ge 1 ] && shift
+
+case "$cmd" in
+	repo-add)
+		[ $# -eq 1 ] || die "usage: fau repo-add <archive>"
+		repo_add "$1"
+		;;
+	repo-index)
+		[ $# -eq 0 ] || die "repo-index takes no arguments"
+		repo_index
+		;;
+	*) die "fau-repo: unknown command: $cmd" ;;
+esac

@@ -1,26 +1,95 @@
 # fau — implementation notes
 
-Design rationale and gotchas mined from `fau`'s own comments — the "why" and
-the bugs found along the way, not a restatement of what the code does (read
-the code for that). See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md)
-for the higher-level design decisions; this file is the lower-level
-implementation detail that didn't belong there.
+Design rationale and gotchas mined from `fau` and its sibling tools' own
+comments — the "why" and the bugs found along the way, not a restatement of
+what the code does (read the code for that). See
+[docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the higher-level
+design decisions; this file is the lower-level implementation detail that
+didn't belong there.
+
+## Architecture: one dispatcher, one tool per area, shared libraries
+
+`fau` used to be a single ~2200-line script holding every command's own
+implementation. It's now just the dispatcher: `usage()`/`usage_topic()` (the
+help text) and a `dispatch()` case statement that `exec`s the real tool for
+whatever command was given. It does not itself install a package, take a
+backup, or touch a service.
+
+```
+tools/fau/fau            dispatcher: help text + dispatch table
+tools/fau/fau-bootstrap   bootstrap/bootstrap-remove/-list/-export/-apply
+tools/fau/fau-install     install/remove/list (isolated apps)
+tools/fau/fau-repo        repo-add/repo-index
+tools/fau/fau-export      export/import
+tools/fau/fau-backup      backup/backup-list/-remove/-restore/-repair
+tools/fau/fau-service     service-* (front end over OpenRC)
+tools/fau/fau-seat        seat-* (front end over floraseat)
+tools/fau/fau-user        user-* (front end over florauser)
+tools/fau/lib/common.sh   die/log/env-var defaults/json_escape/pkginfo_field
+tools/fau/lib/manifest.sh system.json/apps.json read-write, dep_parse/version_satisfies
+tools/fau/lib/repo.sh     the local .fau.tar.zst repo (repo_json/repo_index/...)
+tools/fau/lib/alpm.sh     the whole Arch/Artix fallback + dependency resolution engine
+```
+
+Every `fau-<name>` tool is a real, independently-runnable program — `fau-backup
+backup-list` works exactly like `fau backup-list`, no dispatcher involved.
+Each one computes its own `SELF_DIR` (from `$BASH_SOURCE`) and sources
+exactly the `lib/*.sh` files it actually needs; `fau-service`/`fau-seat`/
+`fau-user` need none of them (they only call `die`/`log` from
+`lib/common.sh` and otherwise just exec the real `rc-service`/`chvt`/
+`florauser`). `fau-export`'s `import` shells out to `fau-install` as a real
+subprocess (`"$SELF_DIR/fau-install" install "$n"`) rather than sourcing its
+`app_install_one` — same "call the tool, don't inline its logic" shape as
+everything else here, and it means a failed install there is just a
+nonzero exit status to check instead of a `die()` that has to be caught
+with a subshell (which the single-file version needed).
+
+**Staging** (`scripts/build-rootfs.sh`): the whole `tools/fau/` tree (every
+`fau`/`fau-*` executable plus `lib/*.sh`, excluding this doc) is copied
+verbatim into `$ROOTFS_DIR/usr/lib/fau/`, and `$ROOTFS_DIR/usr/bin/fau` is a
+relative symlink to `../lib/fau/fau` — the one entry point that actually
+needs to be on `PATH`. Every other tool is reachable by full path if
+someone wants it (`/usr/lib/fau/fau-backup backup-list`), same as `git`'s
+own `git-<command>` binaries technically being reachable outside `git`
+itself.
+
+**A real bug this restructuring caused, caught by an actual boot test, not
+by inspection**: `SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"`
+computes the directory holding `${BASH_SOURCE[0]}` -- but bash reports that
+as the path *as invoked*, not a symlink's real target. Since
+`/usr/bin/fau` is a symlink to `../lib/fau/fau`, running it via that
+symlink (which is exactly what happens whenever anything, including
+`florainstall`, execs plain `fau` and PATH resolves it) gave `SELF_DIR`
+as `/usr/bin` -- not `/usr/lib/fau`, where `lib/common.sh` and every
+sibling `fau-*` tool actually live. First real boot test after the split
+failed immediately: `florainstall`'s "fetching btrfs-progs" step (which
+execs `fau bootstrap` internally) died with `/usr/bin/lib/common.sh: No
+such file or directory`. Fixed by resolving the symlink *before* taking
+the directory: `dirname "$(readlink -f "${BASH_SOURCE[0]}")"`. Applied to
+every `fau-*` tool identically, not just the dispatcher -- none of the
+others are symlinked today, but the fix costs nothing when it isn't, and
+there's no guarantee a future one won't be.
 
 ## Two install modes, one package format
 
-`install`/`remove`/`list` merge into an isolated `FAU_APPS_DIR/<name>/`;
-`bootstrap`/`bootstrap-remove`/`bootstrap-list` merge straight into
-`FAU_ROOT` (build-time only, not for end users — this is how
-`build-rootfs.sh` builds the base rootfs itself). Both share most of the
-same install/dependency-resolution code, parameterized by target directory.
+`install`/`remove`/`list` (`fau-install`) merge into an isolated
+`FAU_APPS_DIR/<name>/`; `bootstrap`/`bootstrap-remove`/`bootstrap-list`
+(`fau-bootstrap`) merge straight into `FAU_ROOT` (build-time only, not for
+end users — this is how `build-rootfs.sh` builds the base rootfs itself).
+Both source `lib/alpm.sh` for their own alpm-fallback counterpart
+(`app_install_one_alpm`/`install_one_alpm`), parameterized by target
+directory, rather than sharing one combined function — the two install
+paths' bookkeeping (apps.json + `FAU_APPS_BIN_DIR` wrappers vs. system.json
++ `FAU_FILES_DIR`) diverges enough that a single parameterized function
+would need more branching than just having two.
 
-## Manifests (`system.json` / `apps.json`)
+## Manifests (`system.json` / `apps.json`) — `lib/manifest.sh`
 
 Flat schema only: `{"packages":{"name":{"version":"x"}}}`, hand-rolled
 grep/sed parsing (`json_get_version`, `json_set`, ...) — fine at this scale,
 revisit if the schema ever grows past one level.
 
-## Repo (`repo_add`/`repo_index`)
+## Repo (`repo_add`/`repo_index`) — `lib/repo.sh`
 
 - A repo directory holds **at most one archive per package name**.
   `repo_index` just globs every `*.fau.tar.zst`; without `repo_add` deleting
@@ -28,7 +97,7 @@ revisit if the schema ever grows past one level.
   same name and which one `repo_lookup_file` resolves to depends on
   filesystem glob order, not on what was actually just added.
 
-## Dependency version constraints
+## Dependency version constraints — `lib/manifest.sh`
 
 `depends=` entries may carry `name`, `name>=1.2`, or `name==1.2`
 (comma-separated). Deliberately just these two operators, compared via
@@ -39,7 +108,7 @@ would still be active for every later command in the same call (notably
 `system_set`'s own word-splitting) — this is exactly what corrupted
 `system.json` before the fix.
 
-## Installing (`install_one` / `app_install_one`)
+## Installing (`install_one` in fau-bootstrap / `app_install_one` in fau-install)
 
 - **rsync flags matter**: `-aK --checksum`. `-K` (`--keep-dirlinks`) is
   required for merging multiple packages into one root where `bin`/`sbin`/
@@ -74,7 +143,7 @@ would still be active for every later command in the same call (notably
     exactly analogous to `LD_LIBRARY_PATH` but for `.pm` modules) — no need
     to patch perl or chroot anything.
 
-## The alpm (Arch/Artix repo) fallback — no `pacman` binary, ever
+## The alpm (Arch/Artix repo) fallback — `lib/alpm.sh` — no `pacman` binary, ever
 
 Reads pacman's own *data formats* directly (sync db, desc files,
 mirrorlist, `pacman.conf`'s repo list) — never shells out to the `pacman`
@@ -150,7 +219,7 @@ current-version coincidence, not by any guarantee.
   background prefetch can race a real install hitting the same
   destination file.
 
-## Version comparison (`alpm_vercmp`)
+## Version comparison (`alpm_vercmp`) — `lib/alpm.sh`
 
 A from-scratch reimplementation of Arch's own version-comparison algorithm
 (rpmvercmp-derived), verified against the real `vercmp` binary across
@@ -161,7 +230,7 @@ bare alpha suffix directly attached with no separator, tilde pre-release
 markers) that essentially never occur in real Arch/Artix version strings —
 an accepted, documented simplification, not a full rpmvercmp port.
 
-## Dependency resolution (PROVIDES-aware, no pacman)
+## Dependency resolution (PROVIDES-aware, no pacman) — `lib/alpm.sh`
 
 - **`alpm_repo_index`**: one `awk` pass over every extracted `desc` file in
   a repo, not a handful of per-package `awk`/forks. A real Arch repo can
@@ -194,7 +263,7 @@ an accepted, documented simplification, not a full rpmvercmp port.
   the *exact requested* top-level spec failing to resolve anywhere is a
   hard error.
 
-## `fau backup` — see [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md)'s
+## `fau backup` (`fau-backup`) — see [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md)'s
 fau-backup section for the full design (subvolume layout, the
 "root=UUID= doesn't work without an initramfs" and "findmnt's `[/@]`
 suffix" bugs a real boot test found). One implementation note worth
@@ -220,7 +289,7 @@ the normal-restore path and the induced-crash-then-repair path, plus both
 repair-refusal cases, exercised directly (not via `scripts/test-install.sh`,
 which doesn't yet inject a crash mid-restore).
 
-## `service-*` — a thin front end over OpenRC
+## `service-*` (`fau-service`) — a thin front end over OpenRC
 
 `service-list`/`service-status`/`service-enable`/`service-disable`/
 `service-start`/`service-stop`/`service-restart` are fau's first step from
@@ -258,7 +327,7 @@ explicit `return 0` after the loop — anywhere a shell function's last
 statement is a conditional inside a loop, its implicit exit status is not
 to be trusted as "did the loop's real work succeed".
 
-## `seat-*` — a thin front end over floraseat's VT-bound switching
+## `seat-*` (`fau-seat`) — a thin front end over floraseat's VT-bound switching
 
 `seat-status`/`seat-switch <vt-number>`, same "friendlier front end, don't
 reimplement the daemon" idea as `service-*` above, just for `floraseat`
@@ -286,7 +355,7 @@ Verified in a real QEMU boot: `seat-switch 2` / `seat-switch 1` round-trip
 correctly (confirmed via `seat-status` before/after each), and
 `seat-switch abc` is rejected with a clear error and exit status 1.
 
-## `user-*` — a thin front end over florauser
+## `user-*` (`fau-user`) — a thin front end over florauser
 
 `user-add`/`user-passwd`/`user-rename`/`user-groupadd`/`user-addtogroup`,
 same idea again, this time over `florauser` (tools/florauser) instead of

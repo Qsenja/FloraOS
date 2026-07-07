@@ -37,11 +37,14 @@ Two explicit constraints ruled out the obvious options:
 So FloraOS ships **fau**, a small system manager written from scratch
 (`tools/fau/`). "System manager", not just "package manager": package
 install/remove (below), `fau backup`'s full-root snapshot/restore (see its
-own section further down), and `fau service-*`'s OpenRC front end (see
-its own section further down too) are what exist today, but the intent is
-for fau to keep growing into managing the whole running system --
-configuration, more of the daily admin surface -- not stop here. Package
-management specifically:
+own section further down), and `fau service-*`/`fau seat-*`/`fau user-*`'s
+front ends over OpenRC/floraseat/florauser (see their own sections further
+down) are what exist today, but the intent is for fau to keep growing into
+managing the whole running system -- configuration, more of the daily
+admin surface -- not stop here, with each new area getting its own
+`fau-<name>` tool alongside the others (see the "split `fau` into a
+dispatcher + `fau-*` tools" DONE entry below) rather than more logic piling
+into one file. Package management specifically:
 - Package format: a plain tarball (`.fau.tar.zst`) containing the payload
   under `files/` plus a `pkginfo` metadata file (name, version, one-line
   description, dependency list).
@@ -790,3 +793,45 @@ build path that would've required compiling 16-bit real-mode boot code.
   the `seat` group membership. See
   [tools/florauser/florauser.md](../tools/florauser/florauser.md) and
   [tools/fau/fau.md](../tools/fau/fau.md).
+- DONE: split `fau` from one ~2200-line script into a thin dispatcher plus
+  one real, independently-runnable tool per area -- `fau` itself now holds
+  only the help text (`usage`/`usage_topic`) and a `dispatch()` case
+  statement that `exec`s the right one; `fau-bootstrap`, `fau-install`,
+  `fau-repo`, `fau-export`, `fau-backup`, `fau-service`, `fau-seat`, and
+  `fau-user` each implement exactly the command group their name says, and
+  `tools/fau/lib/{common,manifest,repo,alpm}.sh` hold the code genuinely
+  shared between them (the biggest of the four, `lib/alpm.sh`, is the whole
+  Arch/Artix dependency-resolution engine both `fau-bootstrap` and
+  `fau-install` fall back to). Every `fau-*` tool is a real, standalone
+  program -- `fau-backup backup-list` works identically to `fau
+  backup-list`, no dispatcher involved -- matching the same "call the real
+  tool, don't reimplement it" shape this project already applies to
+  `fau service-*`/`fau seat-*`/`fau user-*` calling out to
+  `rc-service`/`chvt`/`florauser`, just turned inward on fau's own
+  historically-monolithic commands too. `fau-export`'s `import` now shells
+  out to `fau-install` as a real subprocess instead of sourcing its
+  `app_install_one` directly, for the same reason. `scripts/build-rootfs.sh`
+  stages the whole `tools/fau/` tree into `$ROOTFS_DIR/usr/lib/fau/` and
+  symlinks `usr/bin/fau` to `../lib/fau/fau` -- the one entry point that
+  needs to be on `PATH`.
+  - **A real bug the split caused, caught by an actual boot test**: each
+    tool computes its own directory via `dirname "${BASH_SOURCE[0]}"` to
+    find its sibling `fau-*`/`lib/*.sh` files -- but bash reports
+    `BASH_SOURCE[0]` as the path *as invoked*, not a symlink's resolved
+    target. Since `/usr/bin/fau` is a symlink, invoking it that way (which
+    is exactly what happens whenever anything, `florainstall` included,
+    execs plain `fau` off `PATH`) resolved to `/usr/bin`, not
+    `/usr/lib/fau` where everything actually lives. First boot after the
+    split failed immediately: `florainstall`'s "fetching btrfs-progs" step
+    died with `/usr/bin/lib/common.sh: No such file or directory`. Fixed
+    by resolving the symlink first: `dirname "$(readlink -f
+    "${BASH_SOURCE[0]}")"`, applied identically to every `fau-*` tool (none
+    of the others are symlinked today, but the fix is free).
+  - Verified with a full from-scratch rootfs rebuild (`fau bootstrap`
+    against all ~30 base packages plus the alpm fallback for
+    libgcc/fastfetch, exercising `fau-bootstrap`/`lib/alpm.sh` completely)
+    and the existing real-QEMU regression suites
+    (`scripts/test-install.sh`, which drives `florainstall` -> `fau
+    bootstrap`/`florauser` inside a live boot, is what actually caught the
+    symlink bug above). See [tools/fau/fau.md](../tools/fau/fau.md)'s own
+    "Architecture" section for the full file-by-file breakdown.

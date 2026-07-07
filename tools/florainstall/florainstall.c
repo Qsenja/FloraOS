@@ -357,7 +357,7 @@ static void run_in_chroot_or_die(const char *root, char *const argv[]) {
  * root instead (GRUB_PREFETCH_ROOT) -- the merge result there is never
  * used. What actually matters is fau's own alpm_fetch_job now persisting
  * every freshly-downloaded archive into /var/cache/pacman/pkg (see
- * tools/fau/fau), which is a fixed path independent of FAU_ROOT: the
+ * tools/fau/lib/alpm.sh), which is a fixed path independent of FAU_ROOT: the
  * real, later `FAU_ROOT=<target> fau bootstrap grub` call in do_install()
  * just finds everything already cached there and skips the network
  * entirely. btrfs-progs needs no such throwaway root since its real
@@ -756,7 +756,7 @@ static void do_install(const struct install_settings *s) {
 	g_target_mounted = 1;
 
 	/* @ is a sibling of @snapshots under the top-level (subvolid 5) subvolume
-	 * this bare mount just gave us -- fau backup (tools/fau/fau) later
+	 * this bare mount just gave us -- fau backup (tools/fau/fau-backup) later
 	 * creates @snapshots itself, lazily, the first time it's needed. Keeping
 	 * the actual install inside a named subvolume rather than the top-level
 	 * itself is what makes `fau backup`'s read-only snapshots + GRUB

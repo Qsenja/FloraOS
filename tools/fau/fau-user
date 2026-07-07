@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# fau-user -- a thin front end over florauser (tools/florauser), same
+# "friendlier fau-native front end, don't reimplement the tool" idea as
+# fau-service/fau-seat. florauser already validates its own arguments and
+# prints its own clear errors -- these just check arg *count* (so a wrong
+# invocation gets fau's own usage line instead of florauser's) and exec the
+# real thing. Called by the `fau` dispatcher; fully runnable standalone too.
+set -euo pipefail
+
+# readlink -f before dirname: see tools/fau/fau's own comment on this --
+# only that file is symlinked today (/usr/bin/fau), but the fix is free.
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SELF_DIR/lib/common.sh"
+
+FLORAUSER_BIN="${FLORAUSER_BIN:-florauser}"
+
+user_check_available() {
+	command -v "$FLORAUSER_BIN" >/dev/null 2>&1 || die "florauser not found"
+}
+
+cmd_user_add() {
+	[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: fau user-add <name> [group1,group2,...]"
+	user_check_available
+	"$FLORAUSER_BIN" add "$@"
+}
+
+cmd_user_passwd() {
+	[ $# -eq 1 ] || die "usage: fau user-passwd <name>"
+	user_check_available
+	"$FLORAUSER_BIN" passwd "$@"
+}
+
+cmd_user_rename() {
+	[ $# -eq 2 ] || die "usage: fau user-rename <old-name> <new-name>"
+	user_check_available
+	"$FLORAUSER_BIN" rename "$@"
+}
+
+cmd_user_groupadd() {
+	[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: fau user-groupadd <name> [gid]"
+	user_check_available
+	"$FLORAUSER_BIN" groupadd "$@"
+}
+
+cmd_user_addtogroup() {
+	[ $# -eq 2 ] || die "usage: fau user-addtogroup <user> <group>"
+	user_check_available
+	"$FLORAUSER_BIN" addtogroup "$@"
+}
+
+cmd=${1:-}; [ $# -ge 1 ] && shift
+
+case "$cmd" in
+	user-add) cmd_user_add "$@" ;;
+	user-passwd) cmd_user_passwd "$@" ;;
+	user-rename) cmd_user_rename "$@" ;;
+	user-groupadd) cmd_user_groupadd "$@" ;;
+	user-addtogroup) cmd_user_addtogroup "$@" ;;
+	*) die "fau-user: unknown command: $cmd" ;;
+esac

@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# fau-export -- export/import: bundles system.json + app configs (a
+# "system.flora", tar+zstd, same format as fau's own .fau.tar.zst packages
+# just given a distinct extension) so a whole FloraOS setup can be restored
+# elsewhere. Called by the `fau` dispatcher; fully runnable standalone too.
+#
+# A "system.flora" contains:
+#   system.json    base packages (from FAU_SYSTEM_JSON) + installed apps
+#                  (from FAU_APPS_JSON) + a configs map of every config file
+#                  path found under each installed app's own config/ dir,
+#                  e.g. "configs":{"kitty":["kitty.conf","startup.conf"]}
+#   configs/<app>/<relpath>   the actual config file contents, relpath
+#                             matching the manifest's configs entry for <app>
+# No zip/unzip anywhere in FloraOS (would be a new, otherwise-unjustified
+# dependency) -- tar+zstd is already required for fau itself, so this reuses
+# it rather than vendoring an archiver purely for this.
+#
+# Each of the three top-level keys is written on its own single line with no
+# embedded newlines, so manifest_section_get can pull one out with a plain
+# grep/sed instead of a real JSON parser (consistent with json_get_version's
+# own hand-rolled approach in lib/manifest.sh).
+set -euo pipefail
+
+# readlink -f before dirname: see tools/fau/fau's own comment on this --
+# only that file is symlinked today (/usr/bin/fau), but the fix is free.
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SELF_DIR/lib/common.sh"
+# shellcheck source=lib/manifest.sh
+source "$SELF_DIR/lib/manifest.sh"
+
+manifest_section_packages() {
+	local first=1
+	printf '{'
+	local n
+	for n in $(system_list_names); do
+		[ "$first" -eq 1 ] || printf ','
+		first=0
+		printf '"%s":{"version":"%s"}' "$(json_escape "$n")" "$(json_escape "$(system_get_version "$n")")"
+	done
+	printf '}'
+}
+
+manifest_section_apps() {
+	local first=1
+	printf '{'
+	local n
+	for n in $(json_list_names "$FAU_APPS_JSON"); do
+		[ "$first" -eq 1 ] || printf ','
+		first=0
+		printf '"%s":{"version":"%s"}' "$(json_escape "$n")" "$(json_escape "$(json_get_version "$FAU_APPS_JSON" "$n")")"
+	done
+	printf '}'
+}
+
+manifest_section_configs() {
+	# manifest_section_configs <dest-dir> -- as a side effect, copies every
+	# config file found under each installed app's config/ dir into
+	# <dest-dir>/<app>/<relpath>; prints the matching configs JSON object.
+	local dest_root=$1 first=1
+	printf '{'
+	local n
+	for n in $(json_list_names "$FAU_APPS_JSON"); do
+		local app_dir="${FAU_APPS_DIR%/}/$n" cfg_dir
+		cfg_dir="$app_dir/config"
+		[ -d "$cfg_dir" ] || continue
+		local relpaths; relpaths=$(cd "$cfg_dir" && find . -type f -printf '%P\n' 2>/dev/null)
+		[ -n "$relpaths" ] || continue
+		mkdir -p "$dest_root/$n"
+		local rel
+		while IFS= read -r rel; do
+			[ -z "$rel" ] && continue
+			mkdir -p "$dest_root/$n/$(dirname "$rel")"
+			cp -a "$cfg_dir/$rel" "$dest_root/$n/$rel"
+		done <<< "$relpaths"
+		[ "$first" -eq 1 ] || printf ','
+		first=0
+		printf '"%s":[' "$(json_escape "$n")"
+		local rfirst=1
+		while IFS= read -r rel; do
+			[ -z "$rel" ] && continue
+			[ "$rfirst" -eq 1 ] || printf ','
+			rfirst=0
+			printf '"%s"' "$(json_escape "$rel")"
+		done <<< "$relpaths"
+		printf ']'
+	done
+	printf '}'
+}
+
+manifest_section_get() {
+	# manifest_section_get <file> <key> -> the raw value for a top-level key
+	# written on its own line by cmd_export (e.g. `{"a":{"version":"1"}}`),
+	# trailing comma stripped
+	local file=$1 key=$2
+	grep "^\"$key\":" "$file" | sed -E "s/^\"$key\"://; s/,\$//"
+}
+
+configs_names() {
+	# configs_names <configs-section-value> -> app names (keys) in it, one
+	# per line -- value looks like {"kitty":["kitty.conf","x/y.conf"],...}
+	printf '%s' "$1" | grep -oE '"[^"]+":\[' | sed -E 's/^"//; s/":\[$//'
+}
+
+configs_files_for() {
+	# configs_files_for <configs-section-value> <name> -> relpaths, one per line
+	local value=$1 name=$2
+	local bracket; bracket=$(printf '%s' "$value" | grep -oE "\"$name\":\[[^]]*\]")
+	[ -n "$bracket" ] || return 0
+	bracket=${bracket#*[}
+	bracket=${bracket%]}
+	[ -z "$bracket" ] && return 0
+	printf '%s' "$bracket" | grep -oE '"[^"]*"' | sed -E 's/^"//; s/"$//'
+}
+
+cmd_export() {
+	[ $# -le 1 ] || die "export takes at most one output file"
+	local out=${1:-system.flora}
+	state_init
+	apps_state_init
+
+	local work; work=$(mktemp -d)
+	mkdir -p "$work/configs"
+	{
+		echo '{'
+		printf '"packages":%s,\n' "$(manifest_section_packages)"
+		printf '"apps":%s,\n' "$(manifest_section_apps)"
+		printf '"configs":%s\n' "$(manifest_section_configs "$work/configs")"
+		echo '}'
+	} > "$work/system.json"
+
+	tar -I zstd -cf "$out" -C "$work" system.json configs
+	rm -rf "$work"
+	log "exported system.json + app configs to $out"
+}
+
+cmd_import() {
+	[ $# -le 1 ] || die "import takes at most one archive file"
+	local archive=${1:-system.flora}
+	[ -f "$archive" ] || die "no such file: $archive"
+	apps_state_init
+
+	local work; work=$(mktemp -d)
+	tar -I zstd -xf "$archive" -C "$work"
+	[ -f "$work/system.json" ] || die "$archive has no system.json -- not a fau export"
+
+	# Reinstall any app the manifest lists that isn't installed here yet, so
+	# there's somewhere for its config to land; an already-installed app is
+	# left as-is (only its config gets restored) rather than force-reinstalled
+	# over a version the user may have deliberately changed since export.
+	# Shells out to the sibling fau-install tool (same "fau calls other
+	# tools" shape as everything else in this project) rather than sourcing
+	# its app_install_one directly -- one real process per app install, so a
+	# failure there is just a nonzero exit status to check, not a die()
+	# that has to be caught with a subshell the way it did when this lived
+	# in one monolithic script.
+	local apps_tmp; apps_tmp=$(mktemp)
+	manifest_section_get "$work/system.json" apps > "$apps_tmp"
+	local n
+	for n in $(json_list_names "$apps_tmp"); do
+		local want; want=$(json_get_version "$apps_tmp" "$n")
+		local have; have=$(json_get_version "$FAU_APPS_JSON" "$n")
+		if [ -z "$have" ]; then
+			log "app $n isn't installed -- installing it so its exported config has somewhere to go"
+			if ! "$SELF_DIR/fau-install" install "$n"; then
+				log "warning: couldn't install $n -- its exported config will be skipped"
+			fi
+		elif [ -n "$want" ] && [ "$have" != "$want" ]; then
+			log "note: $n is installed at $have, export was made at $want -- leaving the installed version as-is, only restoring its config"
+		fi
+	done
+	rm -f "$apps_tmp"
+
+	local configs_value; configs_value=$(manifest_section_get "$work/system.json" configs)
+	local restored=0 skipped=0
+	for n in $(configs_names "$configs_value"); do
+		local app_dir="${FAU_APPS_DIR%/}/$n"
+		if [ ! -d "$app_dir" ]; then
+			log "warning: app $n has no directory under $FAU_APPS_DIR -- skipping its config"
+			skipped=$((skipped + 1))
+			continue
+		fi
+		mkdir -p "$app_dir/config"
+		local rel
+		while IFS= read -r rel; do
+			[ -z "$rel" ] && continue
+			local src="$work/configs/$n/$rel"
+			if [ ! -f "$src" ]; then
+				log "warning: $archive is missing $n/$rel -- skipping"
+				continue
+			fi
+			mkdir -p "$app_dir/config/$(dirname "$rel")"
+			cp -a "$src" "$app_dir/config/$rel"
+			restored=$((restored + 1))
+		done <<< "$(configs_files_for "$configs_value" "$n")"
+	done
+
+	rm -rf "$work"
+	log "import complete: restored $restored config file(s), skipped $skipped app(s) with no installed directory"
+}
+
+cmd=${1:-}; [ $# -ge 1 ] && shift
+
+case "$cmd" in
+	export) cmd_export "$@" ;;
+	import) cmd_import "$@" ;;
+	*) die "fau-export: unknown command: $cmd" ;;
+esac

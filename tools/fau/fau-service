@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# fau-service -- a thin front end over OpenRC (rc-update/rc-service), for a
+# booted system only. OpenRC already solves service supervision and
+# dependency ordering correctly; the job here is a friendlier, fau-native
+# front end, not a reimplementation of any of that. Static facts (does a
+# service exist, which runlevel(s) is it enabled in) are read straight off
+# the filesystem -- /etc/init.d and /etc/runlevels -- same "read the real
+# data, don't parse a wrapper's own text output" convention florainstall
+# (/sys/block) and florauser (/etc/passwd) already use, rather than
+# scraping `rc-update show`. Genuinely dynamic runtime state (is a service
+# actually running right now) is read from
+# /run/openrc/{started,failed,inactive}/<name> -- confirmed against a real
+# boot (`find /run/openrc -maxdepth 2` in a real QEMU session), not assumed
+# from OpenRC's general reputation. Starting/stopping a service is left to
+# the real `rc-service` -- reimplementing daemon supervision itself is
+# exactly the kind of high-blast-radius PID-1-adjacent work this project
+# decided against (see docs/ARCHITECTURE.md's "System manager" intro).
+# Called by the `fau` dispatcher; fully runnable standalone too.
+set -euo pipefail
+
+# readlink -f before dirname: see tools/fau/fau's own comment on this --
+# only that file is symlinked today (/usr/bin/fau), but the fix is free.
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SELF_DIR/lib/common.sh"
+
+INIT_D_DIR="/etc/init.d"
+RUNLEVELS_DIR="/etc/runlevels"
+
+service_check_exists() {
+	local name=$1
+	[ -n "$name" ] || die "service name required"
+	[ -x "$INIT_D_DIR/$name" ] || die "no such service: $name (see 'fau service-list')"
+}
+
+# service_runlevels <name> -> every runlevel <name> is enabled in, one per
+# line -- scans /etc/runlevels/*/'s own symlinks directly, not `rc-update
+# show`'s text output.
+service_runlevels() {
+	# Explicit `return 0` at the end: a bash function's implicit return
+	# status is whatever its *last executed command* returned, not "did
+	# this print what it was supposed to" -- the loop's last iteration is
+	# whichever runlevel directory happens to sort last, and its `[ -e
+	# ... ] && basename` test is false for any service not enabled in
+	# THAT particular runlevel. Without this, callers under `set -e`
+	# (cmd_service_list, cmd_service_status) died silently the instant a
+	# service wasn't enabled in the alphabetically-last runlevel checked --
+	# found via an actual boot: `fau service-list` printed nothing at all
+	# and exited 1, even though the loop had already printed real results.
+	local name=$1 rl
+	[ -d "$RUNLEVELS_DIR" ] || return 0
+	for rl in "$RUNLEVELS_DIR"/*/; do
+		[ -e "${rl}${name}" ] && basename "$rl"
+	done
+	return 0
+}
+
+# service_state <name> -> "started", "failed", "inactive", or "stopped" --
+# see this section's own header comment for why these exact paths.
+service_state() {
+	local name=$1
+	if [ -e "/run/openrc/started/$name" ]; then echo started
+	elif [ -e "/run/openrc/failed/$name" ]; then echo failed
+	elif [ -e "/run/openrc/inactive/$name" ]; then echo inactive
+	else echo stopped
+	fi
+}
+
+cmd_service_list() {
+	[ $# -eq 0 ] || die "service-list takes no arguments"
+	[ -d "$INIT_D_DIR" ] || die "no $INIT_D_DIR -- is this a real OpenRC system?"
+	local f name runlevels state
+	for f in "$INIT_D_DIR"/*; do
+		[ -f "$f" ] || continue
+		name=$(basename "$f")
+		[ "$name" = functions.sh ] && continue
+		runlevels=$(service_runlevels "$name" | paste -sd, -)
+		state=$(service_state "$name")
+		printf '%-20s %-9s %s\n' "$name" "$state" "${runlevels:-(none)}"
+	done
+}
+
+cmd_service_status() {
+	[ $# -eq 1 ] || die "usage: fau service-status <name>"
+	service_check_exists "$1"
+	local state; state=$(service_state "$1")
+	local runlevels; runlevels=$(service_runlevels "$1" | paste -sd, -)
+	echo "$1: $state (runlevels: ${runlevels:-none})"
+}
+
+cmd_service_enable() {
+	[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: fau service-enable <name> [runlevel]"
+	local name=$1 runlevel=${2:-default}
+	service_check_exists "$name"
+	[ -d "$RUNLEVELS_DIR/$runlevel" ] || die "no such runlevel: $runlevel"
+	rc-update add "$name" "$runlevel" || die "rc-update add $name $runlevel failed"
+	log "$name enabled in runlevel $runlevel"
+}
+
+cmd_service_disable() {
+	[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: fau service-disable <name> [runlevel]"
+	local name=$1 runlevel=${2:-default}
+	service_check_exists "$name"
+	rc-update del "$name" "$runlevel" || die "rc-update del $name $runlevel failed"
+	log "$name disabled in runlevel $runlevel"
+}
+
+cmd_service_start()   { [ $# -eq 1 ] || die "usage: fau service-start <name>";   service_check_exists "$1"; rc-service "$1" start; }
+cmd_service_stop()    { [ $# -eq 1 ] || die "usage: fau service-stop <name>";    service_check_exists "$1"; rc-service "$1" stop; }
+cmd_service_restart() { [ $# -eq 1 ] || die "usage: fau service-restart <name>"; service_check_exists "$1"; rc-service "$1" restart; }
+
+cmd=${1:-}; [ $# -ge 1 ] && shift
+
+case "$cmd" in
+	service-list) cmd_service_list "$@" ;;
+	service-status) cmd_service_status "$@" ;;
+	service-enable) cmd_service_enable "$@" ;;
+	service-disable) cmd_service_disable "$@" ;;
+	service-start) cmd_service_start "$@" ;;
+	service-stop) cmd_service_stop "$@" ;;
+	service-restart) cmd_service_restart "$@" ;;
+	*) die "fau-service: unknown command: $cmd" ;;
+esac

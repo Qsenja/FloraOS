@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# fau-seat -- a thin front end over floraseat's VT-bound switching
+# (tools/floraseat), same "friendlier front end, don't reimplement the
+# daemon" idea as fau-service. Switching a VT itself is a plain kernel
+# operation (`chvt`, from kbd -- already a base package) identical to a
+# physical Ctrl+Alt+Fn; floraseat reacts to it via its own VT_PROCESS
+# release/acquire signal handlers (see floraseat.c's header comment), so
+# there is nothing seatd-protocol-specific to speak here -- this is a
+# convenience wrapper, not a seatd client. Static/dynamic state is read
+# straight from the kernel (/sys/class/tty/tty0/active, the same
+# "read the real data" convention fau-service already uses) and floraseat's
+# own log, not reconstructed some other way. Called by the `fau`
+# dispatcher; fully runnable standalone too.
+set -euo pipefail
+
+# readlink -f before dirname: see tools/fau/fau's own comment on this --
+# only that file is symlinked today (/usr/bin/fau), but the fix is free.
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SELF_DIR/lib/common.sh"
+
+SEAT_ACTIVE_VT_FILE="/sys/class/tty/tty0/active"
+SEAT_LOG="/var/log/floraseat.log"
+
+# seat_current_vt -> the active VT's bare number ("1", not "tty1")
+seat_current_vt() {
+	[ -r "$SEAT_ACTIVE_VT_FILE" ] \
+		|| die "can't read $SEAT_ACTIVE_VT_FILE -- is this a real console session (not serial-only)?"
+	local active; active=$(cat "$SEAT_ACTIVE_VT_FILE")
+	printf '%s\n' "${active#tty}"
+}
+
+cmd_seat_status() {
+	[ $# -eq 0 ] || die "seat-status takes no arguments"
+	local vt; vt=$(seat_current_vt)
+	echo "active VT: $vt"
+	if [ -r "$SEAT_LOG" ]; then
+		echo "-- last floraseat activity ($SEAT_LOG) --"
+		tail -n 5 "$SEAT_LOG"
+	else
+		echo "(no $SEAT_LOG yet -- floraseat hasn't logged anything)"
+	fi
+}
+
+cmd_seat_switch() {
+	[ $# -eq 1 ] || die "usage: fau seat-switch <vt-number>"
+	case "$1" in
+		''|*[!0-9]*) die "vt-number must be a positive integer, got: $1" ;;
+	esac
+	[ "$1" -ge 1 ] || die "vt-number must be >= 1, got: $1"
+	command -v chvt >/dev/null 2>&1 || die "chvt not found (kbd package) -- can't switch VTs"
+	local from; from=$(seat_current_vt) || from="?"
+	chvt "$1" || die "chvt $1 failed (need root, and vt$1 must actually exist -- see 'fau seat-status')"
+	log "switched from vt$from to vt$1 -- floraseat disables/enables sessions automatically (see $SEAT_LOG)"
+}
+
+cmd=${1:-}; [ $# -ge 1 ] && shift
+
+case "$cmd" in
+	seat-status) cmd_seat_status "$@" ;;
+	seat-switch) cmd_seat_switch "$@" ;;
+	*) die "fau-seat: unknown command: $cmd" ;;
+esac

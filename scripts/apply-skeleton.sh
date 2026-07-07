@@ -72,7 +72,7 @@ EOF
 
 cat > "$ROOTFS/etc/profile" <<'EOF'
 export PS1='floraos-boot-ok # '
-# $HOME/apps/.bin: fau install's wrapper scripts (see tools/fau/fau,
+# $HOME/apps/.bin: fau install's wrapper scripts (see tools/fau/fau-install,
 # FAU_APPS_BIN_DIR) -- without this every login otherwise printed "note:
 # .../apps/.bin is not on your PATH yet" after the very first `fau
 # install`, which is exactly the state a fresh boot should already be in
@@ -85,7 +85,7 @@ EOF
 # above. fastfetch itself is installed as an isolated app (fau install
 # fastfetch, see build-rootfs.sh), not merged into the system root -- so its
 # config lives inside that same app's own directory (its XDG_CONFIG_HOME,
-# per the app wrapper -- see app_wrapper_write in tools/fau/fau), not /etc,
+# per the app wrapper -- see app_wrapper_write in tools/fau/fau-install), not /etc,
 # matching fau's own "fau remove fastfetch deletes exactly that directory"
 # promise. Only applies if the fastfetch app install above actually
 # happened (skipped entirely on a build host with no pacman mirrorlist).

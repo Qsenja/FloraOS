@@ -8,7 +8,8 @@ STAGE_DIR="$WORK_DIR/stage"
 REPO_DIR="$WORK_DIR/repo"
 ROOTFS_DIR="$WORK_DIR/rootfs"
 VERSIONS_CONF="$FLORA_ROOT/config/versions.conf"
-FAU_BIN="$FLORA_ROOT/tools/fau/fau"
+FAU_TOOLS_DIR="$FLORA_ROOT/tools/fau"
+FAU_BIN="$FAU_TOOLS_DIR/fau"
 FLORAGRUB_CFG_BIN="$FLORA_ROOT/tools/floragrub-cfg/floragrub-cfg"
 # glibc needs this at build time (see scripts/recipes/glibc.sh). Defined here
 # rather than as a side effect of sourcing linux-lts.sh: build_package()

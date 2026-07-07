@@ -150,12 +150,28 @@ main() {
 	# usr/bin too so every package lands in one place regardless of flags.
 	ln -s bin "$ROOTFS_DIR/usr/sbin"
 
-	# fau itself: a portable bash script, nothing to compile -- but it must
-	# actually ship in the OS, not just be a build-host tool, since it's
-	# FloraOS's own package manager and the whole point is for the running
-	# system to use it (fastfetch's Packages line depends on this too).
-	cp "$FAU_BIN" "$ROOTFS_DIR/usr/bin/fau"
-	chmod 755 "$ROOTFS_DIR/usr/bin/fau"
+	# fau itself: a dispatcher (tools/fau/fau) plus one real, independently-
+	# runnable tool per area (fau-install, fau-backup, fau-service, ...) and
+	# shared library code under lib/*.sh (sourced, not executed) -- nothing
+	# to compile, but it must all actually ship in the OS, not just be a
+	# build-host tool, since fau is FloraOS's own system manager and the
+	# whole point is for the running system to use it (fastfetch's
+	# Packages line depends on this too). Staged as one directory
+	# (/usr/lib/fau/) so every fau-* tool can keep finding its siblings and
+	# lib/*.sh the exact same way it does in the source tree (relative to
+	# its own $BASH_SOURCE, see each tool's own SELF_DIR line) -- only
+	# /usr/bin/fau itself is a symlink into it, the one entry point PATH
+	# actually needs. Excludes fau.md (design-notes doc, not part of the
+	# running tool) and lib/*.md if any -- only what's actually executed or
+	# sourced ships.
+	mkdir -p "$ROOTFS_DIR/usr/lib/fau/lib"
+	for f in "$FAU_TOOLS_DIR"/fau "$FAU_TOOLS_DIR"/fau-*; do
+		[ -f "$f" ] || continue
+		cp "$f" "$ROOTFS_DIR/usr/lib/fau/"
+		chmod 755 "$ROOTFS_DIR/usr/lib/fau/$(basename "$f")"
+	done
+	cp "$FAU_TOOLS_DIR"/lib/*.sh "$ROOTFS_DIR/usr/lib/fau/lib/"
+	ln -s ../lib/fau/fau "$ROOTFS_DIR/usr/bin/fau"
 
 	# floragrub-cfg (tools/floragrub-cfg): same reasoning as fau just above --
 	# a portable bash script, nothing to compile, but it has to ship in the

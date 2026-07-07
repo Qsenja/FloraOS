@@ -176,7 +176,7 @@ docs/FILESYSTEM_LAYOUT.md
 docs/ARCHITECTURE.md    # design decisions, why, and the full DONE/TODO history
 docs/TODO.md            # the current, live, open TODO list
 assets/                 # fastfetch logo + config shipped into the rootfs
-tools/fau/               # FloraOS's system manager
+tools/fau/               # FloraOS's system manager: fau (dispatcher) + fau-* tools + lib/
 tools/floralogin/        # FloraOS's own PAM-free login (see docs/ARCHITECTURE.md)
 tools/floraseat/         # FloraOS's own seatd-protocol-compatible seat daemon
 tools/florauser/         # FloraOS's own useradd/passwd/groupadd/rename equivalent
@@ -285,6 +285,6 @@ friendlier, fau-native interface. See
 here.
 
 Run `fau help [topic]` (topics: `install`, `repo`, `export`, `backup`,
-`service`, `bootstrap`, or `all`) for the full command list, in detail —
+`service`, `seat`, `user`, `bootstrap`, or `all`) for the full command list, in detail —
 `fau help`/`fau --help` alone stays a short overview so it doesn't dump
 everything every time.

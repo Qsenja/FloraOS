@@ -1,6 +1,7 @@
-# curl: HTTP client -- fau's alpm (Arch/Artix repo) fallback (tools/fau/fau) needs
-# this to fetch mirror sync dbs and packages once running inside a booted
-# FloraOS system, which has no pacman to shell out to. Without it,
+# curl: HTTP client -- fau's alpm (Arch/Artix repo) fallback
+# (tools/fau/lib/alpm.sh) needs this to fetch mirror sync dbs and packages
+# once running inside a booted FloraOS system, which has no pacman to shell
+# out to. Without it,
 # `fau install <pkg>` fails immediately with "curl: command not found"
 # (found by actually running it after boot, not by inspection).
 PKG_DESCRIPTION="HTTP client -- fau's alpm (Arch/Artix repo) fallback needs it to fetch anything after boot"
