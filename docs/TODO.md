@@ -7,10 +7,6 @@ ARCHITECTURE.md). Deliberate, permanent design choices (e.g. no WM/DE bundled
 in the base image, app isolation under `~/apps/`) are *not* listed here — this
 file is only for things that could reasonably be finished later.
 
-- **No UEFI support in `florainstall`** (`tools/florainstall`) — BIOS/MBR
-  only. No dosfstools/ESP handling; would need a FAT32 ESP partition and
-  `grub-install --target=x86_64-efi` inside the target chroot. See
-  ARCHITECTURE.md's florainstall entry.
 - **No VT-switching** (`tools/floraseat`) — single-seat, non-VT-bound.
   Fine today (FloraOS only ever has one login session at a time); a real
   gap once a second concurrent graphical session needs to exist. See
@@ -31,6 +27,12 @@ file is only for things that could reasonably be finished later.
   longer an unrecoverable brick: `fau backup-repair <name>` completes an
   interrupted restore after booting the still-working "FloraOS (backup:
   <name>)" GRUB entry. See ARCHITECTURE.md's fau-backup section.
+- **No Secure Boot support in `florainstall`'s new UEFI path** (see
+  ARCHITECTURE.md) — no shim, no MOK enrollment, GRUB's own EFI binary is
+  unsigned. Machines that enforce Secure Boot (most do by default) need it
+  turned off in firmware setup to boot a FloraOS install. Fine today (no
+  signed-boot requirement has shown up yet, same reasoning as the syslog
+  daemon entry above); a real gap once that changes.
 
 See ARCHITECTURE.md for the full design-decision history (including
 everything above that's already DONE, and the reasoning behind each).

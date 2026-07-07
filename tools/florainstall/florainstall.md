@@ -16,24 +16,70 @@ login. `florauser`, `fau`, `grub`, and `btrfs-progs` do the actual work —
 florainstall itself never touches a plaintext password or hand-rolls a
 dependency closure.
 
-## Partition scheme: MBR, not GPT
+## Partition scheme: MBR, not GPT — for BIOS *and* UEFI
 
-Classic MBR (dos label), one bootable Linux (`0x83`) partition spanning the
-disk — deliberately **not** GPT + "BIOS boot partition", which needs a
-specific partition-type GUID this project has no primary source available
-to verify from inside this build (the same "don't guess" standard applied
-elsewhere, e.g. linux-lts.sh's Kconfig symbols were checked directly against
-kernel.org). `grub-install --target=i386-pc`'s classic embedding gap between
-the MBR and the first partition (sfdisk's default 1MiB alignment already
-leaves this) has been the standard BIOS-GRUB2 install method for decades —
-no dedicated partition required. UEFI is not supported yet (no dosfstools/
-ESP handling) — a real, disclosed gap, not a silent omission (see
-[docs/TODO.md](../../docs/TODO.md)).
+Classic MBR (dos label) always — deliberately **not** GPT + "ESP GUID",
+which needs a specific partition-type GUID this project has no primary
+source available to verify from inside this build (the same "don't guess"
+standard applied elsewhere, e.g. linux-lts.sh's Kconfig symbols were checked
+directly against kernel.org). This turns out to sidestep the GUID question
+for UEFI too, not just BIOS: the UEFI spec itself defines MBR
+partition-type byte `0xEF` ("EFI System") as a valid way to mark an ESP on
+a legacy MBR disk, confirmed against a primary source this project *can*
+read on its own build host (`sfdisk --list-types`: `"ef  EFI
+(FAT-12/16/32)"`).
+
+Boot mode is autodetected once, in `main()`, by checking whether the *live*
+system itself booted via UEFI (`/sys/firmware/efi` present) — not a
+user-facing toggle in the TUI. You can only install what you booted, the
+same convention real installers use.
+
+- **BIOS-booted live media**: unchanged since the original install support
+  — one bootable Linux (`0x83`) partition spanning the disk.
+  `grub-install --target=i386-pc`'s classic embedding gap between the MBR
+  and the first partition (sfdisk's default 1MiB alignment already leaves
+  this) has been the standard BIOS-GRUB2 install method for decades — no
+  dedicated partition required.
+- **UEFI-booted live media**: two partitions — a 512MiB FAT32 ESP (type
+  `0xEF`, comfortably larger than any real kernel+GRUB EFI binary this
+  project ships) first, then a Linux (`0x83`) root partition with the rest
+  of the disk. FAT32 needs `dosfstools` (`mkfs.fat`) — fetched onto the
+  live system the same way `btrfs-progs` is (see below), not a base
+  package.
 
 `BLKRRPART`'s ioctl number (`0x125f`) is hand-computed (`_IO(0x12, 95)`)
 rather than pulled from `<linux/fs.h>`, which on some libc/kernel-header
 pairings redefines macros `<sys/mount.h>` (needed for `mount(2)`/`MS_BIND`)
 already provides.
+
+## grub-install target: `i386-pc` vs `x86_64-efi --removable`
+
+BIOS installs run `grub-install --target=i386-pc --boot-directory=/boot
+<disk>`, unchanged. UEFI installs instead run `grub-install
+--target=x86_64-efi --efi-directory=/boot/efi --boot-directory=/boot
+--removable` — no install-device argument, since `--efi-directory` alone
+tells grub-install where the ESP is.
+
+`--removable` writes the fallback `EFI/BOOT/BOOTX64.EFI` path (the one
+every UEFI firmware probes when no NVRAM boot entry matches) instead of
+registering an NVRAM boot entry via `efibootmgr` — confirmed against this
+build host's own `grub-install --help`: `efibootmgr` is listed as an
+*optional* dep of the `grub` package, needed only for the NVRAM path this
+project deliberately doesn't use. More robust than NVRAM registration too:
+it works identically on real firmware and QEMU/OVMF without depending on
+any given firmware's NVRAM implementation being reliable, and survives the
+disk being moved to different hardware (an NVRAM entry wouldn't).
+
+Arch's `grub` package (already fetched via `fau`'s alpm fallback for the
+BIOS case) ships both the `i386-pc` and `x86_64-efi` platform directories
+in one package — confirmed on this build host (`pacman -Si grub` lists
+`Provides: grub-bios grub-efi-x86_64 ...`) — so no separate package or
+fetch is needed for the UEFI target.
+
+`floragrub-cfg` needed **no changes at all** for this: its generated
+`grub.cfg` is platform-agnostic (the same menuentry/search/insmod content
+is read by both the `i386-pc` and `x86_64-efi` GRUB binaries), and the ESP
+itself is never referenced from it.
 
 ## btrfs, not ext4
 
@@ -78,12 +124,13 @@ this tool's own use.
 
 ## Speculative background prefetch
 
-`do_install()`'s two slowest steps (fetching `btrfs-progs` and `grub` via
-fau's alpm fallback) are entirely network-bound and don't depend on
-anything the user picks in the menu. Both get kicked off in the background
-the moment the TUI opens, overlapping that network time with however long
-the user spends on the disk/hostname/user screens instead of it sitting on
-the critical path after "Begin installation".
+`do_install()`'s slowest steps (fetching `btrfs-progs`, `grub`, and — on a
+UEFI install — `dosfstools`, all via fau's alpm fallback) are entirely
+network-bound and don't depend on anything the user picks in the menu. All
+get kicked off in the background the moment the TUI opens, overlapping that
+network time with however long the user spends on the disk/hostname/user
+screens instead of it sitting on the critical path after "Begin
+installation".
 
 - `grub` can't bootstrap into the real target yet (no disk chosen/
   partitioned/mounted at this point), so it prefetches into a throwaway
@@ -93,8 +140,10 @@ the critical path after "Begin installation".
   independent of `FAU_ROOT`) — the real, later
   `FAU_ROOT=<target> fau bootstrap grub` call just finds everything already
   cached and skips the network entirely.
-- `btrfs-progs` needs no throwaway root: its real `FAU_ROOT` (the live `/`)
-  is already what the prefetch targets.
+- `btrfs-progs` and `dosfstools` need no throwaway root: their real
+  `FAU_ROOT` (the live `/`) is already what the prefetch targets.
+  `dosfstools` is only prefetched when `g_uefi` — a BIOS install never
+  starts this fetch at all, since it never calls `mkfs.fat`.
 - The prefetch child redirects its own stdout/stderr to `/dev/null` — it
   runs unattended for however long the user stays in the menu, and must not
   fight the TUI for the terminal or splatter its own progress bar over
@@ -150,8 +199,21 @@ password itself.
 
 ## Verification
 
-Boot-tested end-to-end for real in QEMU/KVM by
-`scripts/test-install.sh` — install, boot the installed disk, `fau backup`,
-`grub-reboot` into it, `fau backup-restore`, reboot again — not just
-compiled. See that script and docs/ARCHITECTURE.md's fau-backup section for
-what it actually found and fixed.
+Boot-tested end-to-end for real in QEMU/KVM, not just compiled:
+
+- The BIOS path by `scripts/test-install.sh` — install, boot the installed
+  disk, `fau backup`, `grub-reboot` into it, `fau backup-restore`, reboot
+  again. See that script and docs/ARCHITECTURE.md's fau-backup section for
+  what it actually found and fixed.
+- The UEFI path by `scripts/test-install-uefi.sh` — install over QEMU+OVMF,
+  then a *second* boot with a completely fresh `OVMF_VARS` template (no
+  NVRAM boot entries at all, the state a real firmware's NVRAM would be in
+  on a disk moved to different hardware) to specifically confirm the
+  `--removable` fallback path (`EFI/BOOT/BOOTX64.EFI`) actually boots
+  without depending on any NVRAM entry `grub-install` might have
+  registered. Deliberately a sibling script, not folded into
+  `scripts/test-install.sh`'s own phases: everything past the install step
+  itself (backup/grub-reboot/restore) is platform-agnostic, so re-running
+  all four phases under OVMF would just re-prove the same logic twice —
+  this only re-checks the parts that actually differ (partitioning and the
+  bootloader install/boot itself).

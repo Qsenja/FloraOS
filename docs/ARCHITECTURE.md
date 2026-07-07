@@ -537,9 +537,59 @@ build path that would've required compiling 16-bit real-mode boot code.
   both, and for the real QEMU disk-boot harness (`scripts/test-install.sh`)
   that now actually boot-tests this end-to-end, including
   `CONFIG_BTRFS_FS=y` really being built in (confirmed by a real boot, not
-  just read from the .config). Still explicitly NOT done: **no UEFI
-  support** (no dosfstools/ESP handling -- BIOS/MBR only, same
-  scope-disclosure standard as this file's other gaps) -- see docs/TODO.md.
+  just read from the .config). UEFI support (was: BIOS/MBR only) is a
+  separate DONE entry just below.
+- DONE: **UEFI support in florainstall** (was: BIOS/MBR only, no
+  dosfstools/ESP handling). Kept the same MBR disk label as the BIOS case
+  rather than switching to GPT -- this project already ruled out GPT's own
+  ESP partition-type GUID for lack of a primary source to verify it against
+  (see the PARTIAL entry above), and it turns out MBR sidesteps UEFI too:
+  the UEFI spec itself defines MBR partition-type byte 0xEF ("EFI System")
+  as a valid way to mark an ESP with no GPT required, confirmed against a
+  primary source this project actually can read on its own build host
+  (`sfdisk --list-types`: "ef  EFI (FAT-12/16/32)"). Boot mode is detected
+  once, at install-time, by checking whether the *live* system itself
+  booted via UEFI (`/sys/firmware/efi` present) -- not a user-facing
+  toggle, the same "you can only install what you booted" convention real
+  installers use. BIOS-booted media installs exactly as before (unchanged
+  single-partition scheme). UEFI-booted media instead gets a small
+  (512MiB) FAT32 ESP (type 0xEF) as partition 1, then the Linux root
+  partition. FAT32 needs `dosfstools` (`mkfs.fat`) -- not a base package
+  any more than btrfs-progs is (see the PARTIAL entry above), fetched onto
+  the live system the same way, right before formatting the ESP.
+  `grub-install` runs with `--target=x86_64-efi --efi-directory=/boot/efi
+  --removable`: `--removable` writes the fallback `EFI/BOOT/BOOTX64.EFI`
+  path instead of registering an NVRAM boot entry, sidestepping
+  `efibootmgr` entirely (confirmed against this build host's own
+  `grub-install --help`: efibootmgr is listed as an *optional* dep of grub,
+  needed only for the NVRAM path this project doesn't use) -- more robust
+  than NVRAM registration anyway, since it works identically on real
+  firmware and QEMU/OVMF without depending on a given firmware's NVRAM
+  implementation being reliable. Arch's `grub` package (already fetched via
+  fau's alpm fallback for the BIOS case) ships both the i386-pc and
+  x86_64-efi platform directories in one package (confirmed on this build
+  host: `pacman -Si grub` lists `Provides: grub-bios grub-efi-x86_64 ...`)
+  -- no separate package or fetch needed for the UEFI target.
+  `tools/floragrub-cfg` needed no changes at all: its generated `grub.cfg`
+  is platform-agnostic (the same menuentry/search/insmod content is read by
+  both the i386-pc and x86_64-efi GRUB binaries), the ESP itself is never
+  referenced from it. Boot-tested end-to-end for real, the same standard as
+  the BIOS path above, but against real QEMU+OVMF: install over OVMF, then
+  a *second* boot with a completely fresh OVMF_VARS template (no NVRAM
+  entries at all, the state a real firmware's NVRAM would be in on a disk
+  moved to different hardware) specifically to confirm the `--removable`
+  fallback path actually boots without depending on any NVRAM entry
+  grub-install might have registered -- confirmed via `/proc/cmdline`
+  (`root=/dev/sda2 rootflags=subvol=@`, the ESP correctly took `/dev/sda1`)
+  and `/sys/firmware/efi` being present after that fresh-NVRAM boot. See
+  **scripts/test-install-uefi.sh** (a sibling to scripts/test-install.sh,
+  not folded into it -- the four BIOS-path phases past the install step
+  itself, backup/grub-reboot/restore, are entirely platform-agnostic, so
+  re-running all of them under OVMF would just re-prove the same logic a
+  second time; this only re-checks the parts that actually differ:
+  partitioning and the bootloader install/boot itself). Still explicitly
+  NOT done: **no Secure Boot support** (no shim, no MOK enrollment, GRUB's
+  own EFI binary is unsigned) -- see docs/TODO.md.
 - DONE: `sysctl` (procps-ng), `hostname` (Debian's standalone package, not
   inetutils -- see MANIFEST.md), and `loadkeys`/`dumpkeys` (kbd) are now
   built and shipped; their openrc sysinit services run successfully instead

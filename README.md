@@ -83,9 +83,11 @@ shell to appear on its own). Concretely, right now:
   read from `fau`'s own list.
 - **Persistent disk install**: run `florainstall` (a TUI, ncurses-based)
   from a root shell on the live image to partition a real disk, format it
-  (btrfs, an `@` subvolume), and copy the running system onto it — BIOS/MBR
-  only, no UEFI yet (see docs/TODO.md). Boot-tested end-to-end for real in
-  QEMU/KVM, not just compiled (see `scripts/test-install.sh`).
+  (btrfs, an `@` subvolume), and copy the running system onto it — both
+  BIOS and UEFI, autodetected from how the live image itself was booted (no
+  Secure Boot yet, see docs/TODO.md). Boot-tested end-to-end for real in
+  QEMU/KVM, not just compiled (see `scripts/test-install.sh` for BIOS,
+  `scripts/test-install-uefi.sh` for UEFI).
 - **`fau backup`**: a full-root btrfs snapshot restorable by picking an
   alternate entry at the GRUB menu, `fau backup-restore` to promote one to
   be the permanent default. Real disk installs only. See "fau, the system
@@ -171,7 +173,8 @@ tools/fauelf/            # FloraOS's own absolute-DT_NEEDED fixup tool
 tools/florainstall/      # FloraOS's own TUI disk installer
 tools/floragrub-cfg/     # FloraOS's own /boot/grub/grub.cfg generator (florainstall + fau backup)
 scripts/                # rootfs + ISO build scripts and per-package build recipes
-scripts/test-install.sh # real QEMU/KVM boot test: florainstall + fau backup end-to-end
+scripts/test-install.sh # real QEMU/KVM boot test: florainstall (BIOS) + fau backup end-to-end
+scripts/test-install-uefi.sh # real QEMU/OVMF boot test: florainstall's UEFI/ESP path
 work/                   # build output (gitignored) -- sources, staged builds, rootfs, fau repo
 ```
 

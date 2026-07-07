@@ -23,20 +23,40 @@
  * it does for any other package -- this project isn't hand-guessing its
  * linked libraries.
  *
- * Partition scheme: classic MBR (dos label), one bootable Linux (0x83)
- * partition spanning the disk. Deliberately NOT GPT+"BIOS boot partition":
+ * Partition scheme: classic MBR (dos label). Deliberately NOT GPT+"ESP GUID":
  * that scheme needs a specific partition-type GUID which isn't something
  * this project can verify against a primary source from inside this build
  * (unlike, say, linux-lts.sh's Kconfig symbols, which were checked directly
- * against git.kernel.org) -- MBR sidesteps the question entirely, since
- * grub-install --target=i386-pc's classic embedding gap between the MBR and
- * the first partition (sfdisk's default 1MiB alignment already leaves this)
- * has been the standard BIOS-GRUB2 install method for well over a decade,
- * no dedicated partition required. UEFI (an ESP, FAT32) is deliberately not
- * supported yet -- FloraOS ships no dosfstools (see docs/MANIFEST.md), and
- * the live ISO's own tested boot path is BIOS via grub-mkrescue's hybrid
- * image, not UEFI -- same "TODO over silence" rule as ARCHITECTURE.md's
- * other gaps, not a silent omission.
+ * against git.kernel.org) -- MBR sidesteps the question entirely, both for
+ * the BIOS case and, it turns out, for UEFI too: the UEFI spec itself
+ * defines MBR partition-type byte 0xEF ("EFI System") as a valid way to mark
+ * an ESP on a legacy MBR disk, no GPT required, and sfdisk's own type table
+ * (a primary source this project can actually read, `sfdisk --list-types`)
+ * confirms the same byte ("ef  EFI (FAT-12/16/32)"). Boot mode is detected
+ * at install time by checking whether the *live* system itself booted via
+ * UEFI (`/sys/firmware/efi` present) -- the standard convention real
+ * installers use (you can only install what you booted), not a user-facing
+ * toggle:
+ *   - BIOS-booted live media: unchanged from before -- one bootable Linux
+ *     (0x83) partition spanning the disk. grub-install --target=i386-pc's
+ *     classic embedding gap between the MBR and the first partition
+ *     (sfdisk's default 1MiB alignment already leaves this) has been the
+ *     standard BIOS-GRUB2 install method for well over a decade, no
+ *     dedicated partition required.
+ *   - UEFI-booted live media: two partitions -- a small (512MiB, comfortably
+ *     larger than any real kernel+GRUB EFI binary this project ships) FAT32
+ *     ESP (type 0xEF) first, then a Linux (0x83) partition with the rest of
+ *     the disk. FAT32 needs dosfstools (mkfs.fat) -- not a base package any
+ *     more than btrfs-progs is (see below), fetched onto the live system the
+ *     same way. grub-install runs with --target=x86_64-efi
+ *     --efi-directory=/boot/efi --removable: --removable writes the
+ *     fallback EFI/BOOT/BOOTX64.EFI path instead of registering an NVRAM
+ *     boot entry, sidestepping efibootmgr entirely (confirmed against this
+ *     build host's own `grub-install --help`: efibootmgr is listed as an
+ *     *optional* dep of grub, needed only for the NVRAM path this project
+ *     doesn't use) -- more robust than NVRAM registration anyway, since it
+ *     works identically on real firmware and QEMU/OVMF without depending on
+ *     any given firmware's NVRAM implementation being reliable.
  *
  * Bootloader: GRUB itself is not built from source (ARCHITECTURE.md already
  * ruled that out for the ISO -- 16-bit real-mode boot code, i386-pc/
@@ -45,10 +65,14 @@
  * (Arch/Artix repo) fallback, straight into the *target* disk's tree
  * (`FAU_ROOT=<target-mount> fau bootstrap grub`) -- same mechanism that
  * already fetches wlroots/sway/mango for `fau install <wm>`, just pointed
- * at a different root. grub-install itself then has to run *inside* a
- * chroot into that target (not just given --boot-directory from the live
- * environment): its shared library dependencies live under the target's
- * own /usr/lib, not the live system's, and the dynamic linker only
+ * at a different root. Arch's `grub` package ships both the i386-pc and
+ * x86_64-efi platform directories in one package (confirmed on this build
+ * host: `pacman -Si grub` lists `Provides: grub-bios grub-efi-x86_64 ...`,
+ * and /usr/lib/grub/x86_64-efi exists locally) -- no separate package or
+ * fetch needed for the UEFI target. grub-install itself then has to run
+ * *inside* a chroot into that target (not just given --boot-directory from
+ * the live environment): its shared library dependencies live under the
+ * target's own /usr/lib, not the live system's, and the dynamic linker only
  * consults the filesystem root it's actually running under.
  *
  * User accounts: this tool never touches a plaintext password itself. It
@@ -69,18 +93,17 @@
  * /usr/lib/floraos/vmlinuz-floraos (a path that isn't under ./boot, so it
  * does survive into the live initramfs) purely for this tool's own use.
  *
- * Not independently boot-tested end-to-end in this sandbox (no spare disk/
- * real hardware or a QEMU disk-boot harness available here) -- treat this
- * the same as any other unverified change in this codebase: check a real
- * `florainstall` run followed by an actual reboot off the target disk
- * before relying on it. Assumptions specifically worth re-checking then:
- * that this kernel's defconfig builds CONFIG_BTRFS_FS in (=y, not =m --
- * there is no initramfs on the installed system to load a module from
- * before root is mounted; scripts/recipes/linux-lts.sh now enables this
- * explicitly, same as the earlier DRM_SIMPLEDRM work, but a from-scratch
- * kernel build wasn't practical to run in this sandbox either), and that
- * Arch's `grub`/`btrfs-progs` package names and repo layout are still what
- * fau's alpm fallback expects.
+ * Boot-tested end-to-end for real, in QEMU/KVM: the BIOS path by
+ * scripts/test-install.sh (install -> boot the installed disk -> `fau
+ * backup` -> `grub-reboot` into it -> `fau backup-restore` -> reboot, see
+ * that script's own header). The UEFI path (this file's ESP/x86_64-efi
+ * addition) was verified the same way by hand against real QEMU+OVMF --
+ * install over OVMF, then a *second*, completely fresh OVMF_VARS template
+ * (no NVRAM boot entries at all) to specifically confirm the --removable
+ * fallback path (EFI/BOOT/BOOTX64.EFI) actually boots without depending on
+ * any NVRAM entry grub-install might have registered -- not yet folded into
+ * scripts/test-install.sh itself as an automated regression check (see
+ * docs/TODO.md if that's still true when you're reading this).
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -116,6 +139,12 @@
 #define TARGET_MNT "/mnt/florainstall"
 #define LIVE_KERNEL_PATH "/usr/lib/floraos/vmlinuz-floraos"
 
+/* ESP size for a UEFI install (see this file's header comment) -- 512MiB is
+ * comfortably larger than any real kernel+GRUB EFI binary this project
+ * ships (a few MiB each), leaving headroom without being a meaningfully
+ * large tax on disk space. */
+#define ESP_SIZE_MIB 512
+
 /* The only supplementary group this OS actually ships (see
  * apply-skeleton.sh's own /etc/group heredoc) -- membership is what lets
  * floraseat hand a session its seat access. This is what the "Standard"
@@ -146,9 +175,17 @@ struct install_settings {
 /* --- cleanup bookkeeping: what's currently mounted, so both the normal
  * end-of-install path and any die() partway through can unwind safely --- */
 static int g_target_mounted = 0;
+static int g_esp_mounted = 0;
 static int g_dev_bound = 0;
 static int g_sys_bound = 0;
 static int g_proc_bound = 0;
+
+/* Whether the *live* system itself booted via UEFI (checked once in main(),
+ * read-only after that) -- determines the target's partition scheme and
+ * grub-install target, see this file's header comment. Not a user-facing
+ * toggle: you can only install what you booted, the same convention real
+ * installers use. */
+static int g_uefi = 0;
 
 /* --- background prefetch bookkeeping: pids of the speculative fetches
  * kicked off in main() before the user has even picked a disk, reaped
@@ -157,6 +194,7 @@ static int g_proc_bound = 0;
  * or already reaped. --- */
 static pid_t g_prefetch_btrfs_pid = -1;
 static pid_t g_prefetch_grub_pid = -1;
+static pid_t g_prefetch_dosfstools_pid = -1; /* only spawned when g_uefi */
 
 static void log_msg(const char *fmt, ...) {
 	va_list ap;
@@ -180,6 +218,9 @@ static void cleanup_mounts(void) {
 	if (g_dev_bound) { unmount_best_effort(TARGET_MNT "/dev"); g_dev_bound = 0; }
 	if (g_sys_bound) { unmount_best_effort(TARGET_MNT "/sys"); g_sys_bound = 0; }
 	if (g_proc_bound) { unmount_best_effort(TARGET_MNT "/proc"); g_proc_bound = 0; }
+	/* Nested under TARGET_MNT itself (mounted at .../boot/efi) -- must come
+	 * before the target unmount below, same as dev/sys/proc above. */
+	if (g_esp_mounted) { unmount_best_effort(TARGET_MNT "/boot/efi"); g_esp_mounted = 0; }
 	if (g_target_mounted) { unmount_best_effort(TARGET_MNT); g_target_mounted = 0; }
 }
 
@@ -547,21 +588,23 @@ static void show_message(const char *title, const char *const *lines, int n) {
 static int confirm_destructive(const struct install_settings *s) {
 	int rows, cols;
 	getmaxyx(stdscr, rows, cols);
-	int height = 10, width = cols - 10 > 50 ? cols - 10 : 50;
+	int height = 11, width = cols - 10 > 50 ? cols - 10 : 50;
 	WINDOW *win = newwin(height, width, (rows - height) / 2, (cols - width) / 2);
 	keypad(win, TRUE);
 	box(win, 0, 0);
 	mvwprintw(win, 1, 2, "WARNING: this ERASES %s entirely", s->disk.path);
 	mvwprintw(win, 2, 2, "(%llu MiB), including any other OS on it.", s->disk.bytes / (1024 * 1024));
-	mvwprintw(win, 4, 2, "Type \"%s\" (without quotes) to proceed:", s->disk.name);
-	mvwprintw(win, 6, 2, "Anything else cancels.");
+	mvwprintw(win, 3, 2, "Boot mode detected: %s%s", g_uefi ? "UEFI" : "BIOS (legacy)",
+		g_uefi ? " (will create an EFI System Partition)" : "");
+	mvwprintw(win, 5, 2, "Type \"%s\" (without quotes) to proceed:", s->disk.name);
+	mvwprintw(win, 7, 2, "Anything else cancels.");
 	wrefresh(win);
 
 	curs_set(1);
 	echo();
 	char typed[64];
 	memset(typed, 0, sizeof(typed));
-	mvwgetnstr(win, 5, 2, typed, (int)sizeof(typed) - 1);
+	mvwgetnstr(win, 6, 2, typed, (int)sizeof(typed) - 1);
 	noecho();
 	curs_set(0);
 	delwin(win);
@@ -604,12 +647,27 @@ static void pick_disk(struct install_settings *s) {
 static void do_install(const struct install_settings *s) {
 	endwin();
 
+	log_msg("boot mode detected: %s", g_uefi ? "UEFI" : "BIOS (legacy)");
+
 	log_msg("wiping old signatures on %s", s->disk.path);
 	run_argv_or_die((char *[]){"wipefs", "-a", (char *)s->disk.path, NULL});
 
-	log_msg("partitioning %s (MBR, one bootable Linux partition)", s->disk.path);
-	run_argv_input_or_die((char *[]){"sfdisk", (char *)s->disk.path, NULL},
-		"label: dos\n\ntype=83, bootable\n");
+	char root_part[300], esp_part[300];
+	int root_partnum;
+	if (g_uefi) {
+		log_msg("partitioning %s (MBR: %dMiB ESP + Linux root)", s->disk.path, ESP_SIZE_MIB);
+		char script[128];
+		snprintf(script, sizeof(script), "label: dos\n\nsize=%dMiB, type=ef\ntype=83\n", ESP_SIZE_MIB);
+		run_argv_input_or_die((char *[]){"sfdisk", (char *)s->disk.path, NULL}, script);
+		root_partnum = 2;
+		partition_path(&s->disk, 1, esp_part, sizeof(esp_part));
+	} else {
+		log_msg("partitioning %s (MBR, one bootable Linux partition)", s->disk.path);
+		run_argv_input_or_die((char *[]){"sfdisk", (char *)s->disk.path, NULL},
+			"label: dos\n\ntype=83, bootable\n");
+		root_partnum = 1;
+		esp_part[0] = 0;
+	}
 
 	/* sfdisk already re-reads the partition table via BLKRRPART itself on
 	 * a clean write, but doing it explicitly here too is cheap insurance --
@@ -619,16 +677,47 @@ static void do_install(const struct install_settings *s) {
 	int fd = open(s->disk.path, O_RDONLY);
 	if (fd >= 0) { ioctl(fd, BLKRRPART, NULL); close(fd); }
 
-	char part1[300];
-	partition_path(&s->disk, 1, part1, sizeof(part1));
-	for (int tries = 0; tries < 50; tries++) {
-		struct stat st;
-		if (stat(part1, &st) == 0) break;
-		usleep(100000);
+	struct stat st; /* reused below for the kernel-image check too */
+	partition_path(&s->disk, root_partnum, root_part, sizeof(root_part));
+	/* Waits for whichever partition device appears last -- on a fresh MBR
+	 * write the kernel/udev create partition nodes in order, so checking
+	 * root_part (the higher partition number when g_uefi) also confirms
+	 * esp_part already exists; checking it too when g_uefi costs nothing
+	 * and doesn't assume that ordering blindly. */
+	const char *wait_paths[2] = {root_part, g_uefi ? esp_part : NULL};
+	for (int w = 0; w < 2; w++) {
+		if (!wait_paths[w]) continue;
+		int found = 0;
+		for (int tries = 0; tries < 50; tries++) {
+			if (stat(wait_paths[w], &st) == 0) { found = 1; break; }
+			usleep(100000);
+		}
+		if (!found)
+			die("partition device %s never appeared -- check `sfdisk -l %s`", wait_paths[w], s->disk.path);
 	}
-	struct stat st;
-	if (stat(part1, &st) != 0)
-		die("partition device %s never appeared -- check `sfdisk -l %s`", part1, s->disk.path);
+
+	if (g_uefi) {
+		reap_prefetch(&g_prefetch_dosfstools_pid);
+		log_msg("fetching dosfstools (via fau's own alpm fallback, onto the live system itself)");
+		{
+			/* Same reasoning as btrfs-progs just below: mkfs.fat has to run
+			 * before the target has anything mounted on it, so this
+			 * bootstraps onto the live "/" too, not the target. */
+			pid_t pid = fork();
+			if (pid < 0) die("fork failed: %s", strerror(errno));
+			if (pid == 0) {
+				execlp("fau", "fau", "bootstrap", "dosfstools", (char *)NULL);
+				fprintf(stderr, "florainstall: exec fau failed: %s\n", strerror(errno));
+				_exit(127);
+			}
+			int status;
+			waitpid(pid, &status, 0);
+			if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+				die("fetching dosfstools failed -- check network connectivity (dhcpcd should already be up)");
+		}
+		log_msg("formatting %s as FAT32 (ESP)", esp_part);
+		run_argv_or_die((char *[]){"mkfs.fat", "-F32", "-n", "FLORAESP", esp_part, NULL});
+	}
 
 	reap_prefetch(&g_prefetch_btrfs_pid);
 	log_msg("fetching btrfs-progs (via fau's own alpm fallback, onto the live system itself)");
@@ -657,13 +746,13 @@ static void do_install(const struct install_settings *s) {
 			die("fetching btrfs-progs failed -- check network connectivity (dhcpcd should already be up)");
 	}
 
-	log_msg("formatting %s as btrfs", part1);
-	run_argv_or_die((char *[]){"mkfs.btrfs", "-f", "-L", "floraos", part1, NULL});
+	log_msg("formatting %s as btrfs", root_part);
+	run_argv_or_die((char *[]){"mkfs.btrfs", "-f", "-L", "floraos", root_part, NULL});
 
-	log_msg("mounting %s at " TARGET_MNT " to create the @ subvolume", part1);
+	log_msg("mounting %s at " TARGET_MNT " to create the @ subvolume", root_part);
 	mkdir(TARGET_MNT, 0755);
-	if (mount(part1, TARGET_MNT, "btrfs", 0, NULL) != 0)
-		die("mount %s -> " TARGET_MNT " failed: %s", part1, strerror(errno));
+	if (mount(root_part, TARGET_MNT, "btrfs", 0, NULL) != 0)
+		die("mount %s -> " TARGET_MNT " failed: %s", root_part, strerror(errno));
 	g_target_mounted = 1;
 
 	/* @ is a sibling of @snapshots under the top-level (subvolid 5) subvolume
@@ -675,12 +764,12 @@ static void do_install(const struct install_settings *s) {
 	 * you can't snapshot the top-level subvolume itself. */
 	log_msg("creating the @ subvolume");
 	run_argv_or_die((char *[]){"btrfs", "subvolume", "create", TARGET_MNT "/@", NULL});
-	log_msg("remounting %s (subvol=@) at " TARGET_MNT, part1);
+	log_msg("remounting %s (subvol=@) at " TARGET_MNT, root_part);
 	if (umount(TARGET_MNT) != 0)
 		die("umount " TARGET_MNT " failed: %s", strerror(errno));
 	g_target_mounted = 0;
-	if (mount(part1, TARGET_MNT, "btrfs", 0, "subvol=@") != 0)
-		die("mount %s -> " TARGET_MNT " (subvol=@) failed: %s", part1, strerror(errno));
+	if (mount(root_part, TARGET_MNT, "btrfs", 0, "subvol=@") != 0)
+		die("mount %s -> " TARGET_MNT " (subvol=@) failed: %s", root_part, strerror(errno));
 	g_target_mounted = 1;
 
 	log_msg("copying the running system onto the target disk (this takes a while)");
@@ -709,14 +798,26 @@ static void do_install(const struct install_settings *s) {
 	mkdir(TARGET_MNT "/boot", 0755);
 	run_argv_or_die((char *[]){"cp", "-a", LIVE_KERNEL_PATH, TARGET_MNT "/boot/vmlinuz-floraos", NULL});
 
+	char esp_uuid[64] = {0};
+	if (g_uefi) {
+		log_msg("mounting the ESP at " TARGET_MNT "/boot/efi");
+		mkdir(TARGET_MNT "/boot/efi", 0755);
+		if (mount(esp_part, TARGET_MNT "/boot/efi", "vfat", 0, NULL) != 0)
+			die("mount %s -> " TARGET_MNT "/boot/efi failed: %s", esp_part, strerror(errno));
+		g_esp_mounted = 1;
+		run_argv_capture_or_die((char *[]){"blkid", "-s", "UUID", "-o", "value", esp_part, NULL},
+			esp_uuid, sizeof(esp_uuid));
+	}
+
 	char uuid[64];
-	run_argv_capture_or_die((char *[]){"blkid", "-s", "UUID", "-o", "value", part1, NULL}, uuid, sizeof(uuid));
+	run_argv_capture_or_die((char *[]){"blkid", "-s", "UUID", "-o", "value", root_part, NULL}, uuid, sizeof(uuid));
 
 	log_msg("writing /etc/fstab");
 	{
 		FILE *f = fopen(TARGET_MNT "/etc/fstab", "w");
 		if (!f) die("can't write " TARGET_MNT "/etc/fstab: %s", strerror(errno));
 		fprintf(f, "UUID=%s / btrfs subvol=@,defaults 0 1\n", uuid);
+		if (g_uefi) fprintf(f, "UUID=%s /boot/efi vfat defaults 0 2\n", esp_uuid);
 		fclose(f);
 	}
 
@@ -764,9 +865,23 @@ static void do_install(const struct install_settings *s) {
 		die("mount proc failed: %s", strerror(errno));
 	g_proc_bound = 1;
 
-	log_msg("installing grub to %s (BIOS/i386-pc)", s->disk.path);
-	run_in_chroot_or_die(TARGET_MNT,
-		(char *[]){"grub-install", "--target=i386-pc", "--boot-directory=/boot", (char *)s->disk.path, NULL});
+	if (g_uefi) {
+		log_msg("installing grub to %s (UEFI/x86_64-efi, removable fallback path)", s->disk.path);
+		/* --removable writes EFI/BOOT/BOOTX64.EFI (the fallback path every
+		 * UEFI firmware probes without needing an NVRAM boot entry) instead
+		 * of registering one via efibootmgr -- see this file's header
+		 * comment for why that's deliberately not used here. No install
+		 * device argument: --efi-directory alone tells grub-install where
+		 * the ESP is; there's no BIOS boot-sector to embed on a disk this
+		 * is otherwise never given raw access to. */
+		run_in_chroot_or_die(TARGET_MNT,
+			(char *[]){"grub-install", "--target=x86_64-efi", "--efi-directory=/boot/efi",
+				"--boot-directory=/boot", "--removable", NULL});
+	} else {
+		log_msg("installing grub to %s (BIOS/i386-pc)", s->disk.path);
+		run_in_chroot_or_die(TARGET_MNT,
+			(char *[]){"grub-install", "--target=i386-pc", "--boot-directory=/boot", (char *)s->disk.path, NULL});
+	}
 
 	log_msg("writing /boot/grub/grub.cfg");
 	{
@@ -786,7 +901,7 @@ static void do_install(const struct install_settings *s) {
 		 * shared with `fau backup`'s own grub.cfg regeneration after a
 		 * snapshot/remove/restore -- see that script's own header comment
 		 * for the subvolume-path reasoning. */
-		run_argv_or_die((char *[]){"floragrub-cfg", (char *)part1, uuid, path, NULL});
+		run_argv_or_die((char *[]){"floragrub-cfg", (char *)root_part, uuid, path, NULL});
 	}
 
 	log_msg("setting the root password (via florauser, inside the target)");
@@ -921,12 +1036,19 @@ int main(int argc, char **argv) {
 	}
 	if (!s.hostname[0]) snprintf(s.hostname, sizeof(s.hostname), "floraos");
 
+	/* Checked once, up front: this determines the target's partition
+	 * scheme and grub-install target throughout do_install() (see this
+	 * file's header comment) -- read-only from here on. */
+	g_uefi = access("/sys/firmware/efi", F_OK) == 0;
+
 	/* Speculative prefetch: start these before the user has touched
 	 * anything, so their network time overlaps with however long the
 	 * menu takes instead of sitting on the critical path after "Begin
-	 * installation" (see spawn_prefetch()'s own comment). */
+	 * installation" (see spawn_prefetch()'s own comment). dosfstools only
+	 * when g_uefi -- BIOS installs never touch mkfs.fat. */
 	g_prefetch_btrfs_pid = spawn_prefetch("btrfs-progs", NULL);
 	g_prefetch_grub_pid = spawn_prefetch("grub", GRUB_PREFETCH_ROOT);
+	if (g_uefi) g_prefetch_dosfstools_pid = spawn_prefetch("dosfstools", NULL);
 
 	init_tui();
 	main_menu(&s);
