@@ -39,6 +39,17 @@ recipe_build() {
 		# passes with the flags below, gperf is the only real new
 		# build-host requirement this package adds (see the required_cmd
 		# list in build-rootfs.sh).
+		# PKG_CONFIG=pkg-config: this exact tarball's generated `configure`
+		# doesn't reliably resolve $PKG_CONFIG on its own in every build
+		# environment -- confirmed directly (reproduced: `./configure`
+		# with only PKG_CONFIG_LIBDIR/PKG_CONFIG_PATH set still failed
+		# "*** kmod support requested, but libraries not found" even
+		# though `pkg-config --exists libkmod` against the exact same
+		# PKG_CONFIG_LIBDIR succeeds on the command line; setting
+		# PKG_CONFIG explicitly makes PKG_CHECK_EXISTS/PKG_CHECK_MODULES
+		# find it every time). Harmless/redundant on a build host where
+		# the bare AC_PATH_TOOL lookup would have worked anyway.
+		PKG_CONFIG=pkg-config \
 		PKG_CONFIG_LIBDIR="$STAGE_DIR/kmod/files/usr/lib/pkgconfig" PKG_CONFIG_PATH= \
 		./configure --prefix=/usr --exec-prefix=/usr \
 			--bindir=/usr/bin --sbindir=/usr/bin \
