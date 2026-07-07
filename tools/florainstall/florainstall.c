@@ -116,6 +116,13 @@
 #define TARGET_MNT "/mnt/florainstall"
 #define LIVE_KERNEL_PATH "/usr/lib/floraos/vmlinuz-floraos"
 
+/* The only supplementary group this OS actually ships (see
+ * apply-skeleton.sh's own /etc/group heredoc) -- membership is what lets
+ * floraseat hand a session its seat access. This is what the "Standard"
+ * extra-groups option below sets, so someone who doesn't know FloraOS's
+ * group layout still ends up with a normal, GUI-capable account. */
+#define STANDARD_USER_GROUPS "seat"
+
 struct disk_info {
 	char name[256]; /* e.g. "sda", "nvme0n1" -- as it appears under /sys/block */
 	char path[280]; /* "/dev/sda" */
@@ -750,11 +757,29 @@ static void main_menu(struct install_settings *s) {
 			if (buf[0]) {
 				snprintf(s->username, sizeof(s->username), "%s", buf);
 				s->create_user = 1;
-				char groupbuf[128];
-				snprintf(groupbuf, sizeof(groupbuf), "%s", s->groups);
-				prompt_text("Additional user", "Extra groups, comma-separated (e.g. seat), or blank:",
-					groupbuf, sizeof(groupbuf));
-				snprintf(s->groups, sizeof(s->groups), "%s", groupbuf);
+				const char *group_labels[] = {
+					"Standard (normal user: " STANDARD_USER_GROUPS " group, for login/GUI)",
+					"None (no extra groups)",
+					"Custom (type group names yourself)",
+				};
+				switch (run_choice_menu("Extra groups", group_labels, 3)) {
+				case 0:
+					snprintf(s->groups, sizeof(s->groups), "%s", STANDARD_USER_GROUPS);
+					break;
+				case 1:
+					s->groups[0] = 0;
+					break;
+				case 2: {
+					char groupbuf[128];
+					snprintf(groupbuf, sizeof(groupbuf), "%s", s->groups);
+					prompt_text("Additional user", "Extra groups, comma-separated (e.g. seat), or blank:",
+						groupbuf, sizeof(groupbuf));
+					snprintf(s->groups, sizeof(s->groups), "%s", groupbuf);
+					break;
+				}
+				default: /* -1: backed out, leave existing groups untouched */
+					break;
+				}
 			} else {
 				s->create_user = 0;
 				s->username[0] = 0;
