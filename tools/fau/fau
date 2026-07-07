@@ -1695,6 +1695,17 @@ backup_name_check() {
 		|| die "backup name must match ^[A-Za-z0-9._-]+\$ (it becomes a GRUB menu entry and a filesystem path segment)"
 }
 
+# root_device -- prints the block device mounted at /, e.g. /dev/sda1.
+# findmnt's SOURCE column annotates a btrfs subvolume mount with a bracketed
+# suffix (e.g. "/dev/sda1[/@]", found via an actual boot test: `fau backup`
+# died with "/dev/sda1[/@] isn't a block device" before this existed) -- that
+# suffix names which subvolume is mounted, not part of the device path, so
+# it's stripped here rather than passed straight through.
+root_device() {
+	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
+	printf '%s' "${device%%\[*}"
+}
+
 # backup_with_toplevel <fn> [extra args...] -- mounts the running root
 # filesystem's top-level (subvolid 5) subvolume, where @ and @snapshots live
 # as siblings, at a fresh mktemp -d mountpoint, then runs
@@ -1706,10 +1717,18 @@ backup_name_check() {
 # afterward, propagating the callback's exit status.
 backup_with_toplevel() {
 	local fn=$1; shift
-	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
+	local device; device=$(root_device)
 	[ -b "$device" ] || die "$device (source of /) isn't a block device -- fau backup only supports a real disk install"
 	local uuid; uuid=$(blkid -s UUID -o value "$device") || die "blkid couldn't read $device's UUID"
-	local tmp; tmp=$(mktemp -d)
+	# /dev/shm, not plain mktemp -d's default of $TMPDIR/tmp (usually under
+	# /tmp on the currently-mounted root) -- found via an actual QEMU boot
+	# test: booted into a `fau backup` snapshot (deliberately read-only, see
+	# _backup_do), /tmp lives on that same read-only root, so mktemp died
+	# with "Read-only file system" before backup-restore could even mount
+	# the top-level subvolume. devfs's own init script (see
+	# etc/init.d/devfs) always mounts /dev/shm as its own tmpfs, independent
+	# of whatever's mounted as /, on every FloraOS boot -- live or installed.
+	local tmp; tmp=$(mktemp -d -p /dev/shm)
 	mount -o subvolid=5 "$device" "$tmp" || { rmdir "$tmp"; die "mount -o subvolid=5 $device failed"; }
 	local rc=0
 	( "$fn" "$tmp" "$device" "$uuid" "$@" ) || rc=$?
@@ -1737,7 +1756,7 @@ cmd_backup() {
 	[ $# -eq 1 ] || die "usage: fau backup <name>"
 	backup_name_check "$1"
 	backup_with_toplevel _backup_do "$1"
-	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
+	local device; device=$(root_device)
 	local uuid; uuid=$(blkid -s UUID -o value "$device") || die "blkid couldn't read $device's UUID"
 	backup_regen_grub "$device" "$uuid"
 	log "backup '$1' created -- pick \"FloraOS (backup: $1)\" at the GRUB menu to boot into it"
@@ -1769,7 +1788,7 @@ cmd_backup_remove() {
 	[ $# -eq 1 ] || die "usage: fau backup-remove <name>"
 	backup_name_check "$1"
 	backup_with_toplevel _backup_remove_do "$1"
-	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
+	local device; device=$(root_device)
 	local uuid; uuid=$(blkid -s UUID -o value "$device") || die "blkid couldn't read $device's UUID"
 	backup_regen_grub "$device" "$uuid"
 	log "backup '$1' removed"
@@ -1794,7 +1813,7 @@ cmd_backup_restore() {
 	[ $# -eq 1 ] || die "usage: fau backup-restore <name>"
 	backup_name_check "$1"
 	backup_with_toplevel _backup_restore_do "$1"
-	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
+	local device; device=$(root_device)
 	local uuid; uuid=$(blkid -s UUID -o value "$device") || die "blkid couldn't read $device's UUID"
 	backup_regen_grub "$device" "$uuid"
 	log "restored '$1' to @ (previous root kept as @pre-restore-$1-*)"

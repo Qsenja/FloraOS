@@ -275,15 +275,65 @@ build path that would've required compiling 16-bit real-mode boot code.
   partway through is a real, documented risk (surfaced in both the tool's
   own error messages and here), not silently glossed over.
 
-  Not independently boot-tested end-to-end in this sandbox, same caveat as
-  florainstall itself: no root/loopback-btrfs access here (a real loopback
-  mount attempt failed with "Permission denied") and `scripts/test-iso.sh`
-  only boots the ISO via `qemu-system-x86_64 -cdrom` -- no `-drive`, no
-  reboot-and-pick-a-GRUB-entry flow exists to actually exercise this. A
-  follow-up worth doing separately: teach `scripts/test-iso.sh` to attach a
-  virtual disk and reboot into it, so florainstall + fau backup's actual
-  boot behavior (not just its compiled/shellchecked logic) can be checked
-  without real hardware.
+  Boot-tested end-to-end for real, in QEMU/KVM, via the new
+  **scripts/test-install.sh** (not just compiled/shellchecked -- this
+  sandbox does have `/dev/kvm`, contrary to what an earlier pass assumed):
+  drives florainstall's ncurses TUI over the serial console (arrow keys,
+  text entry, the destructive-confirm prompt) to install onto a scratch
+  disk image, then reuses that disk across three more boots to check
+  `/proc/cmdline` directly for `rootflags=subvol=@`, take a `fau backup`,
+  `grub-reboot` into it once and confirm (again via `/proc/cmdline`) it's
+  really running `@snapshots/<name>`, confirm a marker file written before
+  the backup and overwritten after it still reads the *old* value inside
+  the snapshot, `fau backup-restore` it from *within* that booted snapshot
+  (the specific "rename the subvolume you're currently running on" case),
+  then reboot again and confirm the promotion stuck. Four real bugs
+  surfaced this way, none of them guessable from reading the code, all
+  fixed:
+  - `root=UUID=<fs-uuid>` panics at boot ("Cannot open root device") --
+    resolving a *filesystem* UUID (not a GPT PARTUUID) to a device
+    normally happens via `/dev/disk/by-uuid/`, populated by udev/eudev,
+    which can't run before its own root is mounted, and there's no
+    initramfs here to do it earlier either. GRUB's own `search --fs-uuid`
+    a moment earlier is a *completely separate* resolution path and worked
+    fine, which masked this until an actual kernel boot caught it.
+    Fixed by having floragrub-cfg emit `root=<device-path>` (e.g.
+    `/dev/sda1` -- florainstall/fau already have this in hand) instead,
+    a real but honestly-documented limitation for multi-disk hardware
+    whose BIOS might enumerate disks in a different order across boots.
+  - `findmnt -n -o SOURCE /` prints `/dev/sda1[/@]` for a btrfs subvolume
+    mount, not plain `/dev/sda1` -- `fau backup` died with "isn't a block
+    device" on the very first real disk boot. Fixed with a `root_device()`
+    helper (tools/fau/fau) that strips the bracketed suffix.
+  - `mktemp -d`'s default location (under `/tmp` on the *currently mounted*
+    root) breaks when run from within a deliberately read-only `fau
+    backup` snapshot (`mktemp: ... Read-only file system`) -- surfaced
+    running `fau backup-restore` from inside the booted snapshot, exactly
+    the scenario that command exists for. Fixed by pointing both
+    `fau`'s `backup_with_toplevel` and floragrub-cfg's own transient mount
+    at `/dev/shm` instead, which devfs's own init script always mounts as
+    its own tmpfs regardless of what's mounted as `/`.
+  - `grub-reboot` silently had no effect at all -- it writes `next_entry`
+    into `/boot/grub/grubenv`, but the hand-written grub.cfg never read
+    `grubenv` back, so `set default=0` won -- unconditionally -- every
+    time. Fixed by adding the standard (if minimal -- no `saved_entry`/
+    `grub-set-default` support, this project doesn't offer that)
+    `load_env`/`next_entry` boilerplate real grub-mkconfig output also
+    relies on.
+
+  scripts/test-install.sh itself needed one real fix along the way, worth
+  recording since it'll bite anyone extending this style of test: waiting
+  for a sentinel string that's *part of the command you're sending* (e.g.
+  `cat marker.txt; echo MARKER_DONE`, then waiting for `MARKER_DONE`) is
+  unreliable -- a pty echoes back whatever bytes you send immediately,
+  well before the shell even processes the trailing Enter, so that wait
+  can be satisfied by the echoed *input* rather than the command's real
+  output, racing ahead of it by an unpredictable margin (intermittent,
+  not deterministic -- it passed several runs before failing three checks
+  at once in a way that first looked like a real regression). Fixed by
+  waiting for the shell prompt itself to reappear (`qemu_run`, counting
+  occurrences of the PS1 marker already used for login) instead of a
+  custom sentinel, before checking real output separately.
 - DONE: `depends=` entries can now carry an optional version constraint --
   `name`, `name>=1.2`, or `name==1.2` (comma-separated, as always). If an
   already-installed dependency doesn't satisfy it, fau reinstalls it from

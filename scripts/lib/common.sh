@@ -97,3 +97,100 @@ package_stage() {
 require_cmd() {
 	command -v "$1" >/dev/null 2>&1 || die "required command not found: $1 (install it on the build host first)"
 }
+
+# --- QEMU serial-console automation (used by test-iso.sh and
+# test-install.sh) --------------------------------------------------------
+# A background QEMU instance is driven entirely over a single serial line:
+# a Unix-socket chardev (so it can be both written to and read from), fed
+# by socat from one end of a long-lived fifo into a growing log file that
+# qemu_wait_for greps. One "session" = one qemu_boot_serial/.../qemu_quit
+# bracket around exactly one QEMU process. Only one session may be open at
+# a time per shell (the globals below are session-wide, not stacked) --
+# multi-phase tests call qemu_quit before opening the next one.
+
+# qemu_boot_serial <tag> <qemu-args...> -> starts qemu in the background
+# with a unix-socket serial chardev and a unix-socket monitor (so qemu_quit
+# can shut it down cleanly later), then bridges the serial socket to a
+# growing log file via socat. <tag> namespaces this session's socket/fifo/
+# log paths under $WORK_DIR so sequential sessions in one script (e.g.
+# "install" then "boot1") don't collide. Sets QEMU_PID, QEMU_LOG, QEMU_FD
+# (write to this fd to type at the guest), and QEMU_MON_SOCK.
+qemu_boot_serial() {
+	local tag=$1; shift
+	QEMU_SOCK="$WORK_DIR/qemu-$tag-serial.sock"
+	QEMU_FIFO="$WORK_DIR/qemu-$tag-serial-input.fifo"
+	QEMU_LOG="$WORK_DIR/qemu-$tag-boot.log"
+	QEMU_MON_SOCK="$WORK_DIR/qemu-$tag-monitor.sock"
+	rm -f "$QEMU_SOCK" "$QEMU_FIFO" "$QEMU_LOG" "$QEMU_MON_SOCK"
+	mkfifo "$QEMU_FIFO"
+
+	qemu-system-x86_64 "$@" \
+		-serial "unix:$QEMU_SOCK,server,nowait" \
+		-monitor "unix:$QEMU_MON_SOCK,server,nowait" \
+		>/dev/null 2>&1 &
+	QEMU_PID=$!
+
+	for _ in $(seq 1 100); do
+		[ -S "$QEMU_SOCK" ] && break
+		sleep 0.1
+	done
+	[ -S "$QEMU_SOCK" ] || die "qemu (tag=$tag) never created its serial socket at $QEMU_SOCK"
+
+	# <> (read-write), not plain write-only: opening a fifo write-only
+	# blocks until some *other* process has it open for reading, but socat
+	# (the intended reader) only starts on the next line -- this is the
+	# standard trick to open a fifo without deadlocking against yourself,
+	# and it also keeps the fifo open for the whole session (a fifo's read
+	# end otherwise sees EOF the instant any single write completes).
+	exec {QEMU_FD}<>"$QEMU_FIFO"
+	# "-" (stdio), not the fifo path, as socat's own address: giving it the
+	# fifo path directly as one of its two endpoints makes socat copy the
+	# socket's OUTPUT back into that same fifo too (a fifo is one shared
+	# queue, not two independent lanes) -- confirmed by testing this exact
+	# construct in isolation (see test-iso.sh's own history). Redirecting
+	# stdin from the fifo and stdout to $QEMU_LOG keeps the two directions
+	# properly separate.
+	socat -T"${QEMU_SERIAL_TIMEOUT:-900}" - "UNIX-CONNECT:$QEMU_SOCK" < "$QEMU_FIFO" > "$QEMU_LOG" 2>&1 &
+	QEMU_SOCAT_PID=$!
+}
+
+# qemu_wait_for <marker> [timeout-secs] -> polls $QEMU_LOG for a literal
+# substring. Whatever is on the other end of the serial line (agetty, a
+# shell, florainstall's own log_msg output) can flush a backlog before it's
+# actually at the point this test cares about, so this waits for the
+# marker to actually appear instead of guessing at timing with a sleep.
+qemu_wait_for() {
+	local marker=$1 timeout=${2:-60}
+	local deadline=$(( $(date +%s) + timeout ))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		grep -qF "$marker" "$QEMU_LOG" 2>/dev/null && return 0
+		sleep 0.3
+	done
+	return 1
+}
+
+# qemu_send <raw-bytes> -> writes to the serial line (no implicit newline --
+# callers pass \r themselves, since a real terminal sends carriage return on
+# Enter, which the tty line discipline's ICRNL then turns into \n for
+# whatever's reading on the other end).
+qemu_send() { printf '%s' "$1" >&"$QEMU_FD"; }
+
+# qemu_quit -> shuts the session's QEMU down via its monitor's `quit`
+# command rather than SIGTERM/SIGKILL, so a virtual disk's own write-back
+# cache gets flushed to the backing file cleanly instead of racing a signal
+# against in-flight writes -- this matters here specifically because
+# test-install.sh reuses the same disk image across several qemu_boot_serial
+# sessions (install, then boot, then backup/restore).
+qemu_quit() {
+	for _ in $(seq 1 50); do
+		[ -S "$QEMU_MON_SOCK" ] && break
+		sleep 0.1
+	done
+	if [ -S "$QEMU_MON_SOCK" ]; then
+		printf 'quit\n' | socat - "UNIX-CONNECT:$QEMU_MON_SOCK" >/dev/null 2>&1 || true
+	fi
+	wait "$QEMU_PID" 2>/dev/null || true
+	exec {QEMU_FD}>&- 2>/dev/null || true
+	kill "$QEMU_SOCAT_PID" 2>/dev/null || true
+	rm -f "$QEMU_SOCK" "$QEMU_FIFO" "$QEMU_MON_SOCK"
+}
