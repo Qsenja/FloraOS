@@ -390,7 +390,16 @@ done:
 
 /* Freeform text entry in a small centered box. Leaves `buf` untouched (and
  * returns 0) if the user backs out with ESC before typing anything;
- * otherwise writes the typed line (possibly empty) and returns 1. */
+ * otherwise writes the typed line (possibly empty) and returns 1.
+ *
+ * Hand-rolled character loop rather than mvwgetnstr(): that function has no
+ * notion of "cancel" at all, so despite the "ESC=cancel" hint printed below,
+ * ESC used to just be handed to it as a plain data byte -- and because this
+ * window has keypad(TRUE) set (needed for backspace), ncurses would first
+ * hold it for the ESCDELAY timeout (~1s) waiting to see if it was the start
+ * of a function-key sequence, then insert byte 0x1b into the buffer. Reading
+ * input a key at a time here lets ESC actually abort immediately, the same
+ * way run_choice_menu()'s own loop already handles it. */
 static int prompt_text(const char *title, const char *prompt, char *buf, size_t bufsz) {
 	int rows, cols;
 	getmaxyx(stdscr, rows, cols);
@@ -404,17 +413,36 @@ static int prompt_text(const char *title, const char *prompt, char *buf, size_t 
 	wrefresh(win);
 
 	curs_set(1);
-	echo();
 	char tmp[256];
 	memset(tmp, 0, sizeof(tmp));
-	mvwgetnstr(win, 4, 2, tmp, (int)(bufsz - 1 < sizeof(tmp) - 1 ? bufsz - 1 : sizeof(tmp) - 1));
-	noecho();
+	size_t len = 0;
+	size_t maxlen = bufsz - 1 < sizeof(tmp) - 1 ? bufsz - 1 : sizeof(tmp) - 1;
+	int field_width = width - 4;
+	int cancelled = 0;
+
+	for (;;) {
+		mvwprintw(win, 4, 2, "%-*.*s", field_width, field_width, tmp);
+		wmove(win, 4, 2 + (int)len);
+		wrefresh(win);
+		int ch = wgetch(win);
+		if (ch == 27) { cancelled = 1; break; }
+		if (ch == '\n' || ch == KEY_ENTER) break;
+		if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+			if (len > 0) tmp[--len] = 0;
+			continue;
+		}
+		if (len < maxlen && ch >= 32 && ch < 127) {
+			tmp[len++] = (char)ch;
+			tmp[len] = 0;
+		}
+	}
 	curs_set(0);
 
 	delwin(win);
 	touchwin(stdscr);
 	refresh();
 
+	if (cancelled) return 0;
 	snprintf(buf, bufsz, "%s", tmp);
 	return 1;
 }
