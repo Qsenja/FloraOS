@@ -42,50 +42,101 @@ FAU_ELF_PATCH="${FAU_ELF_PATCH:-fauelf}"
 die() { echo "fau: error: $*" >&2; exit 1; }
 log() { echo "fau: $*" >&2; }
 
+# usage() is the short, always-shown overview -- topics (see usage_topic)
+# hold the actual per-command detail, so `fau` with no args or a bad
+# invocation doesn't dump the entire, ever-growing command list every time.
+# `fau help <topic>` / `fau help all` unpack the rest.
 usage() {
 	cat <<'EOF'
 usage: fau <command> [args]
+       fau help [topic]        this command's own commands, in full
 
-commands:
-  install <pkg> [pkg ...]   install package(s) into FAU_APPS_DIR/<name>/, isolated
-  remove <pkg> [pkg ...]    remove package(s) and their PATH wrappers
-  list                      list installed packages and versions
-
-  repo-add <archive>        add a built .fau.tar.zst to the local repo and index it
-  repo-index                rebuild repo.json from the archives present in the repo dir
-
-  export [file]             bundle every installed app's config/ files plus a
-                              full system.json (base packages + apps + config
-                              file list) into file (default: system.flora)
-  import [file]             reinstall any missing app named in file's manifest,
-                              then restore every config file it lists back into
-                              place under FAU_APPS_DIR (default: system.flora)
-
-  backup <name>             snapshot / (read-only, btrfs) under @snapshots/<name>
-                              and add a GRUB menu entry for it -- real disk
-                              installs only (see florainstall)
-  backup-list               list existing backups, newest first
-  backup-remove <name>      delete a backup and its GRUB menu entry
-  backup-restore <name>     promote a backup to be the new / (the current root
-                              is kept, renamed @pre-restore-<name>-<timestamp>);
-                              reboot afterward to actually boot into it
-
-build-time only (used by scripts/build-rootfs.sh, not meant for end users):
-  bootstrap <pkg> [pkg ...] install system package(s) into FAU_ROOT, with dependencies
-  bootstrap-remove <pkg> [pkg ...]
-                            remove system package(s): files and system.json entry
-                              (no dependency check; files still owned by another
-                              installed package are left in place)
-  bootstrap-list            list installed system packages and versions
-  bootstrap-export [file]   write system.json to file (default: stdout)
-  bootstrap-apply [file]    install the exact system package set recorded in file
-                              (default: system.json in the current directory)
+topics: install, repo, export, backup, service, bootstrap
+        (or `fau help all` for every topic at once)
 
 environment:
   FAU_ROOT        target root for bootstrap package(s) (default: /)
   FAU_REPO_DIR    directory holding .fau.tar.zst archives + repo.json (default: /etc/fau/repo)
   FAU_APPS_DIR    directory for isolated user apps (default: $HOME/apps)
 EOF
+}
+
+usage_topic() {
+	local topic=$1
+	case "$topic" in
+		install|pkg|package|packages|packagemanager)
+			cat <<'EOF'
+install <pkg> [pkg ...]   install package(s) into FAU_APPS_DIR/<name>/, isolated
+remove <pkg> [pkg ...]    remove package(s) and their PATH wrappers
+list                      list installed packages and versions
+EOF
+			;;
+		repo)
+			cat <<'EOF'
+repo-add <archive>        add a built .fau.tar.zst to the local repo and index it
+repo-index                rebuild repo.json from the archives present in the repo dir
+EOF
+			;;
+		export|import)
+			cat <<'EOF'
+export [file]             bundle every installed app's config/ files plus a
+                            full system.json (base packages + apps + config
+                            file list) into file (default: system.flora)
+import [file]             reinstall any missing app named in file's manifest,
+                            then restore every config file it lists back into
+                            place under FAU_APPS_DIR (default: system.flora)
+EOF
+			;;
+		backup)
+			cat <<'EOF'
+backup <name>             snapshot / (read-only, btrfs) under @snapshots/<name>
+                            and add a GRUB menu entry for it -- real disk
+                            installs only (see florainstall)
+backup-list               list existing backups, newest first
+backup-remove <name>      delete a backup and its GRUB menu entry
+backup-restore <name>     promote a backup to be the new / (the current root
+                            is kept, renamed @pre-restore-<name>-<timestamp>);
+                            reboot afterward to actually boot into it
+EOF
+			;;
+		service)
+			cat <<'EOF'
+service-list              list OpenRC services: state (started/stopped/
+                            failed/inactive) and enabled runlevel(s)
+service-status <name>     state and enabled runlevel(s) for one service
+service-enable <name> [runlevel]   enable at boot (default runlevel: default)
+service-disable <name> [runlevel]  disable (default runlevel: default)
+service-start <name>      start now
+service-stop <name>       stop now
+service-restart <name>    restart now
+EOF
+			;;
+		bootstrap)
+			cat <<'EOF'
+build-time only (used by scripts/build-rootfs.sh, not meant for end users):
+bootstrap <pkg> [pkg ...] install system package(s) into FAU_ROOT, with dependencies
+bootstrap-remove <pkg> [pkg ...]
+                          remove system package(s): files and system.json entry
+                            (no dependency check; files still owned by another
+                            installed package are left in place)
+bootstrap-list            list installed system packages and versions
+bootstrap-export [file]   write system.json to file (default: stdout)
+bootstrap-apply [file]    install the exact system package set recorded in file
+                            (default: system.json in the current directory)
+EOF
+			;;
+		all)
+			local t
+			for t in install repo export backup service bootstrap; do
+				echo "-- $t --"
+				usage_topic "$t"
+				echo
+			done
+			;;
+		*)
+			die "unknown help topic: $topic (see 'fau help' for the list)"
+			;;
+	esac
 }
 
 json_escape() {
@@ -1823,6 +1874,110 @@ cmd_backup_restore() {
 	log "this session is still running on the OLD root -- reboot to actually boot the restored system"
 }
 
+# --- service: a thin front end over OpenRC (rc-update/rc-service), for a
+# booted system only -- fau's first step from "package manager" toward
+# "system manager" beyond packages/backups (see docs/ARCHITECTURE.md).
+# OpenRC already solves service supervision and dependency ordering
+# correctly; the job here is a friendlier, fau-native front end, not a
+# reimplementation of any of that. Static facts (does a service exist,
+# which runlevel(s) is it enabled in) are read straight off the filesystem
+# -- /etc/init.d and /etc/runlevels -- same "read the real data, don't
+# parse a wrapper's own text output" convention florainstall (/sys/block)
+# and florauser (/etc/passwd) already use, rather than scraping `rc-update
+# show`. Genuinely dynamic runtime state (is a service actually running
+# right now) is read from /run/openrc/{started,failed,inactive}/<name> --
+# confirmed against a real boot (`find /run/openrc -maxdepth 2` in a real
+# QEMU session), not assumed from OpenRC's general reputation. Starting/
+# stopping a service is left to the real `rc-service` -- reimplementing
+# daemon supervision itself is exactly the kind of high-blast-radius PID-1-
+# adjacent work this project decided against (see docs/ARCHITECTURE.md's
+# "System manager" intro).
+
+INIT_D_DIR="/etc/init.d"
+RUNLEVELS_DIR="/etc/runlevels"
+
+service_check_exists() {
+	local name=$1
+	[ -n "$name" ] || die "service name required"
+	[ -x "$INIT_D_DIR/$name" ] || die "no such service: $name (see 'fau service-list')"
+}
+
+# service_runlevels <name> -> every runlevel <name> is enabled in, one per
+# line -- scans /etc/runlevels/*/'s own symlinks directly, not `rc-update
+# show`'s text output.
+service_runlevels() {
+	# Explicit `return 0` at the end: a bash function's implicit return
+	# status is whatever its *last executed command* returned, not "did
+	# this print what it was supposed to" -- the loop's last iteration is
+	# whichever runlevel directory happens to sort last, and its `[ -e
+	# ... ] && basename` test is false for any service not enabled in
+	# THAT particular runlevel. Without this, callers under `set -e`
+	# (cmd_service_list, cmd_service_status) died silently the instant a
+	# service wasn't enabled in the alphabetically-last runlevel checked --
+	# found via an actual boot: `fau service-list` printed nothing at all
+	# and exited 1, even though the loop had already printed real results.
+	local name=$1 rl
+	[ -d "$RUNLEVELS_DIR" ] || return 0
+	for rl in "$RUNLEVELS_DIR"/*/; do
+		[ -e "${rl}${name}" ] && basename "$rl"
+	done
+	return 0
+}
+
+# service_state <name> -> "started", "failed", "inactive", or "stopped" --
+# see this section's own header comment for why these exact paths.
+service_state() {
+	local name=$1
+	if [ -e "/run/openrc/started/$name" ]; then echo started
+	elif [ -e "/run/openrc/failed/$name" ]; then echo failed
+	elif [ -e "/run/openrc/inactive/$name" ]; then echo inactive
+	else echo stopped
+	fi
+}
+
+cmd_service_list() {
+	[ $# -eq 0 ] || die "service-list takes no arguments"
+	[ -d "$INIT_D_DIR" ] || die "no $INIT_D_DIR -- is this a real OpenRC system?"
+	local f name runlevels state
+	for f in "$INIT_D_DIR"/*; do
+		[ -f "$f" ] || continue
+		name=$(basename "$f")
+		[ "$name" = functions.sh ] && continue
+		runlevels=$(service_runlevels "$name" | paste -sd, -)
+		state=$(service_state "$name")
+		printf '%-20s %-9s %s\n' "$name" "$state" "${runlevels:-(none)}"
+	done
+}
+
+cmd_service_status() {
+	[ $# -eq 1 ] || die "usage: fau service-status <name>"
+	service_check_exists "$1"
+	local state; state=$(service_state "$1")
+	local runlevels; runlevels=$(service_runlevels "$1" | paste -sd, -)
+	echo "$1: $state (runlevels: ${runlevels:-none})"
+}
+
+cmd_service_enable() {
+	[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: fau service-enable <name> [runlevel]"
+	local name=$1 runlevel=${2:-default}
+	service_check_exists "$name"
+	[ -d "$RUNLEVELS_DIR/$runlevel" ] || die "no such runlevel: $runlevel"
+	rc-update add "$name" "$runlevel" || die "rc-update add $name $runlevel failed"
+	log "$name enabled in runlevel $runlevel"
+}
+
+cmd_service_disable() {
+	[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: fau service-disable <name> [runlevel]"
+	local name=$1 runlevel=${2:-default}
+	service_check_exists "$name"
+	rc-update del "$name" "$runlevel" || die "rc-update del $name $runlevel failed"
+	log "$name disabled in runlevel $runlevel"
+}
+
+cmd_service_start()   { [ $# -eq 1 ] || die "usage: fau service-start <name>";   service_check_exists "$1"; rc-service "$1" start; }
+cmd_service_stop()    { [ $# -eq 1 ] || die "usage: fau service-stop <name>";    service_check_exists "$1"; rc-service "$1" stop; }
+cmd_service_restart() { [ $# -eq 1 ] || die "usage: fau service-restart <name>"; service_check_exists "$1"; rc-service "$1" restart; }
+
 main() {
 	[ $# -ge 1 ] || { usage; exit 1; }
 	local cmd=$1; shift
@@ -1843,7 +1998,16 @@ main() {
 		backup-list) cmd_backup_list "$@" ;;
 		backup-remove) cmd_backup_remove "$@" ;;
 		backup-restore) cmd_backup_restore "$@" ;;
-		-h|--help|help) usage ;;
+		service-list) cmd_service_list "$@" ;;
+		service-status) cmd_service_status "$@" ;;
+		service-enable) cmd_service_enable "$@" ;;
+		service-disable) cmd_service_disable "$@" ;;
+		service-start) cmd_service_start "$@" ;;
+		service-stop) cmd_service_stop "$@" ;;
+		service-restart) cmd_service_restart "$@" ;;
+		-h|--help|help)
+			if [ $# -ge 1 ]; then usage_topic "$1"; else usage; fi
+			;;
 		*) die "unknown command: $cmd (see --help)" ;;
 	esac
 }

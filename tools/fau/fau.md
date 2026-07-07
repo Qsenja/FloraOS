@@ -205,3 +205,51 @@ read-only when booted into a snapshot (`fau backup-restore`'s own use
 case), so plain `mktemp -d` died with "Read-only file system" there.
 `/dev/shm` is its own tmpfs, mounted by devfs's own init script
 independent of whatever's mounted as `/`.
+
+## `service-*` — a thin front end over OpenRC
+
+`service-list`/`service-status`/`service-enable`/`service-disable`/
+`service-start`/`service-stop`/`service-restart` are fau's first step from
+"package manager" toward "system manager" beyond packages/backups (see
+docs/ARCHITECTURE.md). OpenRC already solves service supervision and
+dependency ordering correctly, so this doesn't reimplement any of that:
+
+- **Static facts** (does a service exist, which runlevel(s) is it enabled
+  in) are read straight off the filesystem — `/etc/init.d` and
+  `/etc/runlevels` — same convention `florainstall` (`/sys/block`) and
+  `florauser` (`/etc/passwd`) already use, rather than scraping
+  `rc-update show`'s text output.
+- **Genuinely dynamic runtime state** (is a service actually running right
+  now) is read from `/run/openrc/{started,failed,inactive}/<name>` —
+  confirmed against a real boot (`find /run/openrc -maxdepth 2` in a real
+  QEMU session), not assumed from OpenRC's general reputation.
+- **Starting/stopping** a service is left to the real `rc-service` —
+  reimplementing daemon supervision itself is exactly the kind of
+  high-blast-radius, PID-1-adjacent work this project decided against.
+
+**A real bug an actual boot caught**: `service_runlevels` (used by both
+`service-list` and `service-status`) used to return nothing at all and
+exit the whole script under `set -e` — `fau service-list` printed zero
+output and exited 1, even though its loop had already computed real
+results. The cause is a classic bash gotcha, not a logic error in the
+loop itself: a function's *implicit* return status is whatever its
+*last executed command* returned, not "did this successfully print what
+it was supposed to". The loop's last iteration is whichever runlevel
+directory happens to sort last, and its `[ -e ... ] && basename` test is
+false for any service not enabled in *that particular* runlevel — so the
+function returned 1 for the overwhelmingly common case (a service enabled
+in some runlevel other than the alphabetically-last one, or in none at
+all), and that 1 propagated straight through `set -e`. Fixed with an
+explicit `return 0` after the loop — anywhere a shell function's last
+statement is a conditional inside a loop, its implicit exit status is not
+to be trusted as "did the loop's real work succeed".
+
+## `fau help <topic>` / `fau --help <topic>`
+
+The top-level `usage()` is deliberately short — an ever-growing flat
+command list stops being scannable. `usage_topic <name>` holds the actual
+per-command detail, grouped to match the sections above (`install`,
+`repo`, `export`, `backup`, `service`, `bootstrap`), plus `all` to print
+every topic at once. A few aliases (`pkg`/`package`/`packages`/
+`packagemanager` all map to `install`) exist purely for discoverability —
+someone reaching for `fau help packagemanager` shouldn't hit a dead end.

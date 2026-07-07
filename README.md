@@ -88,8 +88,11 @@ shell to appear on its own). Concretely, right now:
   QEMU/KVM, not just compiled (see `scripts/test-install.sh`).
 - **`fau backup`**: a full-root btrfs snapshot restorable by picking an
   alternate entry at the GRUB menu, `fau backup-restore` to promote one to
-  be the permanent default. Real disk installs only. See "fau, the package
+  be the permanent default. Real disk installs only. See "fau, the system
   manager" below and docs/ARCHITECTURE.md's fau-backup section.
+- **`fau service-*`**: a thin front end over OpenRC (`rc-update`/
+  `rc-service`) — list/enable/disable/start/stop/restart, without
+  reimplementing service supervision itself. See below.
 
 What's explicitly *not* done yet (the live, current list, kept in
 [docs/TODO.md](docs/TODO.md) — not a wishlist, only things that could
@@ -234,4 +237,23 @@ fau backup-restore <name>  # promote a backup to be the new / (reboot to actuall
 Real disk installs only (see `florainstall` above and docs/ARCHITECTURE.md's
 fau-backup section for the subvolume layout) — not available on the live ISO itself.
 
-See `tools/fau/fau --help` for the full command list.
+```
+fau service-list                    # every OpenRC service: state + enabled runlevel(s)
+fau service-status <name>
+fau service-enable <name> [runlevel]   # default runlevel: default
+fau service-disable <name> [runlevel]
+fau service-start <name>
+fau service-stop <name>
+fau service-restart <name>
+```
+
+A thin front end over OpenRC's own `rc-update`/`rc-service` — service
+supervision and dependency ordering stay OpenRC's job, fau just gives it a
+friendlier, fau-native interface. See
+[tools/fau/fau.md](tools/fau/fau.md) for the real bug a boot test caught
+here.
+
+Run `fau help [topic]` (topics: `install`, `repo`, `export`, `backup`,
+`service`, `bootstrap`, or `all`) for the full command list, in detail —
+`fau help`/`fau --help` alone stays a short overview so it doesn't dump
+everything every time.

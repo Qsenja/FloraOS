@@ -36,10 +36,11 @@ Two explicit constraints ruled out the obvious options:
 
 So FloraOS ships **fau**, a small system manager written from scratch
 (`tools/fau/`). "System manager", not just "package manager": package
-install/remove (below) and `fau backup`'s full-root snapshot/restore (see
-its own section further down) are the two pieces that exist today, but the
-intent is for fau to grow into managing the whole running system --
-services, configuration, backups -- not stop at package installation. Package
+install/remove (below), `fau backup`'s full-root snapshot/restore (see its
+own section further down), and `fau service-*`'s OpenRC front end (see
+its own section further down too) are what exist today, but the intent is
+for fau to keep growing into managing the whole running system --
+configuration, more of the daily admin surface -- not stop here. Package
 management specifically:
 - Package format: a plain tarball (`.fau.tar.zst`) containing the payload
   under `files/` plus a `pkginfo` metadata file (name, version, one-line
@@ -542,3 +543,35 @@ build path that would've required compiling 16-bit real-mode boot code.
   before exec'ing floralogin, which execs the login shell -- confirmed
   gone from a real boot's transcript, not inferred from the inittab change
   alone.
+- DONE: `fau service-*` -- the first step from "package manager" toward
+  "system manager" beyond packages/backups (see this file's own intro to
+  the fau section). A thin front end over OpenRC (`rc-update`/
+  `rc-service`), not a reimplementation of service supervision or
+  dependency ordering -- that's exactly the kind of high-blast-radius,
+  PID-1-adjacent work a "write our own init system" idea was explicitly
+  weighed against and rejected for. Static facts (does a service exist,
+  which runlevel(s) is it enabled in) are read straight off the
+  filesystem (`/etc/init.d`, `/etc/runlevels`), same "read the real data,
+  don't parse a wrapper's own text output" convention florainstall
+  (`/sys/block`) and florauser (`/etc/passwd`) already use, rather than
+  scraping `rc-update show`. Genuinely dynamic runtime state (is a
+  service actually running right now) is read from
+  `/run/openrc/{started,failed,inactive}/<name>` -- confirmed against a
+  real boot (`find /run/openrc -maxdepth 2` in a real QEMU session), not
+  assumed from OpenRC's general reputation. `service-start`/`-stop`/
+  `-restart` just exec the real `rc-service`. Found and fixed a real bug
+  via that same real boot: `service_runlevels` (backing both
+  `service-list` and `service-status`) returned nothing and killed the
+  whole script under `set -e` for the overwhelmingly common case (a
+  service enabled in any runlevel other than whichever sorts
+  alphabetically last, or in none at all) -- a bash function's implicit
+  return status is whatever its *last executed command* returned, and the
+  loop's last iteration's `[ -e ... ] && basename` test is false unless
+  the service happens to be enabled in that one particular runlevel.
+  Fixed with an explicit `return 0` after the loop. See
+  [tools/fau/fau.md](../tools/fau/fau.md) for the full writeup. Also added
+  `fau help <topic>`/`fau --help <topic>` (e.g. `fau help service`, `fau
+  help packagemanager`) so the top-level `fau help`/`fau --help` stays a
+  short, scannable overview instead of dumping the entire, ever-growing
+  command list every time -- verified against a real boot, including the
+  unknown-topic error path.
