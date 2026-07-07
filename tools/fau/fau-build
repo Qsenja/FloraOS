@@ -40,25 +40,56 @@ cmd_build() {
 	mkdir -p "$app_dir" "$app_dir/config" "$app_dir/cache" "$app_dir/data" "$app_dir/logs"
 
 	local -a depends=(); while IFS= read -r d; do depends+=("$d"); done < <(csv_words "$PKG_DEPENDS")
-	if [ "${#depends[@]}" -gt 0 ]; then
-		log "$name: merging ${#depends[@]} runtime dependenc(y/ies) into $app_dir"
-		build_merge_depends "$app_dir" "${depends[@]}"
-	fi
+	local -a build_depends=(); while IFS= read -r d; do build_depends+=("$d"); done < <(csv_words "$PKG_BUILD_DEPS")
 
 	# Deliberately NOT `local` -- the EXIT trap can fire after this function returns (see fau.md).
 	sandbox_dir=$(mktemp -d)
 	trap 'rm -rf "$sandbox_dir"' EXIT
 
-	local -a build_depends=(); while IFS= read -r d; do build_depends+=("$d"); done < <(csv_words "$PKG_BUILD_DEPS")
+	# Merging runtime deps into $app_dir, fetching build-only deps into
+	# $sandbox_dir, and fetching the recipe's own source are three
+	# completely independent operations (different targets, no shared
+	# state) -- run them concurrently instead of one after another. Each's
+	# own output goes to its own log (interleaving multiple \r-redrawn
+	# progress bars directly on the terminal would be unreadable), replayed
+	# in full, in order, once all three finish. A background job's exit
+	# doesn't fire the EXIT trap set above -- confirmed directly (bash
+	# resets trap dispositions for async subshells) -- so this is safe
+	# even though the trap is already armed by the time these start.
+	local deps_log build_deps_log src_log src_result
+	deps_log=$(mktemp); build_deps_log=$(mktemp); src_log=$(mktemp); src_result=$(mktemp)
+
+	local deps_pid="" build_deps_pid=""
+	if [ "${#depends[@]}" -gt 0 ]; then
+		log "$name: merging ${#depends[@]} runtime dependenc(y/ies) into $app_dir"
+		build_merge_depends "$app_dir" "${depends[@]}" > "$deps_log" 2>&1 &
+		deps_pid=$!
+	fi
 	if [ "${#build_depends[@]}" -gt 0 ]; then
 		log "$name: fetching ${#build_depends[@]} build-only dependenc(y/ies) into a throwaway sandbox"
-		alpm_sandbox_fetch "$sandbox_dir" "${build_depends[@]}"
+		alpm_sandbox_fetch "$sandbox_dir" "${build_depends[@]}" > "$build_deps_log" 2>&1 &
+		build_deps_pid=$!
 	fi
-
 	log "$name: fetching source ($PKG_SRC_URL)"
-	local tarball src
-	tarball=$(build_fetch_source "$PKG_SRC_URL" "$PKG_SRC_SHA256")
-	src=$(build_extract_source "$name" "$tarball")
+	( build_fetch_source "$PKG_SRC_URL" "$PKG_SRC_SHA256" > "$src_result" ) > "$src_log" 2>&1 &
+	local src_pid=$!
+
+	local deps_status=0 build_deps_status=0 src_status=0
+	[ -n "$deps_pid" ] && { wait "$deps_pid" || deps_status=$?; }
+	[ -n "$build_deps_pid" ] && { wait "$build_deps_pid" || build_deps_status=$?; }
+	wait "$src_pid" || src_status=$?
+
+	[ -s "$deps_log" ] && cat "$deps_log" >&2
+	[ -s "$build_deps_log" ] && cat "$build_deps_log" >&2
+	[ -s "$src_log" ] && cat "$src_log" >&2
+	local tarball; tarball=$(cat "$src_result")
+	rm -f "$deps_log" "$build_deps_log" "$src_log" "$src_result"
+
+	[ "$deps_status" -eq 0 ] || die "$name: merging runtime dependencies failed (see log above)"
+	[ "$build_deps_status" -eq 0 ] || die "$name: fetching build-only dependencies failed (see log above)"
+	[ "$src_status" -eq 0 ] || die "$name: fetching source failed (see log above)"
+
+	local src; src=$(build_extract_source "$name" "$tarball")
 
 	log "$name: building $PKG_VERSION (sandbox: $sandbox_dir)"
 	PATH="$sandbox_dir/usr/bin:$PATH" \
