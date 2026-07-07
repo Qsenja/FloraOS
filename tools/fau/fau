@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# fau — FloraOS's package manager.
+# fau — FloraOS's system manager. Package install/remove and `fau backup`'s
+# full-root snapshot/restore are what exist today; the intent is for fau to
+# keep growing into managing the rest of the running system, not stay
+# scoped to packages alone.
 # Package format: <name>-<version>.fau.tar.zst, containing:
 #   pkginfo   key=value metadata (name, version, description, depends, bin)
 #   files/    payload

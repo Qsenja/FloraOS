@@ -26,7 +26,7 @@ Picked over "latest stable" because a from-scratch distro with a small
 maintenance team benefits more from a long support window and fewer breaking
 changes to track than from bleeding-edge features/hardware support.
 
-## Package manager: fau (custom, from scratch)
+## System manager: fau (custom, from scratch)
 
 Two explicit constraints ruled out the obvious options:
 - Mirroring an existing binary repo (Arch/Artix) would make FloraOS
@@ -34,8 +34,13 @@ Two explicit constraints ruled out the obvious options:
 - Forking pacman would mean vendoring a third party's codebase into the
   project, which was also explicitly rejected.
 
-So FloraOS ships **fau**, a small package manager written from scratch
-(`tools/fau/`):
+So FloraOS ships **fau**, a small system manager written from scratch
+(`tools/fau/`). "System manager", not just "package manager": package
+install/remove (below) and `fau backup`'s full-root snapshot/restore (see
+its own section further down) are the two pieces that exist today, but the
+intent is for fau to grow into managing the whole running system --
+services, configuration, backups -- not stop at package installation. Package
+management specifically:
 - Package format: a plain tarball (`.fau.tar.zst`) containing the payload
   under `files/` plus a `pkginfo` metadata file (name, version, one-line
   description, dependency list).

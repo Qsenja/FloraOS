@@ -4,7 +4,9 @@ A minimal, from-scratch Linux distribution. No systemd, no upstream binary
 repo dependency (not Arch/Artix-based) — every package is compiled from its
 pinned upstream source (see `config/versions.conf`). OpenRC + sysvinit for
 init, GNU userland (bash/coreutils/util-linux), and `fau`, FloraOS's own
-package manager, written from scratch rather than forked from an existing one.
+system manager (package install/remove today, growing into the rest of the
+running system — services, config, backups), written from scratch rather
+than forked from an existing one.
 
 What makes FloraOS different: user-installed apps via `fau install` live
 entirely under `~/apps/<name>/` — binary, config, cache, logs, all in one
@@ -158,7 +160,7 @@ docs/FILESYSTEM_LAYOUT.md
 docs/ARCHITECTURE.md    # design decisions, why, and the full DONE/TODO history
 docs/TODO.md            # the current, live, open TODO list
 assets/                 # fastfetch logo + config shipped into the rootfs
-tools/fau/               # FloraOS's package manager
+tools/fau/               # FloraOS's system manager
 tools/floralogin/        # FloraOS's own PAM-free login (see docs/ARCHITECTURE.md)
 tools/floraseat/         # FloraOS's own seatd-protocol-compatible seat daemon
 tools/florauser/         # FloraOS's own useradd/passwd/groupadd equivalent
@@ -170,7 +172,11 @@ scripts/test-install.sh # real QEMU/KVM boot test: florainstall + fau backup end
 work/                   # build output (gitignored) -- sources, staged builds, rootfs, fau repo
 ```
 
-## fau, the package manager
+## fau, the system manager
+
+Package install/remove and `fau backup`'s full-root snapshot/restore are
+what exist today; the intent is for fau to keep growing into managing the
+rest of the running system, not stay scoped to packages alone.
 
 ```
 fau install <pkg>          # user app -> isolated under ~/apps/<pkg>/
