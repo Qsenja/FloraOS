@@ -14,6 +14,7 @@
 # Real implementations, one executable per area, in this same directory:
 #   fau-bootstrap   build-time only: merges packages straight into FAU_ROOT
 #   fau-install     user-facing: install/remove/list isolated apps
+#   fau-build       builds a package from source on this system, on demand
 #   fau-repo        fau's own local package repo (repo-add/repo-index)
 #   fau-export      export/import (system.json + app configs bundle)
 #   fau-backup      full-root btrfs snapshot/restore
@@ -54,13 +55,14 @@ usage() {
 usage: fau <command> [args]
        fau help [topic]        this command's own commands, in full
 
-topics: install, repo, export, backup, service, seat, user, bootstrap
+topics: install, build, repo, export, backup, service, seat, user, bootstrap
         (or `fau help all` for every topic at once)
 
 environment:
   FAU_ROOT        target root for bootstrap package(s) (default: /)
   FAU_REPO_DIR    directory holding .fau.tar.zst archives + repo.json (default: /etc/fau/repo)
   FAU_APPS_DIR    directory for isolated user apps (default: $HOME/apps)
+  FAU_RECIPES_DIR directory of `fau build` recipes (default: /usr/lib/fau/recipes)
 EOF
 }
 
@@ -72,6 +74,23 @@ usage_topic() {
 install <pkg> [pkg ...]   install package(s) into FAU_APPS_DIR/<name>/, isolated
 remove <pkg> [pkg ...]    remove package(s) and their PATH wrappers
 list                      list installed packages and versions
+EOF
+			;;
+		build)
+			cat <<'EOF'
+build <name>              build a package from source on this system, on demand,
+                            from a recipe shipped at FAU_RECIPES_DIR/<name>.sh --
+                            fetches whatever build-only tools that recipe needs
+                            (a compiler, meson, ninja, ...) into a throwaway
+                            sandbox, builds, installs into FAU_APPS_DIR/<name>/
+                            like 'fau install' does, then wipes the sandbox --
+                            this system never keeps a compiler around just
+                            because it built one thing once. Heavier than a
+                            normal install (can take minutes); 'fau install'
+                            only ever hints at this, never falls back to it
+                            automatically. 'fau remove <name>' works on a built
+                            package exactly like any other installed app.
+build-list                 list every recipe available at FAU_RECIPES_DIR
 EOF
 			;;
 		repo)
@@ -161,7 +180,7 @@ EOF
 			;;
 		all)
 			local t
-			for t in install repo export backup service seat user bootstrap; do
+			for t in install build repo export backup service seat user bootstrap; do
 				echo "-- $t --"
 				usage_topic "$t"
 				echo
@@ -185,6 +204,8 @@ dispatch() {
 	case "$cmd" in
 		install|remove|list)
 			exec "$SELF_DIR/fau-install" "$cmd" "$@" ;;
+		build|build-list)
+			exec "$SELF_DIR/fau-build" "$cmd" "$@" ;;
 		repo-add|repo-index)
 			exec "$SELF_DIR/fau-repo" "$cmd" "$@" ;;
 		export|import)

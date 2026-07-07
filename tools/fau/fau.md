@@ -83,6 +83,87 @@ paths' bookkeeping (apps.json + `FAU_APPS_BIN_DIR` wrappers vs. system.json
 + `FAU_FILES_DIR`) diverges enough that a single parameterized function
 would need more branching than just having two.
 
+Both of those only ever move *already-built* files around (a local
+`.fau.tar.zst` or a precompiled alpm binary) — see `build <name>`
+(`fau-build`) just below for the third mode: compiling something from
+source, on this same live system, on demand.
+
+## `build <name>` (`fau-build`) — compiling from source, on demand, with a disposable sandbox
+
+Closes a real gap the two install modes above don't cover: a package with
+no precompiled binary anywhere (`mangowm`, AUR-only — no official
+Arch/Artix repo carries it, so the alpm fallback can never resolve it no
+matter the exact name) has no path into this project short of someone
+rebuilding it by hand on a separate machine. `fau-build` builds it right
+here instead, from a recipe shipped inside the image at `FAU_RECIPES_DIR`
+(default `/usr/lib/fau/recipes/*.fis`) — a completely separate thing from
+`scripts/recipes/*.sh`, which stays exactly as it was: base-rootfs
+packages, built once on a separate dev/build host, never touched by fau at
+runtime. ".fis" ("fau install script") is just a distinct extension so the
+two are never confused for each other — plain bash either way, no special
+syntax of its own.
+
+A recipe here declares two independent dependency lists, not one, because
+they have genuinely different lifetimes:
+
+- `PKG_DEPENDS` — real runtime shared-library/CLI dependencies. Resolved
+  via alpm and merged **straight into the built app's own directory**
+  (`build_merge_depends`, `lib/build.sh`) — deliberately *not* installed the
+  way `fau-install`'s own `depends=` works (each dependency in its own
+  separate `FAU_APPS_DIR/<dep>/`). Tracing that path down while designing
+  this surfaced a real, pre-existing bug: a wrapper script's
+  `LD_LIBRARY_PATH` (`app_wrapper_write`, `lib/common.sh`) only ever covers
+  its *own* app's directory, so a real `.so` dependency installed as a
+  separate app is never found at runtime. Merging the whole resolved
+  closure into the same directory as the binary that needs it is the
+  actual fix — `fau-install`'s own `depends=` mechanism still has this bug
+  today; it just hasn't been hit yet because nothing installed through it
+  so far has had a real shared-library dependency beyond glibc.
+- `PKG_BUILD_DEPS` — build-only tools (a compiler, `meson`, `ninja`, ...).
+  Resolved via alpm into a throwaway sandbox directory, **with dev headers
+  kept** (`alpm_sandbox_fetch`, `lib/alpm.sh` — every other alpm-fetching
+  path in this project strips `usr/include` unconditionally, confirmed no
+  existing bypass), `PATH`/`LD_LIBRARY_PATH`/`PKG_CONFIG_PATH` pointed at it
+  for the build, then removed unconditionally once the build finishes or
+  fails (a `trap ... EXIT` in `fau-build`'s own `cmd_build`) — this system
+  never permanently carries a compiler just because it built one thing
+  once.
+
+**A real, non-obvious wrinkle found while building the first recipe
+(`mangowm`) this way**: `meson` is a Python script with a hardcoded
+`#!/usr/bin/python` shebang, not `#!/usr/bin/env python`. FloraOS ships no
+Python at all, and a shebang bypasses `PATH` entirely — so a plain
+relocated copy of `meson` in the sandbox would try (and fail) to exec the
+*real* system's Python, which doesn't exist. `alpm_sandbox_fetch` rewrites
+any absolute-interpreter shebang it finds to point at that same sandbox's
+own relocated copy instead (a `#!/usr/bin/env foo` shebang needs no fix —
+`env` already resolves `foo` via the sandbox-prefixed `PATH`). Verified for
+real, not just reasoned about: extracted `meson`+`python` this way, used
+`bwrap` to mask the real system's own Python out entirely (without
+touching this actual build host), and a trivial C project still
+configured/built/ran correctly through the rewritten, fully relocated
+copy. Plain ELF build tools (`ninja`, `gcc`, `glslang`) need no such fix —
+their own `PT_INTERP` (`/lib64/ld-linux-x86-64.so.2`) is the same
+ABI-by-coincidence bet every alpm-fetched binary in this project already
+makes, not a new risk.
+
+`fau install <name>` does **not** automatically fall back to this on a
+resolve failure — it only hints at `'fau build <name>'` in its own error
+message. Building is much heavier (fetches a whole compiler, can take
+minutes); a typo in a package name shouldn't silently trigger that.
+`fau remove <name>` needs no code of its own here — a built app is a
+completely ordinary isolated app once `fau-build` finishes (same
+`.pkginfo`/app-directory/`.fau-apps.json` shape `fau-install` itself
+produces), so its existing `cmd_remove` already handles it.
+
+Disclosed, not solved: a live (un-installed, RAM-only) boot has no
+persistent disk, so compiling something sizeable could exhaust RAM — same
+accepted-but-undetected risk class as the alpm fallback's own documented
+disk-space caveats below, no live-vs-installed detection added. Also,
+`PKG_BUILD_DEPS` is never cached between separate `fau build` runs — every
+one re-fetches its own compiler/build tools from scratch, the direct,
+intended cost of "wiped every time," not an oversight.
+
 ## Manifests (`system.json` / `apps.json`) — `lib/manifest.sh`
 
 Flat schema only: `{"packages":{"name":{"version":"x"}}}`, hand-rolled

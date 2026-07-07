@@ -26,10 +26,10 @@ FAU_APPS_JSON="${FAU_APPS_DIR}/.fau-apps.json"
 
 # Recipes fau-build compiles from source directly on a live system (see
 # lib/build.sh/fau-build) -- shipped inside the image at this fixed path by
-# build-rootfs.sh (its own recipes/ dir, scripts/recipes/*.sh, is a
-# completely separate, build-host-only thing: base-rootfs packages built
-# once ahead of time, never touched by fau at runtime). Overridable the
-# same way FAU_REPO_DIR/FAU_APPS_DIR are, for testing against a scratch
+# build-rootfs.sh as *.fis files (its own recipes/ dir, scripts/recipes/*.sh,
+# is a completely separate, build-host-only thing: base-rootfs packages
+# built once ahead of time, never touched by fau at runtime). Overridable
+# the same way FAU_REPO_DIR/FAU_APPS_DIR are, for testing against a scratch
 # recipes dir without needing a real installed image.
 FAU_RECIPES_DIR="${FAU_RECIPES_DIR:-/usr/lib/fau/recipes}"
 

@@ -38,7 +38,7 @@ app_install_one() {
 			app_install_one_alpm "$name"
 			return
 		fi
-		die "package not found in repo: $name (and no pacman mirrorlist/repo-list available to fall back to)"
+		die "package not found in repo: $name (and no pacman mirrorlist/repo-list available to fall back to) -- if a recipe exists, try 'fau build $name'"
 	fi
 
 	local existing; existing=$(json_get_version "$FAU_APPS_JSON" "$name")

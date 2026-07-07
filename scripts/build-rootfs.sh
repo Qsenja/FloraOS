@@ -113,11 +113,12 @@ build_package() {
 	# Reset before each recipe, not just left to whatever the previous
 	# iteration's recipe did or didn't set: PKG_BIN is optional (only a
 	# recipe meant for fau-install's isolated app path sets it, see
-	# package_stage's own comment) and this function runs in one long-lived
-	# loop over BUILD_ORDER, so without this a package after mangowm in the
-	# same run would silently inherit mangowm's own PKG_BIN instead of
-	# having none -- PKG_DESCRIPTION/PKG_DEPENDS don't need this since
-	# every recipe unconditionally sets both already.
+	# package_stage's own comment -- no scripts/recipes/*.sh currently does,
+	# but the mechanism stays here for whichever future one does) and this
+	# function runs in one long-lived loop over BUILD_ORDER, so without this
+	# a package after one that *did* set PKG_BIN would silently inherit it
+	# instead of having none -- PKG_DESCRIPTION/PKG_DEPENDS don't need this
+	# since every recipe unconditionally sets both already.
 	PKG_BIN=""
 	# shellcheck source=/dev/null
 	source "$SELF_DIR/recipes/$name.sh"
@@ -176,14 +177,30 @@ main() {
 	# /usr/bin/fau itself is a symlink into it, the one entry point PATH
 	# actually needs. Excludes fau.md (design-notes doc, not part of the
 	# running tool) and lib/*.md if any -- only what's actually executed or
-	# sourced ships.
-	mkdir -p "$ROOTFS_DIR/usr/lib/fau/lib"
+	# sourced ships. The fau-*/fau glob below already picks up fau-build
+	# with no changes needed here.
+	#
+	# tools/fau/recipes/*.fis (fau-build's own recipes, FAU_RECIPES_DIR --
+	# see lib/common.sh) are a completely separate thing from this
+	# directory's own scripts/recipes/*.sh just above: base-rootfs packages
+	# built once, right here, on this build host, never touched by fau at
+	# runtime, vs. recipes fau-build compiles from source directly on an
+	# already-booted live system, on demand. The distinct ".fis" ("fau
+	# install script") extension exists specifically so the two are never
+	# confused for each other at a glance -- it's still plain bash, no
+	# special syntax, same as this directory's own *.sh recipes.
+	mkdir -p "$ROOTFS_DIR/usr/lib/fau/lib" "$ROOTFS_DIR/usr/lib/fau/recipes"
 	for f in "$FAU_TOOLS_DIR"/fau "$FAU_TOOLS_DIR"/fau-*; do
 		[ -f "$f" ] || continue
 		cp "$f" "$ROOTFS_DIR/usr/lib/fau/"
 		chmod 755 "$ROOTFS_DIR/usr/lib/fau/$(basename "$f")"
 	done
 	cp "$FAU_TOOLS_DIR"/lib/*.sh "$ROOTFS_DIR/usr/lib/fau/lib/"
+	shopt -s nullglob
+	for f in "$FAU_TOOLS_DIR"/recipes/*.fis; do
+		cp "$f" "$ROOTFS_DIR/usr/lib/fau/recipes/"
+	done
+	shopt -u nullglob
 	ln -s ../lib/fau/fau "$ROOTFS_DIR/usr/bin/fau"
 
 	# floragrub-cfg (tools/floragrub-cfg): same reasoning as fau just above --

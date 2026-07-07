@@ -734,7 +734,7 @@ install_one_alpm() {
 app_install_one_alpm() {
 	local name=$1
 	local resolved; resolved=$(alpm_resolve "$name") \
-		|| die "couldn't resolve '$name' in any configured Arch/Artix repo"
+		|| die "couldn't resolve '$name' in any configured Arch/Artix repo -- if a recipe exists, try 'fau build $name'"
 
 	# See install_one_alpm's own comment on why these get parsed into
 	# indexed arrays up front instead of streamed through one `while read`.
@@ -966,6 +966,37 @@ alpm_sandbox_fetch() {
 		# would bypass that the same way it would for an app.
 		while IFS= read -r -d '' f; do
 			"$FAU_ELF_PATCH" "$f" || die "fauelf failed patching $f"
+		done < <(find "$extract_dir" -type f -print0)
+		# Some build tools are interpreted scripts with an absolute
+		# interpreter path baked into their own shebang at build time --
+		# meson's real Arch package ships literally "#!/usr/bin/python",
+		# not "#!/usr/bin/env python". A "#!/usr/bin/env foo" shebang
+		# needs no fix (env itself resolves "foo" via PATH, already
+		# pointed at this sandbox by the caller), but a direct absolute
+		# path bypasses PATH entirely and would try to exec the *real*
+		# system's copy -- which doesn't exist at all on FloraOS (no
+		# Python ships anywhere, see fau-build's own header comment).
+		# Rewriting every such shebang to be <dest>-prefixed instead
+		# fixes this regardless of which order this loop happens to
+		# process packages in: the interpreter (e.g. python, also part
+		# of meson's own resolved closure) is guaranteed to land
+		# somewhere under <dest> by the time this whole function
+		# returns, even if not yet at the exact moment this specific
+		# package's shebang gets rewritten. Verified for real: extracted
+		# meson+python this way, masked the real system's own python out
+		# entirely (bwrap, so as to not touch this actual build host),
+		# and a trivial C project still configured/built/ran correctly
+		# through the rewritten, fully relocated copy.
+		local f shebang interp
+		while IFS= read -r -d '' f; do
+			shebang=$(head -c 256 "$f" 2>/dev/null | head -n1)
+			case "$shebang" in
+				'#!/'*)
+					interp=${shebang#\#!}
+					interp=${interp%% *}
+					sed -i "1s|^#!${interp}|#!${dest}${interp}|" "$f"
+					;;
+			esac
 		done < <(find "$extract_dir" -type f -print0)
 		cp -a "$extract_dir/." "$dest"
 		rm -rf "$extract_dir"
