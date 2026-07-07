@@ -38,6 +38,12 @@
  *   florauser addtogroup <user> <group>
  *     Appends <user> to an existing group's member list (no-op if
  *     already a member).
+ *   florauser rename <old-name> <new-name>
+ *     Renames a user across /etc/passwd, /etc/shadow, and /etc/group (its
+ *     own user-private group, plus every group's member list), and its
+ *     home directory if it follows the standard /home/<name> layout this
+ *     tool's own `add` creates. Refuses to rename root. See cmd_rename's
+ *     own comment for the exact ordering/failure-mode reasoning.
  *
  * Every lookup (does this user/group already exist? what's their current
  * shadow line?) goes through this file's own PASSWD_PATH/GROUP_PATH/
@@ -480,10 +486,187 @@ static int cmd_add(const char *name, const char *supp_groups) {
 	return 0;
 }
 
+/* Renames a user across /etc/passwd, /etc/shadow, and /etc/group (both its
+ * own user-private group, if one matches, and every group's member list),
+ * plus /home/<old> -> /home/<new> if the home directory follows the
+ * standard layout cmd_add itself creates. Does NOT touch uid/gid, password
+ * hash, or group memberships themselves -- only the name. Refuses to
+ * rename root: too much of the rest of this project (floralogin's
+ * empty-password convention, florainstall's account setup) hardcodes
+ * "root" as a literal string to special-case that renaming it would
+ * silently break elsewhere, not just here.
+ *
+ * Not a single atomic transaction across all three files -- same
+ * disclosed limitation as the rest of this tool (no locking against a
+ * second concurrent invocation, no rollback if interrupted partway
+ * through). Ordered passwd -> shadow -> group specifically so that if
+ * this is interrupted after the passwd rewrite but before shadow/group,
+ * the user's own login identity (passwd) is already consistent; a
+ * dangling old-named shadow/group entry is a survivable, fixable leftover,
+ * whereas the reverse order would leave a user unable to log in at all
+ * under either name. */
+static int cmd_rename(const char *old, const char *new_name) {
+	if (strcmp(old, "root") == 0) { fprintf(stderr, "florauser: refusing to rename root\n"); return 1; }
+	if (!valid_name(new_name)) {
+		fprintf(stderr, "florauser: invalid new username (lowercase, digits, _/- only)\n");
+		return 1;
+	}
+	if (!name_exists_in(PASSWD_PATH, old)) { fprintf(stderr, "florauser: no such user: %s\n", old); return 1; }
+	if (name_exists_in(PASSWD_PATH, new_name)) { fprintf(stderr, "florauser: user %s already exists\n", new_name); return 1; }
+	if (name_exists_in(GROUP_PATH, new_name)) {
+		fprintf(stderr, "florauser: a group named %s already exists (user-private-group scheme needs this name free)\n", new_name);
+		return 1;
+	}
+
+	struct lines lp = read_lines(PASSWD_PATH);
+	int idx = -1;
+	for (size_t i = 0; i < lp.n; i++) if (line_name_matches(lp.v[i], old)) { idx = (int)i; break; }
+	if (idx < 0) { fprintf(stderr, "florauser: %s has no /etc/passwd entry\n", old); lines_free(&lp); return 1; }
+
+	char uid_f[32], gid_f[32], gecos_f[128], home_f[256], shell_f[128];
+	field(lp.v[idx], 2, uid_f, sizeof uid_f);
+	field(lp.v[idx], 3, gid_f, sizeof gid_f);
+	field(lp.v[idx], 4, gecos_f, sizeof gecos_f);
+	field(lp.v[idx], 5, home_f, sizeof home_f);
+	field(lp.v[idx], 6, shell_f, sizeof shell_f);
+
+	/* Rename the home directory before touching any files, so a failed
+	 * directory rename still leaves the old, working home path recorded
+	 * instead of a dangling one -- only attempted if the home dir follows
+	 * cmd_add's own /home/<name> convention; a custom home path is left
+	 * exactly as-is rather than guessed at. */
+	char expected_old_home[300];
+	snprintf(expected_old_home, sizeof expected_old_home, "/home/%s", old);
+	int is_standard_home = strcmp(home_f, expected_old_home) == 0;
+	char final_home[300];
+	snprintf(final_home, sizeof final_home, "%s", home_f);
+
+	if (is_standard_home) {
+		char new_home[300];
+		snprintf(new_home, sizeof new_home, "/home/%s", new_name);
+		struct stat st;
+		if (stat(new_home, &st) == 0) {
+			fprintf(stderr, "florauser: %s already exists -- refusing to overwrite\n", new_home);
+			lines_free(&lp);
+			return 1;
+		}
+		if (rename(home_f, new_home) == 0 || errno == ENOENT) {
+			/* ENOENT: no home directory ever existed to move -- fine,
+			 * just record where it would be, same as cmd_add's own
+			 * best-effort mkdir/chown. */
+			snprintf(final_home, sizeof final_home, "%s", new_home);
+		} else {
+			fprintf(stderr, "florauser: warning: could not rename %s to %s: %s -- keeping the old home path\n",
+				home_f, new_home, strerror(errno));
+		}
+	}
+
+	char newline[MAX_LINE * 2];
+	snprintf(newline, sizeof newline, "%s:x:%s:%s:%s:%s:%s", new_name, uid_f, gid_f, gecos_f, final_home, shell_f);
+	free(lp.v[idx]);
+	lp.v[idx] = strdup(newline);
+	write_lines(PASSWD_PATH, &lp, 0644);
+	lines_free(&lp);
+
+	/* /etc/shadow: rename just the name field, every other field
+	 * (hash, aging) untouched. */
+	{
+		struct lines l = read_lines(SHADOW_PATH);
+		int sidx = -1;
+		for (size_t i = 0; i < l.n; i++) if (line_name_matches(l.v[i], old)) { sidx = (int)i; break; }
+		if (sidx >= 0) {
+			const char *rest = strchr(l.v[sidx], ':'); /* includes the leading ':' */
+			char sline[MAX_LINE];
+			snprintf(sline, sizeof sline, "%s%s", new_name, rest ? rest : "");
+			free(l.v[sidx]);
+			l.v[sidx] = strdup(sline);
+			write_lines(SHADOW_PATH, &l, 0600);
+		}
+		lines_free(&l);
+	}
+
+	/* /etc/group: rename the user-private group (same name AND same gid
+	 * as the user -- cmd_add's own convention, not assumed for every
+	 * group that happens to share the name) if one matches, and replace
+	 * the <old> token with <new_name> in every group's member list
+	 * (supplementary groups joined via addtogroup store the literal
+	 * username there, comma-separated). */
+	{
+		struct lines l = read_lines(GROUP_PATH);
+		for (size_t i = 0; i < l.n; i++) {
+			char gname[64], gpass[64], ggid[32], gmembers[MAX_LINE] = {0};
+			field(l.v[i], 0, gname, sizeof gname);
+			field(l.v[i], 1, gpass, sizeof gpass);
+			field(l.v[i], 2, ggid, sizeof ggid);
+			field(l.v[i], 3, gmembers, sizeof gmembers);
+
+			int renamed_group = strcmp(gname, old) == 0 && strcmp(ggid, gid_f) == 0;
+			const char *use_name = renamed_group ? new_name : gname;
+
+			/* Exact comma-token match, not substring -- same convention
+			 * cmd_addtogroup's own membership check already uses. */
+			char padded[MAX_LINE + 2];
+			snprintf(padded, sizeof padded, ",%s,", gmembers);
+			char needle[64];
+			snprintf(needle, sizeof needle, ",%s,", old);
+			int in_members = strstr(padded, needle) != NULL;
+
+			if (!renamed_group && !in_members) continue;
+
+			char newmembers[MAX_LINE] = {0};
+			if (in_members) {
+				/* A group can already list a member literally named
+				 * <new_name> alongside <old> (an unrelated real user, or
+				 * this same rename re-run) -- renaming <old>'s own token
+				 * without deduplicating would otherwise produce
+				 * "newname,newname". Skip a token that's either <old>
+				 * (renamed away) or already-seen, so the result always
+				 * has each name at most once. */
+				char padded_new[MAX_LINE + 2];
+				snprintf(padded_new, sizeof padded_new, ",%s,", gmembers);
+				char needle_new[64];
+				snprintf(needle_new, sizeof needle_new, ",%s,", new_name);
+				int new_name_already_member = strstr(padded_new, needle_new) != NULL;
+
+				char *copy = strdup(gmembers);
+				char *save = NULL;
+				int first = 1, wrote_new_name = 0;
+				for (char *m = strtok_r(copy, ",", &save); m; m = strtok_r(NULL, ",", &save)) {
+					int is_old = strcmp(m, old) == 0;
+					const char *out_tok = is_old ? new_name : m;
+					if (is_old && new_name_already_member) continue; /* already covered by <new_name>'s own token below */
+					if (strcmp(out_tok, new_name) == 0) {
+						if (wrote_new_name) continue;
+						wrote_new_name = 1;
+					}
+					size_t len = strlen(newmembers);
+					snprintf(newmembers + len, sizeof newmembers - len, "%s%s", first ? "" : ",", out_tok);
+					first = 0;
+				}
+				free(copy);
+			} else {
+				snprintf(newmembers, sizeof newmembers, "%s", gmembers);
+			}
+
+			char newline2[MAX_LINE * 2];
+			snprintf(newline2, sizeof newline2, "%s:%s:%s:%s", use_name, gpass, ggid, newmembers);
+			free(l.v[i]);
+			l.v[i] = strdup(newline2);
+		}
+		write_lines(GROUP_PATH, &l, 0644);
+		lines_free(&l);
+	}
+
+	printf("florauser: renamed %s to %s%s\n", old, new_name,
+		is_standard_home ? "" : " (home directory left unchanged -- not the standard /home/<name> layout)");
+	return 0;
+}
+
 static void usage(void) {
 	fprintf(stderr,
 		"usage: florauser add <name> [group1,group2,...]\n"
 		"       florauser passwd <name>\n"
+		"       florauser rename <old-name> <new-name>\n"
 		"       florauser groupadd <name> [gid]\n"
 		"       florauser addtogroup <user> <group>\n");
 }
@@ -503,6 +686,8 @@ int main(int argc, char **argv) {
 		return cmd_groupadd(argv[2], argc >= 4 ? argv[3] : NULL);
 	} else if (strcmp(argv[1], "addtogroup") == 0 && argc == 4) {
 		return cmd_addtogroup(argv[2], argv[3]);
+	} else if (strcmp(argv[1], "rename") == 0 && argc == 4) {
+		return cmd_rename(argv[2], argv[3]);
 	}
 
 	usage();

@@ -102,6 +102,11 @@ shell to appear on its own). Concretely, right now:
 - **`fau seat-*`**: same idea, this time over floraseat's VT-bound
   switching — `seat-switch <n>` (a `chvt` wrapper) and `seat-status`
   (current VT + floraseat's own log). See below.
+- **`fau user-*`**: same idea again, over `florauser` (`tools/florauser`)
+  — `user-add`/`user-passwd`/`user-rename`/`user-groupadd`/
+  `user-addtogroup`. `florauser rename <old> <new>` is new too: renames a
+  user across passwd/shadow/group (its own private group, every group's
+  member list) and its home directory. See below.
 
 What's explicitly *not* done yet (the live, current list, kept in
 [docs/TODO.md](docs/TODO.md) — not a wishlist, only things that could
@@ -174,7 +179,7 @@ assets/                 # fastfetch logo + config shipped into the rootfs
 tools/fau/               # FloraOS's system manager
 tools/floralogin/        # FloraOS's own PAM-free login (see docs/ARCHITECTURE.md)
 tools/floraseat/         # FloraOS's own seatd-protocol-compatible seat daemon
-tools/florauser/         # FloraOS's own useradd/passwd/groupadd equivalent
+tools/florauser/         # FloraOS's own useradd/passwd/groupadd/rename equivalent
 tools/fauelf/            # FloraOS's own absolute-DT_NEEDED fixup tool
 tools/florainstall/      # FloraOS's own TUI disk installer
 tools/floragrub-cfg/     # FloraOS's own /boot/grub/grub.cfg generator (florainstall + fau backup)
@@ -262,6 +267,15 @@ fau seat-status              # active VT + floraseat's own recent log lines
 fau seat-switch <vt-number>  # switch the active VT (chvt) -- floraseat
                               #   disables/enables sessions automatically,
                               #   same as a physical Ctrl+Alt+Fn
+```
+
+```
+fau user-add <name> [group1,group2,...]
+fau user-passwd <name>
+fau user-rename <old-name> <new-name>   # passwd/shadow/group entries, group
+                                         #   memberships, and home dir all follow
+fau user-groupadd <name> [gid]
+fau user-addtogroup <user> <group>
 ```
 
 A thin front end over OpenRC's own `rc-update`/`rc-service` — service

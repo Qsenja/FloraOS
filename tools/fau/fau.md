@@ -286,12 +286,33 @@ Verified in a real QEMU boot: `seat-switch 2` / `seat-switch 1` round-trip
 correctly (confirmed via `seat-status` before/after each), and
 `seat-switch abc` is rejected with a clear error and exit status 1.
 
+## `user-*` — a thin front end over florauser
+
+`user-add`/`user-passwd`/`user-rename`/`user-groupadd`/`user-addtogroup`,
+same idea again, this time over `florauser` (tools/florauser) instead of
+OpenRC or floraseat: each command checks only its own argument *count*
+(so a wrong invocation gets fau's own usage line, e.g. `usage: fau
+user-rename <old-name> <new-name>`, instead of florauser's) and then execs
+the real `florauser <cmd> "$@"` — no argument validation, password
+handling, or file editing is duplicated here. `user-passwd`'s interactive
+prompt (termios echo off) works unmodified through this front end since
+bash doesn't redirect stdio for a plain function call.
+
+Verified in a real QEMU boot: `fau user-add alice seat` + `fau user-passwd
+alice` + `fau user-rename alice bob`, confirming the renamed
+`passwd`/`shadow`/`group` entries directly and then logging in as `bob`
+with `alice`'s original password — `id` still showed the `seat` group
+membership, proving the whole chain (florauser's own rename logic, exec'd
+through this front end) actually works end-to-end, not just each piece in
+isolation.
+
 ## `fau help <topic>` / `fau --help <topic>`
 
 The top-level `usage()` is deliberately short — an ever-growing flat
 command list stops being scannable. `usage_topic <name>` holds the actual
 per-command detail, grouped to match the sections above (`install`,
-`repo`, `export`, `backup`, `service`, `bootstrap`), plus `all` to print
+`repo`, `export`, `backup`, `service`, `seat`, `user`, `bootstrap`), plus
+`all` to print
 every topic at once. A few aliases (`pkg`/`package`/`packages`/
 `packagemanager` all map to `install`) exist purely for discoverability —
 someone reaching for `fau help packagemanager` shouldn't hit a dead end.

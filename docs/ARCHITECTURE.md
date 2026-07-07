@@ -753,3 +753,40 @@ build path that would've required compiling 16-bit real-mode boot code.
   boot: `seat-switch 2`/`seat-switch 1` round-trip correctly (confirmed
   via `seat-status` before/after each), non-numeric input rejected with
   exit status 1. See [tools/fau/fau.md](../tools/fau/fau.md).
+- DONE: `fau user-*` and `florauser rename` -- same "friendlier front end"
+  idea as `fau service-*`/`fau seat-*` above, this time over `florauser`
+  (`tools/florauser`): `user-add`/`user-passwd`/`user-rename`/
+  `user-groupadd`/`user-addtogroup` each check only their own argument
+  count and exec the real `florauser <cmd>`, no logic duplicated. Closes a
+  real, user-facing gap along the way: `florauser` itself had no way to
+  rename an account at all (only `add`/`passwd`/`groupadd`/`addtogroup`)
+  -- `florauser rename <old> <new>` now renames the `/etc/passwd` entry
+  (name + home directory, but only if the home follows `add`'s own
+  `/home/<name>` layout -- a custom path is left untouched, disclosed via
+  a printed note), the `/etc/shadow` entry (name only, hash and aging
+  fields copied verbatim), the user-private group if one actually matches
+  (same name *and* gid as the user, not just a same-named coincidence),
+  and every group's member list (the literal username token
+  `addtogroup` stores). Refuses to rename root outright -- too much else
+  in this project hardcodes that name literally for renaming it to
+  silently break elsewhere. Not a single atomic transaction (same
+  disclosed limitation as the rest of florauser: no locking, no
+  rollback), but ordered passwd -> shadow -> group so an interruption
+  partway through leaves the user's own login identity consistent rather
+  than the reverse. A real bug an actual test run caught, not just
+  reasoned through: the first version's group-member-list rebuild could
+  produce a literal `"bob,bob"` if the target group already listed a
+  member named `<new>` alongside `<old>` (an unrelated real user, or the
+  same rename re-run) -- fixed by deduplicating so each name appears at
+  most once regardless of what the group already contained. Verified two
+  ways: a standalone scratch-file harness (path macros redirected via
+  `sed`, run under `fakeroot` to satisfy the `getuid()==0` check without
+  touching this host's real files) covering the standard- and
+  custom-home-layout cases, the duplicate-member case above, and every
+  reject path (root, existing name, nonexistent user, invalid name); then
+  a real QEMU boot -- `fau user-add alice seat`, `fau user-passwd alice`,
+  `fau user-rename alice bob`, confirmed the renamed entries directly, and
+  logged in as `bob` with `alice`'s original password, `id` still showing
+  the `seat` group membership. See
+  [tools/florauser/florauser.md](../tools/florauser/florauser.md) and
+  [tools/fau/fau.md](../tools/fau/fau.md).
