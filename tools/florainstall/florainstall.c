@@ -705,7 +705,7 @@ static void do_install(const struct install_settings *s) {
 		run_in_chroot_or_die(TARGET_MNT,
 			(char *[]){"florauser", "add", (char *)s->username,
 				s->groups[0] ? (char *)s->groups : NULL, NULL});
-		log_msg("setting %s's password", s->username);
+		log_msg("setting %s's password (leave the first prompt blank to reuse root's password)", s->username);
 		run_in_chroot_or_die(TARGET_MNT, (char *[]){"florauser", "passwd", (char *)s->username, NULL});
 	}
 

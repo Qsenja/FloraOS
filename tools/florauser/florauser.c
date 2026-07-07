@@ -25,7 +25,13 @@
  *     Prompts twice (termios echo off, same technique as floralogin's own
  *     read_password), hashes via crypt_gensalt()+crypt_r() (libxcrypt's
  *     own strongest default -- not a hand-picked algorithm), rewrites
- *     that user's /etc/shadow line in place.
+ *     that user's /etc/shadow line in place. For any <name> other than
+ *     root, leaving the first prompt blank copies root's own current
+ *     /etc/shadow hash verbatim instead of hashing an empty password --
+ *     lets florainstall's own "additional user" step offer "same as root"
+ *     to someone who doesn't want to think of and type a second password.
+ *     Requires root to already have a real password set (fails otherwise,
+ *     same as any other missing-shadow-entry case).
  *   florauser groupadd <name> [gid]
  *     Creates a new, empty group. Auto-picks a free gid >=1000 if none
  *     given.
@@ -295,38 +301,70 @@ static int cmd_addtogroup(const char *user, const char *group) {
 	return 0;
 }
 
+/* Looks up <user>'s current /etc/shadow hash field. Returns 0 and fills
+ * `out` on success; -1 if the user has no shadow entry, or its password
+ * field is empty/locked ("!"/"*") -- either way, nothing usable to copy
+ * from. */
+static int lookup_shadow_hash(const char *user, char *out, size_t outsz) {
+	struct lines l = read_lines(SHADOW_PATH);
+	int found = -1;
+	for (size_t i = 0; i < l.n; i++) {
+		if (line_name_matches(l.v[i], user)) { found = (int)i; break; }
+	}
+	if (found < 0) { lines_free(&l); return -1; }
+	int rc = field(l.v[found], 1, out, outsz);
+	lines_free(&l);
+	if (rc != 0 || out[0] == '\0' || out[0] == '!' || out[0] == '*') return -1;
+	return 0;
+}
+
 static int cmd_passwd(const char *user) {
 	if (!name_exists_in(PASSWD_PATH, user)) {
 		fprintf(stderr, "florauser: no such user: %s\n", user);
 		return 1;
 	}
 
+	int is_root = strcmp(user, "root") == 0;
 	char pass1[256], pass2[256];
-	printf("New password: ");
+	char hashbuf[256];
+	char *hash;
+
+	printf(is_root ? "New password: " : "New password (blank = same as root's): ");
 	fflush(stdout);
 	if (read_line_noecho(pass1, sizeof pass1) != 0) return 1;
-	printf("Retype new password: ");
-	fflush(stdout);
-	if (read_line_noecho(pass2, sizeof pass2) != 0) { memset(pass1, 0, sizeof pass1); return 1; }
-	if (strcmp(pass1, pass2) != 0) {
-		fprintf(stderr, "florauser: passwords do not match\n");
-		memset(pass1, 0, sizeof pass1);
+
+	if (!is_root && pass1[0] == '\0') {
+		if (lookup_shadow_hash("root", hashbuf, sizeof hashbuf) != 0) {
+			fprintf(stderr, "florauser: root has no usable password to reuse -- set one first\n");
+			return 1;
+		}
+		hash = hashbuf;
+	} else {
+		printf("Retype new password: ");
+		fflush(stdout);
+		if (read_line_noecho(pass2, sizeof pass2) != 0) { memset(pass1, 0, sizeof pass1); return 1; }
+		if (strcmp(pass1, pass2) != 0) {
+			fprintf(stderr, "florauser: passwords do not match\n");
+			memset(pass1, 0, sizeof pass1);
+			memset(pass2, 0, sizeof pass2);
+			return 1;
+		}
 		memset(pass2, 0, sizeof pass2);
-		return 1;
+
+		/* NULL rbytes: crypt_gensalt draws its own salt from /dev/urandom.
+		 * NULL prefix + count 0: libxcrypt's own strongest default algorithm,
+		 * not a hand-picked one -- matches how real passwd(1) does it. */
+		char *setting = crypt_gensalt(NULL, 0, NULL, 0);
+		if (!setting) { perror("florauser: crypt_gensalt"); memset(pass1, 0, sizeof pass1); return 1; }
+
+		struct crypt_data cdata;
+		memset(&cdata, 0, sizeof cdata);
+		char *crypted = crypt_r(pass1, setting, &cdata);
+		memset(pass1, 0, sizeof pass1);
+		if (!crypted) { perror("florauser: crypt_r"); return 1; }
+		snprintf(hashbuf, sizeof hashbuf, "%s", crypted);
+		hash = hashbuf;
 	}
-	memset(pass2, 0, sizeof pass2);
-
-	/* NULL rbytes: crypt_gensalt draws its own salt from /dev/urandom.
-	 * NULL prefix + count 0: libxcrypt's own strongest default algorithm,
-	 * not a hand-picked one -- matches how real passwd(1) does it. */
-	char *setting = crypt_gensalt(NULL, 0, NULL, 0);
-	if (!setting) { perror("florauser: crypt_gensalt"); memset(pass1, 0, sizeof pass1); return 1; }
-
-	struct crypt_data cdata;
-	memset(&cdata, 0, sizeof cdata);
-	char *hash = crypt_r(pass1, setting, &cdata);
-	memset(pass1, 0, sizeof pass1);
-	if (!hash) { perror("florauser: crypt_r"); return 1; }
 
 	struct lines l = read_lines(SHADOW_PATH);
 	int found = -1;
