@@ -475,7 +475,7 @@ install_one_alpm() {
 		[ "$(cat "$jobs_dir/$i.source" 2>/dev/null)" = cached ] && cached=$((cached + 1)) || fetched=$((fetched + 1))
 
 		local extract_dir; extract_dir=$(mktemp -d)
-		tar --zstd -xf "$archive" -C "$extract_dir"
+		tar_extract_or_die "$archive" "$extract_dir" "$pkgname"
 		rm -f "$archive"
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
@@ -496,7 +496,7 @@ install_one_alpm() {
 app_install_one_alpm() {
 	local name=$1
 	local resolved; resolved=$(alpm_resolve "$name") \
-		|| die "couldn't resolve '$name' in any configured Arch/Artix repo -- if a recipe exists, try 'fau build $name'"
+		|| { offer_build "$name" || die "couldn't resolve '$name' in any configured Arch/Artix repo"; }
 
 	local -a pkg_repo=() pkg_name=() pkg_version=() pkg_filename=() pkg_sha256=()
 	local total=0 repo pkgname pkgversion filename sha256
@@ -537,7 +537,7 @@ app_install_one_alpm() {
 		[ "$(cat "$jobs_dir/$i.source" 2>/dev/null)" = cached ] && cached=$((cached + 1)) || fetched=$((fetched + 1))
 
 		local extract_dir; extract_dir=$(mktemp -d)
-		tar --zstd -xf "$archive" -C "$extract_dir"
+		tar_extract_or_die "$archive" "$extract_dir" "${pkg_name[$i]}"
 		rm -f "$archive"
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
@@ -613,7 +613,7 @@ alpm_sandbox_fetch() {
 		local archive="$jobs_dir/$i.pkg"
 		[ -f "$archive" ] || die "fetching ${pkg_name[$i]} failed (see errors above)"
 		local extract_dir; extract_dir=$(mktemp -d)
-		tar --zstd -xf "$archive" -C "$extract_dir"
+		tar_extract_or_die "$archive" "$extract_dir" "${pkg_name[$i]}"
 		rm -f "$archive"
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"

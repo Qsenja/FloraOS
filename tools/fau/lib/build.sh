@@ -64,7 +64,7 @@ build_merge_depends() {
 		local archive="$jobs_dir/$i.pkg"
 		[ -f "$archive" ] || die "fetching ${pkg_name[$i]} failed (see errors above)"
 		local extract_dir; extract_dir=$(mktemp -d)
-		tar --zstd -xf "$archive" -C "$extract_dir"
+		tar_extract_or_die "$archive" "$extract_dir" "${pkg_name[$i]}"
 		rm -f "$archive"
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"

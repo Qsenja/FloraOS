@@ -19,6 +19,43 @@ FAU_ELF_PATCH="${FAU_ELF_PATCH:-fauelf}"
 die() { echo "fau: error: $*" >&2; exit 1; }
 log() { echo "fau: $*" >&2; }
 
+# tar_extract_or_die <archive> <dest-dir> <label> -- extracts a .pkg
+# archive, turning tar's own per-file failure spam (e.g. hundreds of
+# "Cannot write: No space left on device" lines when a RAM-backed live
+# root fills up mid-extraction) into one clean message instead.
+tar_extract_or_die() {
+	local archive=$1 dest=$2 label=$3
+	local tar_err; tar_err=$(mktemp)
+	if ! tar --zstd -xf "$archive" -C "$dest" 2>"$tar_err"; then
+		if grep -q "No space left on device" "$tar_err"; then
+			rm -f "$tar_err"
+			die "ran out of space extracting $label -- this system's root may be RAM-backed with limited capacity; free up space/RAM, or build/install fewer things at once"
+		fi
+		local firstline; firstline=$(head -n1 "$tar_err")
+		rm -f "$tar_err"
+		die "extracting $label failed: $firstline"
+	fi
+	rm -f "$tar_err"
+}
+
+# offer_build <name> -- if a fau-build recipe exists for <name>, asks the
+# user whether to build it from source instead, exec'ing `fau-build build
+# <name>` if they say yes. Returns 1 (the caller falls through to its own
+# failure) if there's no recipe, the user declines, or there's no
+# controlling terminal to ask on (e.g. a non-interactive invocation).
+offer_build() {
+	local name=$1
+	[ -f "$FAU_RECIPES_DIR/$name.fis" ] || return 1
+	[ -t 0 ] || return 1
+	local reply
+	printf '"%s" could not be found in FloraOS'"'"'s repos. Build it from source instead? [y/N] ' "$name" > /dev/tty 2>/dev/null || return 1
+	read -r reply < /dev/tty 2>/dev/null || return 1
+	case "$reply" in
+		[Yy]|[Yy][Ee][Ss]) exec "$SELF_DIR/fau-build" build "$name" ;;
+		*) return 1 ;;
+	esac
+}
+
 # Rewrites <real-tool-name>'s self-mentions in stdout/stderr to fau's own naming. See fau.md.
 # NOT safe for a command with an unterminated interactive prompt (see fau-user's cmd_user_passwd).
 relabel_run() {
