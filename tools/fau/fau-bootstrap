@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# fau-bootstrap -- build-time only (used by scripts/build-rootfs.sh, not
-# meant for end users): installs system package(s) straight into FAU_ROOT
-# (/usr, /etc, ...), with dependencies. This is how build-rootfs.sh
-# constructs the base rootfs itself (kernel, glibc, coreutils, etc.).
-# Called by the `fau` dispatcher; also fully runnable standalone (this is
-# exactly what build-rootfs.sh itself does, invoking this tool's own source
-# path directly rather than through an installed `fau`).
+# fau-bootstrap -- build-time only: installs system package(s) into FAU_ROOT. See fau.md.
 set -euo pipefail
 
-# readlink -f before dirname: see tools/fau/fau's own comment on this --
-# only that file is symlinked today (/usr/bin/fau), but the fix is free.
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SELF_DIR/lib/common.sh"
@@ -21,16 +13,6 @@ source "$SELF_DIR/lib/repo.sh"
 source "$SELF_DIR/lib/alpm.sh"
 
 install_one() {
-	# install_one <name> [want-version] [ancestor-chain] -- want-version,
-	# when given (used by cmd_bootstrap_apply), is enforced against the fau
-	# repo's own recorded version: reproducibility from a system.json
-	# manifest is only real if a version mismatch is a hard error, not a
-	# silent "install whatever's there now". ancestor-chain is the colon-delimited list of
-	# packages currently being installed up the call stack -- passed as a
-	# plain argument (not a global) so each recursive branch gets its own
-	# copy with nothing to clean up on return, and detects a circular
-	# depends= (A -> B -> A) as a clear error instead of recursing until
-	# bash gives up.
 	local name=$1 want_version=${2:-} chain=${3:-}
 	case ":$chain:" in
 		*":$name:"*) die "circular dependency: $chain:$name" ;;
@@ -56,10 +38,7 @@ install_one() {
 
 	local depends; depends=$(repo_lookup_depends "$archive")
 	if [ -n "${depends:-}" ]; then
-		# tr, not `local IFS=','`: IFS is function-scoped, not block-scoped,
-		# so it would still be ',' for every command below this loop within
-		# this same call (notably system_set's own word-splitting) -- that's
-		# exactly what corrupted system.json before this fix.
+		# tr, not `local IFS=','`: IFS is function-scoped and would corrupt system_set's word-splitting (see fau.md).
 		for dep in $(printf '%s' "$depends" | tr ',' ' '); do
 			dep=$(echo "$dep" | xargs)
 			[ -z "$dep" ] && continue
@@ -83,19 +62,7 @@ install_one() {
 	tar -I zstd -xf "$archive" -C "$work"
 	local version; version=$(pkginfo_field "$work/pkginfo" version)
 	mkdir -p "$FAU_ROOT"
-	# rsync -a alone replaces a destination symlink-to-directory (e.g. the
-	# merged-/usr bin/sbin/lib/lib64 symlinks) with a real directory;
-	# --keep-dirlinks (-K) keeps the symlink and merges into its target
-	# instead, which is what installing multiple packages into one merged
-	# root requires. Plain cp -a refuses the merge outright ("cannot
-	# overwrite non-directory X with directory Y").
-	# --checksum: without it, rsync's default quick-check (same size + same
-	# mtime => skip) silently keeps the OLD file content on an upgrade
-	# whenever two versions of a file happen to match in both -- reproduced
-	# directly (a package bumped from 1.0 to 2.0 with same-size files kept
-	# serving the 1.0 binary after "upgrading" to 2.0, with system.json
-	# claiming 2.0 the whole time). Package archives aren't gigabytes, so
-	# hashing every file on install is the correct trade, not a slow one.
+	# -aK --checksum: see fau.md's "Installing" section for why both flags are required, not optional.
 	record_files "$name" "$work/files"
 	rsync -aK --checksum "$work/files/" "$FAU_ROOT/"
 	rm -rf "$work"
@@ -120,13 +87,7 @@ cmd_bootstrap() {
 }
 
 remove_one_file() {
-	# remove_one_file <name> <relpath> -- deletes relpath from FAU_ROOT
-	# unless some OTHER still-installed package's own file list also
-	# claims it (rsync merges every package into one shared FAU_ROOT, so
-	# paths legitimately do overlap between packages -- e.g. two things
-	# both shipping the same merged-/usr dir). Prints 1 on its stdout if
-	# it actually deleted the file, 0 if it skipped a shared one, so the
-	# caller can tally without a namerefs/global counter.
+	# Prints 1 if deleted, 0 if skipped (still owned by another package) -- see fau.md.
 	local name=$1 relpath=$2 other shared=0
 	for other in "$FAU_FILES_DIR"/*; do
 		[ -f "$other" ] || continue
@@ -189,12 +150,6 @@ cmd_bootstrap_apply() {
 	local manifest=${1:-system.json}
 	[ -f "$manifest" ] || die "no such file: $manifest"
 	state_init
-	# json_list_names/json_get_version already parse this exact
-	# {"packages":{"name":{"version":"x"}}} shape (system.json's own format)
-	# -- reusing them instead of a second hand-rolled regex is also what
-	# surfaced this function used to read names only and silently drop the
-	# version, so "bootstrap-apply" never actually verified it installed
-	# what the manifest recorded.
 	local n
 	for n in $(json_list_names "$manifest"); do
 		install_one "$n" "$(json_get_version "$manifest" "$n")"

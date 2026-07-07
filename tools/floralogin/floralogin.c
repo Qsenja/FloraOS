@@ -1,14 +1,4 @@
-/* floralogin -- FloraOS's own minimal password-backed login, written from
- * scratch instead of using util-linux's login (which unconditionally
- * requires PAM to build at all -- see ARCHITECTURE.md). Verifies against
- * /etc/shadow via crypt(3) (libxcrypt, since glibc itself dropped crypt()),
- * execs the user's shell as a login shell on success. No PAM, no session
- * management beyond what a plain crypt-based login always did.
- *
- * Meant to run under a real getty (agetty) that has already opened the tty
- * as session leader -- that's what actually fixes job control; this program
- * only replaces util-linux's own login, not agetty.
- */
+/* floralogin -- FloraOS's own minimal password-backed login. See floralogin.md. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <grp.h>
@@ -25,11 +15,7 @@
 
 #define MAX_LINE 256
 
-/* Returns 0 on a real line (possibly empty), -1 on EOF/read error -- a
- * hangup at the prompt (stdin closed) must end the program, not spin
- * forever re-printing the prompt on an endless stream of "empty lines"
- * (reproduced directly: piping a closed stdin into an earlier version of
- * this program looped printing the prompt until killed). */
+/* -1 on EOF must end the program -- see floralogin.md */
 static int read_line(char *buf, size_t bufsz) {
 	if (!fgets(buf, (int)bufsz, stdin)) {
 		buf[0] = '\0';
@@ -56,11 +42,7 @@ static int read_password(char *buf, size_t bufsz) {
 }
 
 static int password_ok(const struct spwd *sp, const char *password) {
-	/* An empty hash field is traditional Unix for "no password required" --
-	 * intentional for this live, RAM-resident image (see README.md); a
-	 * persistent install would set a real hash via passwd(1) once one
-	 * exists. */
-	if (sp->sp_pwdp[0] == '\0') return 1;
+	if (sp->sp_pwdp[0] == '\0') return 1; /* empty hash = no password required, see floralogin.md */
 	struct crypt_data data;
 	memset(&data, 0, sizeof(data));
 	char *hash = crypt_r(password, sp->sp_pwdp, &data);
@@ -74,12 +56,12 @@ int main(void) {
 	for (;;) {
 		printf("floraos login: ");
 		fflush(stdout);
-		if (read_line(username, sizeof(username)) != 0) return 0; /* EOF/hangup */
+		if (read_line(username, sizeof(username)) != 0) return 0;
 		if (username[0] == '\0') continue;
 
 		printf("Password: ");
 		fflush(stdout);
-		if (read_password(password, sizeof(password)) != 0) return 0; /* EOF/hangup */
+		if (read_password(password, sizeof(password)) != 0) return 0;
 
 		struct passwd *pw = getpwnam(username);
 		struct spwd *sp = pw ? getspnam(username) : NULL;
@@ -88,7 +70,7 @@ int main(void) {
 
 		if (!ok) {
 			fprintf(stderr, "Login incorrect\n");
-			sleep(2); /* brute-force throttling, matches traditional login(1) */
+			sleep(2);
 			continue;
 		}
 
@@ -108,22 +90,12 @@ int main(void) {
 			chdir("/");
 		}
 
-		/* XDG_RUNTIME_DIR: no session manager exists yet (no logind, no
-		 * elogind -- see ARCHITECTURE.md) to set this up the usual way,
-		 * but any Wayland compositor (mango, sway, ...) hard-requires it
-		 * at startup. /run is already RAM-backed as part of the whole
-		 * initramfs-resident image (see README.md), so a plain mkdir
-		 * here is enough -- no separate tmpfs mount needed. Root-owned
-		 * 0700 per the XDG base-dir spec; failure here is non-fatal
-		 * (falls through to a login shell either way), same "warn and
-		 * continue" spirit as floraseat's own socket-group setup. */
+		/* no session manager to do this for us, see floralogin.md */
 		{
 			char rundir[64];
 			int len = snprintf(rundir, sizeof rundir, "/run/user/%d", (int)pw->pw_uid);
 			if (len > 0 && (size_t)len < sizeof rundir) {
-				if (mkdir("/run/user", 0755) != 0 && errno != EEXIST) {
-					/* ignore -- best effort */
-				}
+				mkdir("/run/user", 0755);
 				if (mkdir(rundir, 0700) != 0 && errno != EEXIST) {
 					fprintf(stderr, "floralogin: warning: could not create %s: %s\n",
 						rundir, strerror(errno));

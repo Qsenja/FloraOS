@@ -1,9 +1,4 @@
-# hostname (Debian's small standalone implementation: hostname,
-# dnsdomainname, domainname). Deliberately not inetutils -- that bundles
-# telnet/ftp/rsh/talk/etc alongside the one command we actually need; this
-# package is exactly hostname.c + a Makefile. Needed so OpenRC's
-# etc/init.d/hostname service (`hostname "$hostname"`) actually runs instead
-# of failing non-fatally at boot.
+# hostname (Debian's small standalone implementation) -- see docs/MANIFEST.md.
 PKG_DESCRIPTION="hostname/dnsdomainname -- sets/prints the system hostname"
 PKG_DEPENDS="glibc"
 

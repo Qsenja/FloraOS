@@ -1,43 +1,5 @@
 #!/usr/bin/env bash
-# floragrub-cfg -- generates FloraOS's /boot/grub/grub.cfg: one menuentry for
-# the live @ subvolume, plus one per backup snapshot under @snapshots (see
-# `fau backup`, tools/fau/fau). Shared between florainstall (initial install)
-# and `fau backup`/`backup-remove`/`backup-restore` (regenerating after a
-# snapshot is added, removed, or promoted), so the menuentry format and the
-# subvolume-path logic live in exactly one place instead of being duplicated
-# in florainstall.c's C and fau's bash. Same "small, from-scratch,
-# purpose-built" style as fau/floralogin/florauser/floraseat/fauelf/
-# florainstall themselves.
-#
-# Kernel/root paths are prefixed with the subvolume name (/@/boot/... ,
-# /@snapshots/<name>/boot/...) rather than left as bare /boot/... -- this is
-# the standard, well-established convention real distros' grub-mkconfig
-# emits for a btrfs root that lives in a named subvolume (confirmed by
-# memory of real Fedora/openSUSE btrfs-root grub.cfg output, e.g.
-# "linux /@/boot/vmlinuz-... rootflags=subvol=@"), not guessed: GRUB's own
-# absolute-path file lookups on btrfs resolve against the filesystem's
-# top-level (subvolid 5) by default, same as `rootflags=subvol=` only tells
-# the *kernel* which subvolume to mount as / after handoff -- it does nothing
-# for GRUB's own file reads before that. Confirmed working end-to-end by an
-# actual QEMU disk boot (scripts/test-install.sh): GRUB does find and load
-# /@/boot/vmlinuz-floraos correctly this way.
-#
-# `root=` itself is the *device path* (e.g. /dev/sda1), not `UUID=` --
-# that part was NOT a safe assumption and a real QEMU boot caught it: with
-# no initramfs, the kernel's own root=UUID= resolution for btrfs needs
-# either an early userspace pass (udev/eudev populating
-# /dev/disk/by-uuid/, which can't run before its own root is mounted) or
-# `btrfs device scan` (also userspace) to register the device by UUID --
-# neither exists at this point in FloraOS's boot, so root=UUID= panics with
-# "Cannot open root device" even though the exact same UUID string works
-# fine for GRUB's own `search --fs-uuid` a moment earlier (a completely
-# separate resolution path). The device path florainstall/fau backup
-# already have in hand sidesteps this entirely -- single-disk installs
-# only, a real limitation worth documenting (see ARCHITECTURE.md), not
-# hiding: a different BIOS enumeration order across boots could change
-# which device this is on real multi-disk hardware. GRUB's own `search
-# --fs-uuid --set=root` line is untouched -- that half genuinely is UUID-
-# based and robust, it's only the kernel's own root= that needed to change.
+# floragrub-cfg -- generates FloraOS's /boot/grub/grub.cfg. See floragrub-cfg.md.
 set -euo pipefail
 
 die() { echo "floragrub-cfg: error: $*" >&2; exit 1; }
@@ -49,25 +11,11 @@ out=$3
 
 [ -b "$device" ] || die "$device is not a block device"
 
-# subvolid=5 always names the whole filesystem's top-level subvolume,
-# regardless of what florainstall/fau backup have done with @ or
-# @snapshots -- this is where they live as siblings.
-#
-# /dev/shm, not plain mktemp -d's default under /tmp on the currently
-# mounted root -- found via an actual QEMU boot test: run from within a
-# booted `fau backup` snapshot (deliberately read-only), /tmp lives on that
-# same read-only root and mktemp died with "Read-only file system". /dev/shm
-# is its own tmpfs, mounted by devfs's own init script independent of
-# whatever's mounted as /, on every FloraOS boot -- live or installed.
-tmp=$(mktemp -d -p /dev/shm)
+tmp=$(mktemp -d -p /dev/shm) # /dev/shm, not /tmp -- see floragrub-cfg.md
 cleanup() { umount "$tmp" 2>/dev/null || true; rmdir "$tmp" 2>/dev/null || true; }
 trap cleanup EXIT
 mount -o subvolid=5 "$device" "$tmp" || die "mount -o subvolid=5 $device failed"
 
-# Newest snapshot first, so it's the first alternative a user tabs to at the
-# GRUB menu -- @snapshots may not exist yet (a fresh install with no backups
-# taken), in which case this just produces the one default entry, unchanged
-# from florainstall's original hardcoded grub.cfg.
 names=()
 if [ -d "$tmp/@snapshots" ]; then
 	while IFS= read -r name; do
@@ -88,18 +36,7 @@ write_entry() {
 	printf 'set timeout=3\n'
 	printf 'insmod part_msdos\n'
 	printf 'insmod btrfs\n'
-	# `grub-reboot <title>` (used to boot a backup once, see `fau backup`)
-	# only works if grub.cfg actually reads back what it writes -- found via
-	# an actual QEMU boot test (scripts/test-install.sh): grub-reboot
-	# reported success and grubenv's next_entry was set, but a hardcoded
-	# "set default=0" with no load_env/next_entry handling at all meant it
-	# was silently ignored and the default entry booted every time regardless.
-	# next_entry is cleared and saved back immediately on read (not left for
-	# a trailing "if boot_once" block) so the override applies exactly once
-	# even if the chosen entry never finishes booting -- no saved_entry/
-	# boot_once/menuentry_id_option machinery beyond that, since this project
-	# doesn't support grub-set-default's persistent-default feature, only
-	# grub-reboot's one-shot override.
+	# grub-reboot needs this load_env/next_entry handling, see floragrub-cfg.md
 	printf 'if [ -s $prefix/grubenv ]; then\n'
 	printf '\tload_env\n'
 	printf 'fi\n'

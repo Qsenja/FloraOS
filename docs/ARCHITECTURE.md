@@ -197,6 +197,271 @@ FloraOS's kernel is even loaded, so GRUB here is build-host tooling (like
 syslinux+grub build entirely: no loss of functionality, and it removes a
 build path that would've required compiling 16-bit real-mode boot code.
 
+## Build pipeline: scripts/build-rootfs.sh, build-iso.sh, apply-skeleton.sh
+
+Every package is compiled from pinned upstream source (`config/versions.conf`),
+staged, packaged as a `.fau.tar.zst`, and installed via `fau bootstrap` --
+nothing touches the real host system, everything lives under `work/`
+(gitignored). `build_package`'s `already_built` check lets a retry after a
+downstream failure skip already-packaged steps (kernel, glibc) instead of
+redoing the whole pipeline; `rm work/repo` forces a full rebuild. `PKG_BIN` is
+reset before every recipe specifically because `build_package` runs in one
+long-lived loop over `BUILD_ORDER` -- without resetting it, a package after
+one that set it (for `fau install`'s isolated-app path) would silently
+inherit it.
+
+`MANDATORY_ORDER` bakes in a handful of real ordering constraints, not just a
+sensible default sequence: `mbedtls` before `curl` (curl.sh links against
+mbedtls's staged files directly), `kmod` before `eudev` (eudev's configure
+links against kmod's staged pkgconfig file). The tail of the list (attr, acl,
+grep, sed, gawk, findutils, tar, zstd, rsync, procps-ng, hostname, kbd, gzip,
+libxcrypt, mbedtls, curl, kmod, eudev) exists for one reason each: fau itself,
+or one of OpenRC's sysinit services, or floralogin, needs it at runtime inside
+the booted OS, even though the build host already has all of them and the
+build would "work" without shipping them. See each package's own one-line
+reason in `docs/MANIFEST.md`.
+
+Several FloraOS-authored C tools (floralogin, fauelf, floraseat, florauser,
+florainstall) are compiled directly in `build-rootfs.sh`'s `main()`, not
+through the recipe/fau-package pipeline, since they're project source, not
+fetched upstream tarballs. floralogin and florauser link against
+`-I/-L "$ROOTFS_DIR"` (this rootfs's own just-built libxcrypt), not whatever
+`crypt()` the build host provides -- linking against the host's copy would
+bake in a mismatched libcrypt SONAME the shipped image doesn't actually
+provide. `sulogin`/`consoles.c` are recompiled from a second, separate
+extraction of the same sysvinit tarball for the same reason: sysvinit itself
+builds at position 3 in `MANDATORY_ORDER`, well before libxcrypt exists
+anywhere in the rootfs, so `scripts/recipes/sysvinit.sh` drops sulogin from
+that early build and this later step relinks it correctly once libxcrypt is
+actually staged.
+
+The CA certificate bundle (`config/versions.conf`'s `ca-certificates` entry)
+is fetched with the same `fetch_source` used for every pinned tarball, but
+skips `extract_source` and the recipe pipeline entirely -- it's a single PEM
+file, not a tarball, and `extract_source` assumes every pinned download is
+one.
+
+libgcc (`libgcc_s.so.1`, the C++ exception-handling runtime) stays
+bootstrapped (merged into `FAU_ROOT`) rather than installed as an isolated
+app like fastfetch below -- it's base-system infrastructure other C++
+binaries can reasonably assume is already present, the same way Arch/Artix
+itself assumes it (it isn't a declared dependency of fastfetch, which needs
+it, for exactly that reason). fastfetch still finds `libgcc_s.so.1` fine
+despite being isolated: the app wrapper's `LD_LIBRARY_PATH` (see
+`app_wrapper_write` in `tools/fau/fau`) is additive, prepended in front of
+the dynamic linker's default trusted search path (`ld.so.cache`) rather than
+replacing it, so a genuinely base-system library doesn't need to be
+duplicated into every isolated app's own directory just to be found.
+`FAU_ROOT` is still set for that `fau install fastfetch` call even though
+`install` never merges into it, because `FAU_CACHE_DIR` (the alpm
+sync-db/index cache) derives from `FAU_ROOT`, defaulting to "/" otherwise --
+which would try to write into the build host's own `/var/cache/fau`
+(permission denied) instead of staying scoped under `work/`. Reusing the same
+`ROOTFS_DIR` as the preceding libgcc bootstrap call also means the fastfetch
+install reuses that call's already-fetched sync db instead of re-fetching it.
+
+fastfetch is installed as an isolated app (`fau install fastfetch`) purely for
+branding, landing under the build host's staging path
+(`$ROOTFS_DIR/root/apps/fastfetch`) rather than the path it'll actually run
+from once booted (`/root/apps/fastfetch`). `app_wrapper_write` bakes in
+whatever `FAU_APPS_DIR` it was given verbatim, so the generated wrapper's
+`exec` line pointed at a build-host-only path and login failed with "No such
+file or directory" -- caught by an actual `./floraiso test` boot, not
+inferred. Fixed by `sed`-stripping the `$ROOTFS_DIR` prefix back out of the
+wrapper script after the install, since every path in it is `$ROOTFS_DIR` plus
+the same suffix it'll have at `/` once booted.
+
+`build-rootfs.sh` stages fau as one directory (`/usr/lib/fau/`) so every
+`fau-*` tool keeps finding its siblings and `lib/*.sh` the same way it does in
+the source tree (relative to its own `$BASH_SOURCE`) -- only `/usr/bin/fau`
+itself is a symlink into it, the one entry point `PATH` needs.
+`tools/fau/recipes/*.fis` (fau-build's own recipes, `FAU_RECIPES_DIR`) are a
+separate thing entirely from this directory's own `scripts/recipes/*.sh`:
+base-rootfs packages built once, here, on the build host, never touched by
+fau at runtime, versus recipes fau-build compiles from source directly on an
+already-booted live system, on demand. The distinct `.fis` ("fau install
+script") extension exists purely so the two are never confused for each
+other at a glance -- it's still plain bash, no special syntax.
+
+fau's alpm (Arch/Artix repo) fallback needs to know which mirror and repos to
+ask once running inside a booted FloraOS system, where `/etc/pacman.d` and
+`/etc/pacman.conf` don't exist. `build-rootfs.sh` copies the build host's own
+mirrorlist/repo list to `/etc/fau/pacman-mirrorlist`/`pacman-repos` if
+present; if the build host has no pacman config at all, the build logs a
+warning and skips both that step and the libgcc/fastfetch install, rather than
+failing outright.
+
+`build-iso.sh` packs the entire rootfs as the initramfs and the kernel execs
+`/init` from it directly -- FloraOS boots and runs entirely from RAM. Packing
+deliberately excludes everything under `./boot` (GRUB reads
+`boot/vmlinuz-floraos` straight off the ISO's own `boot/` directory; embedding
+the kernel a second time inside the initramfs it boots from would be
+redundant) -- which is exactly why `build-rootfs.sh` stages a second copy of
+the kernel at `/usr/lib/floraos/vmlinuz-floraos` purely for florainstall's own
+use, since the running live system otherwise has no kernel image anywhere in
+it to copy onto a real disk. The final `floraos.iso.sha256` records a
+relative filename rather than the absolute build path, so
+`sha256sum -c floraos.iso.sha256` still works from a different clone or a
+standalone downloaded copy of the ISO, not just this exact build directory.
+
+`apply-skeleton.sh` applies the `/etc` skeleton, identity files, and the
+sysvinit/OpenRC glue on top of an already fau-bootstrapped rootfs (run after
+`fau bootstrap`, before `ldconfig`). `/usr/bin/sh` is symlinked to bash
+because every `#!/bin/sh` script (OpenRC's own init-early.sh/init.sh included)
+otherwise fails to exec at all -- and the kernel reports the *script's* path
+as "No such file or directory" when the real problem is the missing shebang
+interpreter, which is easy to mistake for something else entirely. OpenRC's
+own `etc/init.d/hostname` service ignores `/etc/hostname` and reads
+`hostname=` from `etc/conf.d/hostname` instead (upstream defaults that to
+"localhost"); without writing `conf.d/hostname` too, `floraos.conf`'s
+`HOSTNAME=` silently never took effect and the booted system always came up
+as "localhost".
+
+**A real, unresolved scheduling gap found across several from-scratch
+rebuilds**: a custom-authored `openrc-run` script for dhcpcd, symlinked into
+`etc/runlevels/default/`, never actually gets scheduled by OpenRC's own
+dependency resolution at boot -- confirmed with and without `provide net` in
+its `depend()`, and with and without OpenRC's own legacy
+`etc/init.d/network`/`etc/init.d/staticroute` (both of which also
+`provide net`) present. `rc-status default` only ever showed
+netmount+local; dhcpcd never appeared at all (not started, not crashed),
+while running the exact same script by hand (`/etc/init.d/dhcpcd start`)
+always worked immediately. Rather than chase further into OpenRC's
+dependency-cache internals, both dhcpcd and, later, `udevd`/`floraseat` are
+instead driven directly from `/etc/inittab` as `once`/`respawn` entries,
+sidestepping the whole runlevel dependency resolution rather than solving it.
+The two legacy scripts (`network`, `staticroute`) were removed from the boot
+runlevel as dead weight (FloraOS relies entirely on dhcpcd, with no
+`/etc/ifconfig.*`/`/etc/route.conf` files for them to act on) and ruled out,
+not confirmed, as the actual cause -- removing both still left dhcpcd
+unscheduled. dhcpcd and udevd's inittab entries redirect output to
+`/dev/null`: sysvinit starts a `once` entry concurrently with the `respawn`
+agetty entries below it rather than sequentially, so unredirected
+ebegin/eend/dhcpcd-privsep-warning output otherwise races the login prompt on
+the same console and visibly garbles both. This doesn't hide real failures --
+dhcpcd's own lease errors etc. still exit non-zero and are visible via
+`rc-service dhcpcd status`.
+
+`depmod` (modules.dep/modules.alias for kmod/eudev) runs at build time, baked
+into the image, rather than being left for boot: this image is RAM-resident
+and rebuilt from scratch every time anyway, so there's no "the kernel changed
+since last boot" case depmod would normally exist to handle. It needs the
+kernel's own release string (`linux-lts.sh`'s `make kernelrelease` output,
+written to `boot/kernelrelease`) explicitly, since depmod otherwise defaults
+to `uname -r` of whatever machine runs it -- the build host's kernel, not
+FloraOS's. Runs cross-root the same way `ldconfig -r` does just before it: a
+plain userspace indexing tool over files, no actual module loading involved.
+
+root's `/etc/shadow` entry ships with an intentionally empty password field
+(traditional Unix for "no password required"), documented in `/etc/issue` so
+a first-time user sees it before being asked for credentials -- appropriate
+for this live, RAM-resident image, which has no persistent install yet and no
+`passwd(1)` built to change it.
+
+## Test harness: QEMU serial-console automation (scripts/lib/common.sh)
+
+`scripts/test-iso.sh`, `test-install.sh`, and `test-install-uefi.sh` all drive
+a real QEMU boot entirely over its serial console rather than watching
+output passively, since floralogin gates the console and a plain read-only
+`-serial file:` redirect can watch boot output but can't answer the login
+prompt. `scripts/lib/common.sh` factors this into four functions
+(`test-iso.sh` predates that factoring and still carries its own inline copy
+of the same pattern -- see its own header comment):
+
+- **`qemu_boot_serial`** starts QEMU in the background with a Unix-socket
+  serial chardev (so it can be both written to and read from) and a
+  Unix-socket monitor (so `qemu_quit` can shut it down cleanly later), then
+  bridges the serial socket to a growing log file via `socat`. The fifo used
+  to feed `socat` is opened read-write (`exec {QEMU_FD}<>"$QEMU_FIFO"`), not
+  write-only: opening a fifo write-only blocks until some *other* process has
+  it open for reading, but `socat` (the intended reader) only starts on the
+  next line, so a plain write-only open here would deadlock the script
+  against itself. `<>` is the standard trick to open a fifo without a peer
+  present yet, and it also keeps the fifo held open for the whole session --
+  a fifo's read end otherwise sees EOF the instant any single writer closes,
+  which would end the `socat` session after the first thing sent. `socat`'s
+  own address is given as `-` (stdio) rather than the fifo path directly:
+  passing the fifo path as one of `socat`'s two endpoints makes it copy the
+  socket's output back into that same fifo too, since a fifo is one shared
+  queue, not two independent lanes -- confirmed by testing the construct in
+  isolation before it went into the real script. Redirecting stdin from the
+  fifo and stdout to the log file keeps the two directions properly
+  separated. Each session is namespaced by a `<tag>` argument so sequential
+  sessions in one script (install, then boot1, boot2, ...) don't collide;
+  only one session may be open at a time per shell, since the session state
+  is global, not stacked.
+- **`qemu_wait_for`** polls the growing log file for a literal substring
+  instead of guessing at timing with a `sleep`. This matters because
+  whatever's on the other end of the line (agetty, a shell, florainstall's
+  own log output) can flush a backlog before it's actually at the point the
+  test cares about -- and, separately, agetty flushes whatever arrived on the
+  line before it actually starts prompting, so sending input blindly right
+  after QEMU starts (well before boot reaches the prompt) gets silently
+  discarded rather than queued.
+- **`qemu_send`** writes raw bytes with no implicit newline; callers pass
+  `\r` themselves, matching what a real terminal sends on Enter (the tty line
+  discipline's ICRNL then turns it into `\n` for whatever's reading on the
+  other end).
+- **`qemu_quit`** shuts QEMU down via its monitor's `quit` command rather
+  than SIGTERM/SIGKILL, so a virtual disk's write-back cache flushes cleanly
+  instead of racing a signal against in-flight writes -- this matters
+  specifically because `test-install.sh`/`test-install-uefi.sh` reuse the
+  same disk image across several `qemu_boot_serial` sessions.
+
+`test-install.sh`'s `qemu_run` helper (waiting for a fresh shell prompt to
+reappear, by counting occurrences of the PS1 marker) replaced an earlier
+version that instead waited for a sentinel string embedded in the command
+itself (e.g. `cat marker.txt; echo MARKER_DONE`, then waiting for
+`MARKER_DONE`). That approach was unreliable: a pty echoes back whatever
+bytes you send *immediately*, well before the shell even processes the
+trailing Enter, so the wait could be satisfied by the echoed *input* rather
+than the command's real output, racing ahead of it by an unpredictable
+margin. This was intermittent, not deterministic -- it passed several runs
+before failing three checks at once in a way that first looked like a real
+regression. Counting fresh prompts sidesteps this entirely, since a new
+prompt only ever appears after the previous command's own output has already
+been flushed, and nothing about a command's own text can satisfy "a new
+prompt line appeared". `qemu_run_ok` extends this to also confirm exit status
+0 via a follow-up `echo "RC=$?"` -- safe from the same race, since the raw
+bytes sent contain a literal, unexpanded `$?` that can never itself satisfy a
+grep for `RC=0`.
+
+`test-install.sh` and `test-install-uefi.sh` both write their pass/fail result
+to a file (`$WORK_DIR/test-install-result.txt` /
+`test-install-uefi-result.txt`) in addition to logging: nested backgrounding
+across several sequential `qemu_boot_serial` sessions in one script has been
+observed to truncate the script's own captured stdout partway through in
+some invocation contexts (background-tool capture specifically), even though
+every phase genuinely ran to completion. The result file and the per-phase
+`$WORK_DIR/qemu-*-boot.log` transcripts are the authoritative record
+regardless of what a live terminal/capture saw.
+
+`test-install-uefi.sh` is a deliberate sibling to `test-install.sh`, not
+folded into it: the two scripts only differ in partitioning and the
+bootloader install/boot step itself (BIOS/SeaBIOS vs. OVMF/UEFI with a
+`--removable` EFI fallback). `test-install.sh`'s later phases
+(backup/grub-reboot/restore) are entirely platform-agnostic, so re-running
+all of them under OVMF would just re-prove the same logic a second time.
+`test-install-uefi.sh` searches a handful of real, common OVMF firmware
+install paths across distros (Arch's edk2-ovmf, Debian/Ubuntu's ovmf,
+Fedora's edk2-ovmf) rather than hardcoding one, and its second boot phase
+uses a completely fresh `OVMF_VARS` template (no NVRAM entries at all) to
+specifically confirm the `--removable` fallback path
+(`EFI/BOOT/BOOTX64.EFI`) boots without depending on any NVRAM entry
+`grub-install` might have registered -- the state a real firmware's NVRAM
+would be in on a disk moved to different hardware.
+
+`test-iso.sh` additionally boots with `-m 2048`, not 1024: this whole rootfs
+is RAM-resident with no separate `/tmp` mount, and 1024 isn't enough headroom
+for `fau install` of anything with a non-trivial alpm-fallback dependency
+closure (an isolated app directory doesn't strip `etc/`/`usr/include` the way
+the base system's own bootstrap path does) -- e.g. cmatrix's closure (full
+unstripped glibc, locale files included) ran a real boot out of disk space
+mid-copy at 1024 and completed cleanly at 2048. The ISO boot test itself only
+checks boot+login, not a package install, but matching what a real
+interactive session needs avoids the boot test passing while post-boot usage
+silently doesn't fit.
+
 ## Not yet scripted (documented per the "TODO over silence" rule)
 
 - TODO: persistent syslog daemon — no concrete logging requirement yet: skip

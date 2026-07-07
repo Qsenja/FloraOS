@@ -11,19 +11,14 @@ VERSIONS_CONF="$FLORA_ROOT/config/versions.conf"
 FAU_TOOLS_DIR="$FLORA_ROOT/tools/fau"
 FAU_BIN="$FAU_TOOLS_DIR/fau"
 FLORAGRUB_CFG_BIN="$FLORA_ROOT/tools/floragrub-cfg/floragrub-cfg"
-# glibc needs this at build time (see scripts/recipes/glibc.sh). Defined here
-# rather than as a side effect of sourcing linux-lts.sh: build_package()
-# skips sourcing a package's recipe entirely once it's already cached, so if
-# only glibc needs a rebuild (e.g. a version bump) while linux-lts stays
-# cached, glibc's recipe would otherwise reference an unset variable ("set
-# -u" makes that a hard crash) even though the headers are still on disk
-# from the last time linux-lts actually built.
+# Defined unconditionally: build_package() skips sourcing a cached package's
+# recipe, so referencing this lazily would crash under `set -u`.
 LINUX_HEADERS_DIR="$BUILD_DIR/linux-headers/include"
 
 log()  { echo "[floraos] $*" >&2; }
 die()  { echo "[floraos] error: $*" >&2; exit 1; }
 
-# version_entry <name> -> prints "version|url|sha256" or dies
+# Prints "version|url|sha256" from config/versions.conf, or dies.
 version_entry() {
 	local name=$1
 	local line
@@ -34,8 +29,7 @@ version_entry() {
 
 version_field() { version_entry "$1" | cut -d'|' -f"$2"; }
 
-# fetch_source <name> -> downloads (if missing) and verifies checksum,
-# prints the path to the verified tarball
+# Downloads <name> if missing, verifies its checksum, prints the local path.
 fetch_source() {
 	local name=$1
 	local version url sha256 fname path
@@ -59,8 +53,7 @@ fetch_source() {
 	echo "$path"
 }
 
-# extract_source <name> <tarball-path> -> extracts to $BUILD_DIR/<name>,
-# returns the path to the extracted top-level directory
+# Extracts <tarball> to $BUILD_DIR/<name>, prints that directory's path.
 extract_source() {
 	local name=$1 tarball=$2
 	local dest="$BUILD_DIR/$name"
@@ -71,17 +64,10 @@ extract_source() {
 }
 
 # package_stage <name> <version> <description> <depends> <stage-files-dir> [bin]
-# -> builds a .fau.tar.zst from a populated $STAGE_DIR/<name>/files tree and
-# adds it to the local fau repo. <bin>, if given, is fau-install's own
-# comma-separated relative-path list (e.g. "usr/bin/mango,usr/bin/mmsg") --
-# every recipe so far has only ever gone through `fau bootstrap` (merged
-# straight into a shared FAU_ROOT, where a system-wide bin -> usr/bin
-# symlink already exists), never `fau install`'s isolated FAU_APPS_DIR/<name>
-# path, whose own wrapper-generation (app_wrapper_write, tools/fau/fau-install)
-# only auto-detects a bare <app_dir>/bin -- never <app_dir>/usr/bin, which is
-# exactly what every one of this project's own --prefix=/usr recipes
-# produces. Optional and empty by default so every existing recipe (none of
-# which set it) keeps writing the exact same blank `bin=` line as before.
+# Builds a .fau.tar.zst from a populated $STAGE_DIR/<name>/files tree and
+# adds it to the local fau repo. <bin> is fau-install's optional
+# comma-separated relative-path list for the isolated-app path (see
+# docs/ARCHITECTURE.md); no current recipe sets it.
 package_stage() {
 	local name=$1 version=$2 description=$3 depends=$4 files_dir=$5 bin=${6:-}
 	local pkg_dir="$STAGE_DIR/$name"
@@ -96,8 +82,7 @@ package_stage() {
 	bin=$bin
 	EOF
 
-	# Built outside $REPO_DIR -- repo-add copies its argument *into* $REPO_DIR,
-	# so building the archive there directly makes that copy a no-op self-copy.
+	# Built outside $REPO_DIR: repo-add copies its argument INTO $REPO_DIR.
 	local archive="$STAGE_DIR/${name}-${version}.fau.tar.zst"
 	(cd "$pkg_dir" && tar -I zstd -cf "$archive" pkginfo files)
 	FAU_REPO_DIR="$REPO_DIR" "$FAU_BIN" repo-add "$archive"
@@ -109,22 +94,12 @@ require_cmd() {
 	command -v "$1" >/dev/null 2>&1 || die "required command not found: $1 (install it on the build host first)"
 }
 
-# --- QEMU serial-console automation (used by test-iso.sh and
-# test-install.sh) --------------------------------------------------------
-# A background QEMU instance is driven entirely over a single serial line:
-# a Unix-socket chardev (so it can be both written to and read from), fed
-# by socat from one end of a long-lived fifo into a growing log file that
-# qemu_wait_for greps. One "session" = one qemu_boot_serial/.../qemu_quit
-# bracket around exactly one QEMU process. Only one session may be open at
-# a time per shell (the globals below are session-wide, not stacked) --
-# multi-phase tests call qemu_quit before opening the next one.
+# QEMU serial-console automation used by test-iso.sh/test-install*.sh --
+# see docs/ARCHITECTURE.md's "Test harness" section for the full reasoning
+# (fifo open-for-read-write, socat addressing, etc). One session per
+# qemu_boot_serial/.../qemu_quit bracket; only one open at a time per shell.
 
-# qemu_boot_serial <tag> <qemu-args...> -> starts qemu in the background
-# with a unix-socket serial chardev and a unix-socket monitor (so qemu_quit
-# can shut it down cleanly later), then bridges the serial socket to a
-# growing log file via socat. <tag> namespaces this session's socket/fifo/
-# log paths under $WORK_DIR so sequential sessions in one script (e.g.
-# "install" then "boot1") don't collide. Sets QEMU_PID, QEMU_LOG, QEMU_FD
+# qemu_boot_serial <tag> <qemu-args...> -- sets QEMU_PID, QEMU_LOG, QEMU_FD
 # (write to this fd to type at the guest), and QEMU_MON_SOCK.
 qemu_boot_serial() {
 	local tag=$1; shift
@@ -147,29 +122,14 @@ qemu_boot_serial() {
 	done
 	[ -S "$QEMU_SOCK" ] || die "qemu (tag=$tag) never created its serial socket at $QEMU_SOCK"
 
-	# <> (read-write), not plain write-only: opening a fifo write-only
-	# blocks until some *other* process has it open for reading, but socat
-	# (the intended reader) only starts on the next line -- this is the
-	# standard trick to open a fifo without deadlocking against yourself,
-	# and it also keeps the fifo open for the whole session (a fifo's read
-	# end otherwise sees EOF the instant any single write completes).
+	# <> not >: a write-only open() here would deadlock waiting for socat's reader.
 	exec {QEMU_FD}<>"$QEMU_FIFO"
-	# "-" (stdio), not the fifo path, as socat's own address: giving it the
-	# fifo path directly as one of its two endpoints makes socat copy the
-	# socket's OUTPUT back into that same fifo too (a fifo is one shared
-	# queue, not two independent lanes) -- confirmed by testing this exact
-	# construct in isolation (see test-iso.sh's own history). Redirecting
-	# stdin from the fifo and stdout to $QEMU_LOG keeps the two directions
-	# properly separate.
+	# socat's own address must be "-" (stdio), NOT the fifo path -- see ARCHITECTURE.md.
 	socat -T"${QEMU_SERIAL_TIMEOUT:-900}" - "UNIX-CONNECT:$QEMU_SOCK" < "$QEMU_FIFO" > "$QEMU_LOG" 2>&1 &
 	QEMU_SOCAT_PID=$!
 }
 
-# qemu_wait_for <marker> [timeout-secs] -> polls $QEMU_LOG for a literal
-# substring. Whatever is on the other end of the serial line (agetty, a
-# shell, florainstall's own log_msg output) can flush a backlog before it's
-# actually at the point this test cares about, so this waits for the
-# marker to actually appear instead of guessing at timing with a sleep.
+# qemu_wait_for <marker> [timeout-secs] -- polls $QEMU_LOG for a literal substring.
 qemu_wait_for() {
 	local marker=$1 timeout=${2:-60}
 	local deadline=$(( $(date +%s) + timeout ))
@@ -180,18 +140,11 @@ qemu_wait_for() {
 	return 1
 }
 
-# qemu_send <raw-bytes> -> writes to the serial line (no implicit newline --
-# callers pass \r themselves, since a real terminal sends carriage return on
-# Enter, which the tty line discipline's ICRNL then turns into \n for
-# whatever's reading on the other end).
+# qemu_send <raw-bytes> -- callers pass \r themselves (no implicit newline).
 qemu_send() { printf '%s' "$1" >&"$QEMU_FD"; }
 
-# qemu_quit -> shuts the session's QEMU down via its monitor's `quit`
-# command rather than SIGTERM/SIGKILL, so a virtual disk's own write-back
-# cache gets flushed to the backing file cleanly instead of racing a signal
-# against in-flight writes -- this matters here specifically because
-# test-install.sh reuses the same disk image across several qemu_boot_serial
-# sessions (install, then boot, then backup/restore).
+# qemu_quit -- uses the monitor's `quit` rather than a signal, so a reused
+# disk image's write-back cache flushes cleanly first (see ARCHITECTURE.md).
 qemu_quit() {
 	for _ in $(seq 1 50); do
 		[ -S "$QEMU_MON_SOCK" ] && break

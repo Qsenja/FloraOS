@@ -189,6 +189,11 @@ scripts/test-install-uefi.sh # real QEMU/OVMF boot test: florainstall's UEFI/ESP
 work/                   # build output (gitignored) -- sources, staged builds, rootfs, fau repo
 ```
 
+Do not write documentation in the code itself — write it in the docs. Code
+comments stay minimal (a handful of short, load-bearing lines per file at
+most); design rationale, discovered bugs, and verification history belong
+in that file's own doc above, not next to the code.
+
 ## fau, the system manager
 
 Package install/remove and `fau backup`'s full-root snapshot/restore are

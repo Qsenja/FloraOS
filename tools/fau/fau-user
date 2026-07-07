@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
-# fau-user -- a thin front end over florauser (tools/florauser), same
-# "friendlier fau-native front end, don't reimplement the tool" idea as
-# fau-service/fau-seat. florauser already validates its own arguments and
-# prints its own clear errors -- these just check arg *count* (so a wrong
-# invocation gets fau's own usage line instead of florauser's), relabel its
-# output (see lib/common.sh's relabel_run: end users only ever type `fau
-# user-add`, not `florauser add`, so its messages should say "fau user-add"
-# too), and run the real thing. Called by the `fau` dispatcher; fully
-# runnable standalone too.
+# fau-user -- a thin front end over florauser (useradd/passwd/rename/...). See fau.md.
 set -euo pipefail
 
-# readlink -f before dirname: see tools/fau/fau's own comment on this --
-# only that file is symlinked today (/usr/bin/fau), but the fix is free.
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SELF_DIR/lib/common.sh"
@@ -29,16 +19,7 @@ cmd_user_add() {
 }
 
 cmd_user_passwd() {
-	# Deliberately NOT relabel_run: its prompts ("New password: ", no
-	# trailing newline, so the cursor stays put for the user to type on the
-	# same line) would sit stuck in relabel_run's sed *forever* -- sed only
-	# ever emits a complete line, so a prompt with no newline yet just isn't
-	# one. Confirmed with a throwaway C reproducer (printf, fflush, sleep,
-	# more printf) piped through the same relabel_run: the prompt and
-	# everything printed after it arrived in the same instant, well after
-	# the fflush, instead of the prompt appearing immediately -- exactly
-	# the broken interactive experience this avoids by leaving passwd's
-	# florauser-branded messages alone.
+	# Deliberately NOT relabel_run -- its sed would hang on this command's unterminated prompt (see fau.md).
 	[ $# -eq 1 ] || die "usage: fau user-passwd <name>"
 	user_check_available
 	"$FLORAUSER_BIN" passwd "$@"

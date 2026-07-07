@@ -119,6 +119,14 @@ they have genuinely different lifetimes:
   actual fix — `fau-install`'s own `depends=` mechanism still has this bug
   today; it just hasn't been hit yet because nothing installed through it
   so far has had a real shared-library dependency beyond glibc.
+  `build_merge_depends` skips `filesystem` and any package fau's own
+  `system.json` already has an entry for, the same guard
+  `install_one_alpm`/`app_install_one_alpm` (`lib/alpm.sh`) apply for the
+  glibc-overwrite bug documented below — a stale comment in `lib/build.sh`
+  used to claim the opposite (that this path deliberately does *not* skip
+  them, reasoning that an isolated `app_dir` has no access to `FAU_ROOT`'s
+  search path); the code has always actually skipped them, so treat the
+  code as ground truth here, not that comment.
 - `PKG_BUILD_DEPS` — build-only tools (a compiler, `meson`, `ninja`, ...).
   Resolved via alpm into a throwaway sandbox directory, **with dev headers
   kept** (`alpm_sandbox_fetch`, `lib/alpm.sh` — every other alpm-fetching
@@ -164,11 +172,142 @@ disk-space caveats below, no live-vs-installed detection added. Also,
 one re-fetches its own compiler/build tools from scratch, the direct,
 intended cost of "wiped every time," not an oversight.
 
+**A real bug found by actually running `fau build mangowm` end to end, not
+by inspection**: `cmd_build`'s sandbox cleanup is an `EXIT` trap
+(`trap 'rm -rf "$sandbox_dir"' EXIT`), and that trap can fire *after*
+`cmd_build` itself has already returned — control falls through the
+dispatch `case` statement back to the script's natural end, at which point
+`cmd_build`'s stack frame (and anything `local` inside it) no longer
+exists. A `local sandbox_dir` crashed with "sandbox_dir: unbound variable"
+the instant the trap fired on exactly that path: the build itself had
+succeeded completely, only the trap's own cleanup failed, leaving the
+sandbox behind — exactly the opposite of "wiped every time" this is
+supposed to guarantee. Fixed by making `sandbox_dir` a plain script-global
+instead of `local`; safe because `cmd_build` only ever runs once per
+process (called directly from this file's own dispatch case, nothing after
+it).
+
+## The `mangowm` recipe (`recipes/mangowm.fis`)
+
+`mango` (upstream binary name; AUR package name `mangowm`) is a `dwl` fork
+— a wlroots-based tiling Wayland compositor, "dwm but Wayland". Confirmed
+directly against https://aur.archlinux.org/packages/mangowm: AUR-only, no
+official Arch/Artix repo carries it, so this is the first (and so far
+only) real user of `fau build`.
+
+- **Meson is a deliberate one-off exception.** This project avoids
+  cmake/meson everywhere else it has a choice (mbedtls picked over OpenSSL,
+  a from-scratch seatd reimplementation specifically to dodge "seatd is
+  meson/ninja-only upstream", kmod pinned to its last autotools release
+  before upstream itself moved to meson — see those recipes/
+  docs/ARCHITECTURE.md). mango's upstream ships `meson.build` only, no
+  Makefile, and neither it nor its hard dependency `scenefx` offers one —
+  unlike every prior case, there's no non-meson alternative to pick here.
+- **`scenefx`** (wlrfx/scenefx, the wlroots scene-API effects renderer
+  mango's own `meson.build` hard-requires with no build option to disable
+  it) is also AUR-only, so it's fetched and built directly inside
+  `recipe_build` rather than declared as its own `PKG_DEPENDS` entry —
+  `build_merge_depends` needs a real alpm package name to resolve, and
+  scenefx has none. It's built straight into the shared `$sandbox_dir`
+  (not a separate prefix): the sandbox already carries every header/lib
+  scenefx itself needs (mirrored into `PKG_BUILD_DEPS` for that reason,
+  not just mango's own build requirements), and installing scenefx's
+  output back into that same sandbox means mango's own meson setup finds
+  it via the sandbox's already-exported `PKG_CONFIG_PATH` with no second
+  prefix to track. Its `.so` is then bundled straight into
+  `$app_dir/usr/lib` as `recipe_build`'s last step, since it's a private,
+  unnamed runtime dependency mango's own alpm closure has no way to
+  express.
+- **`wlroots0.19`** is hard-pinned exactly by both scenefx
+  (`dependency('wlroots-0.19', version: '>=0.19.0')`) and mango — never
+  built by this project itself (`fau install <wm>` fetches wlroots
+  precompiled via the alpm fallback, see docs/ARCHITECTURE.md's
+  GUI-readiness section), so this recipe builds and links against
+  whatever `wlroots0.19` alpm resolves at `fau build` time. Real,
+  disclosed risk: only ABI-correct by version coincidence, the same class
+  of risk this project already accepts for every alpm-fetched binary, now
+  also affecting this recipe's own build output.
+- **`mesa`/`libglvnd`/`glslang`** aren't in mango's own `meson.build`
+  dependency list at all — they're scenefx's own build requirements
+  (egl/gbm/glesv2/glslang), found by actually configuring scenefx and
+  reading what meson reported, then running `pacman -Qo` against the
+  resulting `.so`s on a real build host (not guessed):
+  `libEGL.so.1`/`libGLESv2.so.2` come from `libglvnd`, `libgbm.so.1` from
+  `mesa`, and `glslang` (the shader-compiler *program*, not a linked
+  library — it never appears in `ldd`) from the `glslang` package. `mesa`
+  and `libglvnd` are needed in both `PKG_BUILD_DEPS` (scenefx links them)
+  and `PKG_DEPENDS` (mango's own `ldd` shows them as direct runtime deps
+  via the bundled `scenefx.so`); `glslang` is build-only.
+- **`xorg-xwayland`** is a genuine runtime dependency that never shows up
+  in `ldd`: mango links wlroots' xwayland support
+  (`wlr_xwayland_create`, confirmed directly in `src/mango.c`), which
+  `exec`s the real `Xwayland` binary at runtime instead of linking it. It
+  still needs to be listed in `PKG_DEPENDS` for that feature to work —
+  same "document the non-obvious runtime need" reasoning as `kbd`
+  depending on `gzip`.
+- **Disclosed, not fixed**: mango's own compiled-in system config
+  fallback path is the literal string `/etc/mango/config.conf`
+  (`meson.build`'s own `sysconfdir` handling), which an isolated app has
+  no way to redirect — `app_wrapper_write`'s `XDG_CONFIG_HOME` correctly
+  covers mango's *user* config search, but the system-wide fallback still
+  points at the real host's `/etc/mango`, not this app's own isolated
+  copy. Same class of isolation-model rough edge as perl's own
+  compiled-in `@INC` (see `app_wrapper_write` above) — not patched here
+  since fixing it means patching mango's own source, a bigger
+  intervention than this recipe's actual job.
+
 ## Manifests (`system.json` / `apps.json`) — `lib/manifest.sh`
 
 Flat schema only: `{"packages":{"name":{"version":"x"}}}`, hand-rolled
 grep/sed parsing (`json_get_version`, `json_set`, ...) — fine at this scale,
 revisit if the schema ever grows past one level.
+
+**A real bug found in `fau-bootstrap`'s `cmd_bootstrap_apply`**: it used to
+read only the package names out of the manifest via a hand-rolled pass and
+silently drop the version each one was pinned to, so `bootstrap-apply` never
+actually verified it installed what the manifest recorded — a version
+mismatch just passed silently. Fixed by reusing `json_list_names`/
+`json_get_version` (the exact same parsing `system.json`'s own read path
+already uses) instead of a second hand-rolled regex, and passing the
+recorded version through to `install_one` so a mismatch against the repo is
+a hard error (see `depends=` version constraints above).
+
+`fau-bootstrap`'s `remove_one_file` only deletes a package's file from
+`FAU_ROOT` if no *other* still-installed package's own file list also
+claims it — packages legitimately share paths since rsync merges every one
+into the same root (e.g. two packages both shipping the same merged-`/usr`
+directory). A package installed before fau tracked per-package file lists
+(or a transitive alpm dependency never independently tracked in
+`system.json` to begin with) has no file list to remove from at all;
+`bootstrap-remove` just untracks it from `system.json` in that case, files
+left in place.
+
+## `export`/`import` (`fau-export`) — the `system.flora` bundle format
+
+A `system.flora` is a tar+zstd archive, the same format as fau's own
+`.fau.tar.zst` packages just under a distinct extension — no zip/unzip
+anywhere in FloraOS (would be a new, otherwise-unjustified dependency) when
+tar+zstd is already required for fau itself. It contains:
+
+- `system.json` — base packages (`FAU_SYSTEM_JSON`) + installed apps
+  (`FAU_APPS_JSON`) + a `configs` map of every config file path found under
+  each installed app's own `config/` dir, e.g.
+  `"configs":{"kitty":["kitty.conf","startup.conf"]}`.
+- `configs/<app>/<relpath>` — the actual config file contents, matching the
+  manifest's `configs` entry for `<app>`.
+
+Each of the three top-level keys is written on its own single line with no
+embedded newlines, so `manifest_section_get` can pull one out with a plain
+grep/sed instead of a real JSON parser — the same hand-rolled approach
+`lib/manifest.sh`'s `json_get_version` already takes.
+
+`cmd_import` reinstalls any app the manifest lists that isn't installed
+locally yet (so there's somewhere for its config to land), but leaves an
+already-installed app as-is — only its config gets restored — rather than
+force-reinstalling over a version the user may have deliberately changed
+since export. It shells out to the sibling `fau-install` tool for that
+reinstall (same "call the tool, don't inline its logic" shape as elsewhere
+in this project) rather than sourcing `app_install_one` directly.
 
 ## Repo (`repo_add`/`repo_index`) — `lib/repo.sh`
 
@@ -190,6 +329,15 @@ would still be active for every later command in the same call (notably
 `system.json` before the fix.
 
 ## Installing (`install_one` in fau-bootstrap / `app_install_one` in fau-install)
+
+Each `fau-install`ed app lives entirely under `FAU_APPS_DIR/<name>/`: its own
+files plus `config`/`cache`/`data`/`logs` subdirs. The wrapper scripts in
+`FAU_APPS_BIN_DIR` work by setting `HOME`/`XDG_*_HOME` to redirect an app
+into its own directory before exec'ing the real binary, which works for any
+app that follows the XDG Base Directory spec (most modern Linux software
+does). Disclosed limit, not a bug: an app that hardcodes absolute paths
+instead of respecting `XDG_*_HOME`/`HOME` won't cooperate with this
+isolation.
 
 - **rsync flags matter**: `-aK --checksum`. `-K` (`--keep-dirlinks`) is
   required for merging multiple packages into one root where `bin`/`sbin`/
@@ -234,7 +382,9 @@ already-booted FloraOS system (no pacman, no synced db at all — falls back
 to fetching a mirrorlist/db copy FloraOS ships at `/etc/fau/` for exactly
 this). Real, disclosed caveat: fetched binaries are built against Artix's
 glibc — only ABI-compatible with FloraOS's own from-scratch glibc by
-current-version coincidence, not by any guarantee.
+current-version coincidence, not by any guarantee. GUI apps fetched this
+way also have no display server to draw on yet (see docs/ARCHITECTURE.md)
+— this gets the files installed, not a running X11/Wayland session.
 
 **Bugs found doing this for real, not from reading the code:**
 
@@ -299,6 +449,52 @@ current-version coincidence, not by any guarantee.
   tmp-name-then-rename (same atomic pattern as `write_lines`), since a
   background prefetch can race a real install hitting the same
   destination file.
+- **A tab-delimited resolution record silently corrupted the instant a
+  middle field was empty.** `alpm_repo_index`/`alpm_resolve`'s own records
+  originally used a literal tab as the field separator, but bash's `read`
+  collapses *consecutive* IFS-whitespace separators (a tab counts as
+  whitespace regardless of what `IFS` is set to) — the moment a field in
+  the middle was empty (e.g. a package with no `depends` or no
+  `provides`), every field after it silently shifted by one position.
+  Found by tracing a real resolution: `linux-api-headers` (empty
+  depends+provides) ended up looking like it "depended on" its own
+  filename. Fixed by switching every such record to `$ALPM_FS` (`\x1f`,
+  ASCII unit separator) — not whitespace, so `read` preserves empty
+  fields correctly; verified directly before relying on it project-wide.
+- **The "skip a package fau's own system.json already provides" guard
+  silently never fired for a request resolving through a PROVIDES alias.**
+  Both `install_one_alpm` and `app_install_one_alpm` guard against
+  reinstalling the *actual requested* package over itself by checking
+  index `"$i" -ne "$total"` (relying on `alpm_resolve`'s "dependencies
+  before dependents" contract, so the requested package's real name is
+  always the last resolved entry) rather than `"$pkgname" != "$name"`.
+  That distinction matters because the requested package's real name can
+  differ from the name the user typed: `fau install man` resolves through
+  a virtual/PROVIDES alias to the real package `man-db`, so no `$pkgname`
+  in the closure ever literally equals the string `"man"` — a
+  name-equality check's "unless it's the actual requested package"
+  carve-out silently never applied for that case. Found via a real `fau
+  install man` quietly skipping-or-not going wrong, not by inspection.
+- **`app_install_one_alpm` crashed with "target_files: unbound variable"
+  under `set -u`** before its `local` declaration explicitly initialized
+  it to `""`. A `local a b="" c=0` line only implicitly empties the names
+  that get an explicit `=value`; a bare name alongside them (`a` here)
+  is genuinely unbound, not `""`, on this bash — confirmed by reproducing
+  the exact crash in isolation. This is also what made the `man`/`man-db`
+  alias bug above easy to hit in practice: with the wrong guard,
+  `target_files` was never reached by the assignment that would have set
+  it, so `fau install man` crashed on the unbound variable before even
+  getting to the guard's own wrong consequence.
+- **`fau install fastfetch` produced a 75MB app directory for a small
+  login-banner tool** before `app_install_one_alpm` skipped
+  already-system-provided packages the same way `install_one_alpm` does.
+  `fastfetch`'s own real dependency closure includes `glibc` — headers,
+  static libs, locale/zoneinfo data, glibc's own utility binaries — even
+  though FloraOS's from-source glibc is already on the system's default
+  library search path (`app_wrapper_write`'s `LD_LIBRARY_PATH` is
+  additive, not exclusive). Measured directly: ~14MB of that 75MB was
+  glibc's headers alone. Fixed by mirroring `install_one_alpm`'s
+  already-provided-package skip in the app-install path too.
 
 ## Version comparison (`alpm_vercmp`) — `lib/alpm.sh`
 
@@ -454,11 +650,14 @@ type `fau user-*`, so florauser's messages should say so too.
 `user-passwd` deliberately skips `relabel_run`: its interactive prompt
 (termios echo off, no trailing newline so the cursor stays on the same
 line) would sit stuck, invisible, in `relabel_run`'s line-oriented sed
-until some later newline flushed it out. It execs `florauser passwd`
-directly instead, working unmodified since bash doesn't redirect stdio
-for a plain function call — its "florauser: password updated for ..."
-confirmation and error messages keep florauser's own naming as the
-tradeoff for a live prompt.
+until some later newline flushed it out — confirmed with a throwaway C
+reproducer (printf, fflush, sleep, more printf) piped through the same
+`relabel_run`: the prompt and everything printed after it arrived in the
+same instant, well after the `fflush`, instead of the prompt appearing
+immediately. It execs `florauser passwd` directly instead, working
+unmodified since bash doesn't redirect stdio for a plain function call —
+its "florauser: password updated for ..." confirmation and error messages
+keep florauser's own naming as the tradeoff for a live prompt.
 
 Verified in a real QEMU boot (before `relabel_run` existed): `fau user-add
 alice seat` + `fau user-passwd alice` + `fau user-rename alice bob`,

@@ -1,16 +1,7 @@
 #!/usr/bin/env bash
-# fau-install -- user-facing package management: install/remove/list. Each
-# app lives entirely under FAU_APPS_DIR/<name>/: its own files, plus
-# config/cache/data/logs subdirs. Wrapper scripts in FAU_APPS_BIN_DIR (put
-# that on PATH) set HOME/XDG_*_HOME to redirect the app into its own
-# directory before exec'ing the real binary -- works for any app that
-# follows the XDG Base Directory spec (most modern Linux software does).
-# Apps that hardcode absolute paths won't cooperate; that's a known limit,
-# not a bug. Called by the `fau` dispatcher; fully runnable standalone too.
+# fau-install -- user-facing package management: install/remove/list isolated apps. See fau.md.
 set -euo pipefail
 
-# readlink -f before dirname: see tools/fau/fau's own comment on this --
-# only that file is symlinked today (/usr/bin/fau), but the fix is free.
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SELF_DIR/lib/common.sh"
@@ -19,15 +10,9 @@ source "$SELF_DIR/lib/manifest.sh"
 # shellcheck source=lib/repo.sh
 source "$SELF_DIR/lib/repo.sh"
 # shellcheck source=lib/alpm.sh
-# alpm.sh's own app_install_one_alpm calls app_wrapper_write (lib/common.sh,
-# already sourced above) -- fine, since bash only resolves a function call
-# at the moment it actually runs, not at source time.
 source "$SELF_DIR/lib/alpm.sh"
 
 app_install_one() {
-	# app_install_one <name> [ancestor-chain] -- see fau-bootstrap's own
-	# install_one comment for why the chain is a plain argument, not a
-	# global.
 	local name=$1 chain=${2:-}
 	case ":$chain:" in
 		*":$name:"*) die "circular dependency: $chain:$name" ;;

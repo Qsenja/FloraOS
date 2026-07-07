@@ -1,81 +1,7 @@
 #!/usr/bin/env bash
-# fau-build -- builds a package from source directly on this (already
-# booted) system, on demand, then throws away whatever build-only tools it
-# needed. Closes a real gap fau-install/fau-bootstrap don't cover: both of
-# those only ever move *already-built* files around (fau's own local repo of
-# pre-built .fau.tar.zst archives, or precompiled Arch/Artix binaries via the
-# alpm fallback) -- nothing in fau ever compiled anything itself before this.
-# That's a dead end for a package with no precompiled binary anywhere (e.g.
-# mangowm, AUR-only) short of someone rebuilding and re-shipping it by hand.
-#
-# Recipes ship inside the image at $FAU_RECIPES_DIR (default
-# /usr/lib/fau/recipes/*.fis, see lib/common.sh) -- a completely separate
-# thing from scripts/recipes/*.sh, which stays exactly as it was: base
-# rootfs packages, built once on a separate dev/build host by
-# scripts/build-rootfs.sh, never touched by fau at runtime. ".fis" ("fau
-# install script") is just a distinct extension so a recipe meant for this
-# file is never confused with a scripts/recipes/*.sh one at a glance --
-# it's still plain bash, sourced the exact same way, no special syntax of
-# its own. A recipe here declares:
-#   PKG_SRC_URL / PKG_SRC_SHA256 / PKG_VERSION   its own primary upstream
-#       source -- there's no config/versions.conf shipped at runtime, so
-#       these live directly in the recipe file.
-#   PKG_DESCRIPTION                              one-line description.
-#   PKG_DEPENDS       real runtime shared-library/CLI dependencies (comma-
-#       separated Arch/Artix package names). Resolved via alpm, full
-#       transitive closure merged STRAIGHT INTO the built app's own
-#       directory (build_merge_depends, lib/build.sh) -- not installed as
-#       separate isolated apps the way fau-install's own depends= works.
-#       That distinction matters: fau-install puts each dependency in its
-#       own FAU_APPS_DIR/<dep>/, but a wrapper script's LD_LIBRARY_PATH
-#       (app_wrapper_write, lib/common.sh) only ever covers its own app's
-#       directory -- a real .so dependency installed that way is never
-#       found at runtime. Merging the whole closure into this app's own
-#       directory instead is the actual fix, found while designing this.
-#   PKG_BUILD_DEPS    build-only tools (e.g. "gcc,meson,ninja,pkgconf,make").
-#       Resolved via alpm into a throwaway sandbox directory WITH dev
-#       headers kept (alpm_sandbox_fetch, lib/alpm.sh -- unlike every other
-#       alpm-fetching path in this project, which strips usr/include
-#       unconditionally), PATH/LD_LIBRARY_PATH/PKG_CONFIG_PATH pointed at
-#       it for the build, then the whole sandbox is removed unconditionally
-#       once the build finishes (or fails) -- this system never permanently
-#       carries a compiler just because it built one thing once.
-#   PKG_BIN           comma-separated relbin list (e.g. "usr/bin/mango"),
-#       same field fau-install's own local-repo path already understands
-#       (package_stage/build_package, scripts/lib+build-rootfs.sh) --
-#       fau-install's own bin= auto-detect only ever finds a bare
-#       <app_dir>/bin, never usr/bin, which every --prefix=/usr build
-#       produces.
-#   recipe_build <src> <app_dir> <sandbox_dir>   same shape as
-#       scripts/recipes/*.sh's own recipe_build, with the sandbox dir added.
-#       A recipe needing a second upstream source (mangowm needing scenefx,
-#       for instance) calls build_fetch_source itself for it, exactly like
-#       scripts/recipes/*.sh's own fetch_source convention -- same pattern,
-#       just this file's live-system equivalent.
-#
-# `fau install <name>` (fau-install) deliberately does NOT fall back to this
-# automatically on a resolve failure -- it just hints at 'fau build <name>'.
-# Building is much heavier (fetches a whole compiler, can take minutes); a
-# typo in a package name shouldn't silently trigger that.
-#
-# `fau remove <name>` needs no code here at all: a built app is a completely
-# ordinary isolated app once this finishes (same .pkginfo/app_dir/
-# .fau-apps.json shape fau-install itself produces), so fau-install's own
-# cmd_remove already handles it.
-#
-# Disclosed, not solved: a live (un-installed, RAM-only) boot has no
-# persistent disk -- compiling something sizeable could exhaust RAM. Same
-# accepted-but-undetected risk class as the alpm fallback's own documented
-# disk-space caveats (see lib/alpm.sh); no live-vs-installed detection here.
-# Also: PKG_BUILD_DEPS is never cached between separate `fau build` runs --
-# every one re-fetches its own compiler/build tools from scratch. That's the
-# direct, intended cost of "wiped every time," not an oversight.
-#
-# Called by the `fau` dispatcher; fully runnable standalone too.
+# fau-build -- builds a package from source on this system, on demand, from a .fis recipe. See fau.md.
 set -euo pipefail
 
-# readlink -f before dirname: see tools/fau/fau's own comment on this --
-# only that file is symlinked today (/usr/bin/fau), but the fix is free.
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SELF_DIR/lib/common.sh"
@@ -86,10 +12,6 @@ source "$SELF_DIR/lib/alpm.sh"
 # shellcheck source=lib/build.sh
 source "$SELF_DIR/lib/build.sh"
 
-# csv_words <comma-separated-list> -> prints each item on its own line,
-# blank/whitespace-only entries dropped. Same tr','+xargs-trim idiom
-# fau-install's own app_install_one already uses for depends=/bin= --
-# matched here rather than reinventing array-splitting.
 csv_words() {
 	local item
 	for item in $(printf '%s' "${1:-}" | tr ',' ' '); do
@@ -104,13 +26,6 @@ cmd_build() {
 	local recipe="$FAU_RECIPES_DIR/$name.fis"
 	[ -f "$recipe" ] || die "no recipe for '$name' (looked in $FAU_RECIPES_DIR) -- see 'fau build-list'"
 
-	# Reset every PKG_* field before sourcing: this process only ever
-	# builds one recipe per invocation (unlike build-rootfs.sh's own
-	# per-package loop over BUILD_ORDER in one long-lived shell), so
-	# there's no cross-recipe staleness risk in practice -- reset anyway
-	# so a recipe that simply omits an optional field (PKG_BUILD_DEPS,
-	# PKG_BIN) reliably sees it empty rather than whatever a stray
-	# environment variable happened to already hold.
 	local PKG_SRC_URL="" PKG_SRC_SHA256="" PKG_VERSION="" PKG_DESCRIPTION=""
 	local PKG_DEPENDS="" PKG_BUILD_DEPS="" PKG_BIN=""
 	# shellcheck source=/dev/null
@@ -130,19 +45,7 @@ cmd_build() {
 		build_merge_depends "$app_dir" "${depends[@]}"
 	fi
 
-	# Deliberately NOT `local`: this EXIT trap can fire *after* cmd_build
-	# itself has already returned (the normal-completion case -- control
-	# falls through the dispatch case statement below back to the script's
-	# own natural end, at which point cmd_build's stack frame, and any
-	# `local` within it, no longer exists). A `local sandbox_dir` here
-	# crashed with "sandbox_dir: unbound variable" the instant the trap
-	# fired on exactly that path -- found by actually running a real `fau
-	# build mangowm` end to end, not by inspection: the build itself
-	# succeeded completely, the trap's own cleanup failed, and the
-	# sandbox was left behind -- exactly the opposite of "wiped every
-	# time". cmd_build only ever runs once per process (called directly
-	# from this file's own dispatch case, nothing after it), so a
-	# script-global here is safe and correct, not sloppy scoping.
+	# Deliberately NOT `local` -- the EXIT trap can fire after this function returns (see fau.md).
 	sandbox_dir=$(mktemp -d)
 	trap 'rm -rf "$sandbox_dir"' EXIT
 
@@ -162,9 +65,6 @@ cmd_build() {
 		LD_LIBRARY_PATH="$sandbox_dir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 		PKG_CONFIG_PATH="$sandbox_dir/usr/lib/pkgconfig:$sandbox_dir/usr/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
 		recipe_build "$src" "$app_dir" "$sandbox_dir"
-	# Sandbox removal happens via the EXIT trap above, including on a
-	# recipe_build failure under set -e -- this system never keeps a
-	# compiler around just because this one build needed it.
 
 	local -a bin=(); while IFS= read -r b; do bin+=("$b"); done < <(csv_words "$PKG_BIN")
 	{

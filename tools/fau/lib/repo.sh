@@ -1,8 +1,4 @@
-# lib/repo.sh -- fau's own local package repo (FAU_REPO_DIR: .fau.tar.zst
-# archives + repo.json index), sourced by fau-repo (repo-add/repo-index
-# themselves) and by fau-bootstrap/fau-install (both need to check the
-# local repo before falling back to lib/alpm.sh's Arch/Artix path).
-#
+# lib/repo.sh -- the local .fau.tar.zst repo (repo_json/repo_index/...). See fau.md.
 # Requires lib/common.sh already sourced (die/log/json_escape/pkginfo_field).
 
 repo_json() { echo "${FAU_REPO_DIR%/}/repo.json"; }
@@ -37,10 +33,6 @@ repo_index() {
 }
 
 repo_lookup_file() {
-	# repo_lookup_file <name> -> prints archive filename, or nothing if
-	# there's no repo index yet or the name isn't in it (not an error here --
-	# callers that need a system package to exist check for an empty result
-	# themselves; app_install_one falls back to the alpm (Arch/Artix repo) path on an empty result)
 	local name=$1 repo; repo=$(repo_json)
 	[ -f "$repo" ] || return 0
 	awk -v n="\"$name\"" '
@@ -66,12 +58,7 @@ repo_add() {
 	[ -f "$archive" ] || die "no such archive: $archive"
 	mkdir -p "$FAU_REPO_DIR"
 
-	# A repo directory must hold at most one archive per package name --
-	# without this, repo_index (which just globs every *.fau.tar.zst) ends up
-	# with duplicate keys for the same name after a version bump (the old
-	# archive never gets removed on its own), and which one repo_lookup_file
-	# resolves to then depends on filesystem glob order, not on which
-	# version was actually just added.
+	# At most one archive per package name is kept -- see fau.md's Repo section.
 	local work; work=$(mktemp -d)
 	tar -I zstd -xf "$archive" -C "$work" pkginfo
 	local incoming_name; incoming_name=$(pkginfo_field "$work/pkginfo" name)

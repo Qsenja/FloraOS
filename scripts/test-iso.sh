@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# Boots the built FloraOS ISO in QEMU (serial console, no graphics) and
-# checks for two markers in the boot log: the kernel actually starting, and
-# the login shell actually being reached (see /etc/profile's PS1 -- a
-# deliberate, unambiguous marker rather than guessing at bash's default
-# prompt). Since floralogin now gates the console, this also drives the
-# actual login (root, empty password -- see /etc/issue) through the serial
-# socket rather than just watching output; the shell marker only appears if
-# that login genuinely succeeds. Exits non-zero if either marker is missing
-# within the timeout.
+# Boots the built FloraOS ISO in QEMU and checks for two markers in the boot
+# log: the kernel starting, and the login shell being reached. Drives the
+# actual root/empty-password login over the serial socket to get there --
+# see docs/ARCHITECTURE.md's "Test harness" section for the fifo/socat
+# synchronization details this shares with scripts/lib/common.sh's qemu_*.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,28 +23,14 @@ require_cmd timeout
 require_cmd socat
 [ -f "$ISO" ] || die "no ISO at $ISO -- run floraiso build first"
 
-# floralogin now gates the console (see ARCHITECTURE.md/apply-skeleton.sh)
-# -- a plain read-only `-serial file:` redirect (the old approach) can watch
-# boot output but can't answer the login prompt, so the shell would never
-# actually be reached by this automated test anymore. A Unix-socket serial
-# device lets `socat` do both: feed the documented root/empty-password
-# login (see /etc/issue) and capture everything QEMU writes, in one stream.
 SERIAL_SOCK="$WORK_DIR/qemu-serial.sock"
 INPUT_FIFO="$WORK_DIR/qemu-serial-input.fifo"
 rm -f "$SERIAL_SOCK" "$INPUT_FIFO" "$BOOT_LOG"
 mkfifo "$INPUT_FIFO"
 
 log "booting $ISO in QEMU (up to ${TIMEOUT_SECS}s)"
-# 2048, not 1024: this whole rootfs is RAM-resident (initramfs, no separate
-# /tmp mount), and 1024 genuinely isn't enough headroom for `fau install`
-# of anything with a non-trivial alpm-fallback dependency closure -- an
-# isolated app directory doesn't strip etc/usr-include the way the base
-# system's own bootstrap path does, so e.g. cmatrix's closure (full
-# unstripped glibc, locale files included) ran a real boot out of disk
-# space mid-copy at 1024 and completed cleanly at 2048, with nothing else
-# about the install changed. This test only checks boot+login, not a
-# package install, but matching what a real interactive session needs
-# avoids the boot test passing while post-boot usage silently doesn't fit.
+# -m 2048, not 1024: see docs/ARCHITECTURE.md (a real out-of-disk-space boot
+# failure under `fau install`, even though this test itself only checks login).
 timeout "$TIMEOUT_SECS" qemu-system-x86_64 \
 	-m 2048 \
 	-cdrom "$ISO" \
@@ -66,33 +48,14 @@ for _ in $(seq 1 100); do
 done
 
 SOCAT_PID=""
-# fd 9 holds the fifo open for the whole test -- opened read-write (<>),
-# not write-only (>): a plain write-only open() on a fifo blocks until some
-# reader also has it open, but socat (the intended reader) only starts on
-# the next line, so opening write-only here first would deadlock the
-# script against itself. <> is the standard trick to open a fifo without
-# waiting for a peer. It also then holds the fifo open for the whole test --
-# a fifo's read end otherwise sees EOF the instant any single write
-# completes, which would end the socat session after the first thing sent.
+# <> not >: write-only open() would deadlock waiting for socat's reader
+# (see docs/ARCHITECTURE.md's "Test harness" section).
 exec 9<>"$INPUT_FIFO"
 if [ -S "$SERIAL_SOCK" ]; then
-	# "-" (stdio), not the fifo path, as socat's own address: giving it the
-	# fifo path directly as one of its two endpoints makes socat copy the
-	# socket's OUTPUT back into that same fifo too (a fifo is one shared
-	# queue, not two independent lanes), so the boot log never actually
-	# received the socket's data and the whole thing looked hung (found by
-	# testing this exact construct in isolation before touching the real
-	# script). Redirecting stdin from the fifo and stdout to BOOT_LOG keeps
-	# the two directions properly separate.
+	# socat's address must be "-" (stdio), NOT the fifo path -- see ARCHITECTURE.md.
 	socat -T"$TIMEOUT_SECS" - "UNIX-CONNECT:$SERIAL_SOCK" < "$INPUT_FIFO" > "$BOOT_LOG" 2>&1 &
 	SOCAT_PID=$!
 
-	# agetty flushes whatever arrived on the line before it actually starts
-	# prompting (reproduced directly: sending the login+password blindly
-	# right after QEMU starts, well before boot reaches the prompt, got
-	# silently discarded and the login never happened) -- wait for each
-	# actual prompt string to show up in the growing log before answering
-	# it, instead of guessing at timing.
 	wait_for() {
 		local marker=$1 deadline=$(( $(date +%s) + TIMEOUT_SECS ))
 		while [ "$(date +%s)" -lt "$deadline" ]; do

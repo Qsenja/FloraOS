@@ -1,26 +1,4 @@
-/* vt-test-client -- a diagnostic seatd-protocol client for manually
- * verifying floraseat's VT-bound switching (see floraseat.c's own header
- * comment). NOT part of FloraOS itself: build-rootfs.sh does not compile
- * or stage this, so it never ships in a real rootfs/ISO. It exists purely
- * so a real VT switch (`chvt`, or a physical Ctrl+Alt+Fn) can be observed
- * end-to-end without an actual Wayland compositor available to exercise
- * the path -- see tools/floraseat/floraseat.md's "Verification" section
- * for exactly how this was used to boot-test the VT-bound rewrite in real
- * QEMU (chvt between two VTs, each running one instance of this).
- *
- * Speaks just enough of the real seatd wire protocol (opcodes/structs
- * copied from floraseat.c itself, which is verified against upstream
- * kennylevinsen/seatd) to open a seat, open a DRM device, and print every
- * SERVER_* event it receives.
- *
- * Build (statically, so it needs no rootfs headers/libs to run against a
- * built FloraOS image -- see floraseat.md for the full manual-test recipe):
- *   gcc -O2 -static -o vt-test-client vt-test-client.c
- *
- * Usage: vt-test-client <label> [drm-device-path]
- * Every log line is prefixed "TC[<label>]:" so two instances' logs (piped
- * to separate files, one per VT) stay easy to tell apart.
- */
+/* vt-test-client -- diagnostic seatd-protocol client for manually testing floraseat's VT switching. See floraseat.md. Not shipped by build-rootfs.sh. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>

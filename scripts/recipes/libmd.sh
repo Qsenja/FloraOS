@@ -1,6 +1,4 @@
-# libmd (BSD message-digest routines). dhcpcd links against this for its
-# DUID/hashing needs, with no configure flag to avoid it -- unlike most
-# other gaps found here, this one has to be shipped rather than disabled.
+# libmd -- see docs/MANIFEST.md.
 PKG_DESCRIPTION="BSD message-digest library — dhcpcd links against it, no way to disable"
 PKG_DEPENDS="glibc"
 

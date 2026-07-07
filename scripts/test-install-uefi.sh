@@ -1,37 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end test for florainstall's UEFI/ESP path -- sibling to
-# scripts/test-install.sh (which only ever exercised BIOS/i386-pc). Same
-# serial-console TUI-driving technique (see scripts/lib/common.sh's qemu_*
-# helpers), but boots QEMU with OVMF pflash firmware instead of BIOS/SeaBIOS,
-# to check:
-#   1. the live ISO itself actually took the UEFI boot path (grub-mkrescue's
-#      hybrid image supports this -- see docs/ARCHITECTURE.md's Bootloader
-#      section -- but this confirms OVMF actually exercised it, not BIOS/CSM)
-#   2. florainstall detects that and partitions accordingly (ESP + Linux
-#      root, not the single-partition BIOS scheme), and its confirm-
-#      destructive dialog says so
-#   3. grub-install --target=x86_64-efi --removable actually produces a disk
-#      that boots -- specifically via the *fallback* EFI/BOOT/BOOTX64.EFI
-#      path, not an NVRAM boot entry: the second boot uses a completely
-#      fresh OVMF_VARS template (no NVRAM entries at all), the same state a
-#      real firmware's NVRAM would be in on a disk moved to different
-#      hardware, or a firmware that was reset
-#   4. the installed system really is rootflags=subvol=@ on the *second*
-#      partition (the ESP took the first), and the ESP is mounted at
-#      /boot/efi per fstab
-#
-# Deliberately NOT folded into test-install.sh itself: that script's four
-# phases (install/backup/grub-reboot/restore) are entirely BIOS-vs-UEFI
-# agnostic past the install step (floragrub-cfg's grub.cfg format doesn't
-# change either way, see tools/floragrub-cfg's own header), so re-running
-# all four under OVMF would just re-prove the same backup/restore logic a
-# second time for no real extra coverage -- this only re-checks the parts
-# that actually differ: partitioning and the bootloader install/boot itself.
-#
-# Requires OVMF firmware on the build host (edk2-ovmf or equivalent
-# package) -- searches a handful of real, common install paths across
-# distros rather than hardcoding one, and dies with a clear message instead
-# of silently skipping if none is found.
+# End-to-end QEMU/OVMF test for florainstall's UEFI/ESP path -- sibling to
+# test-install.sh (BIOS only). See docs/ARCHITECTURE.md's "Test harness"
+# section for the full scope and why this isn't folded into test-install.sh.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,9 +18,7 @@ require_cmd qemu-img
 require_cmd socat
 [ -f "$ISO" ] || die "no ISO at $ISO -- run ./floraiso build first"
 
-# Real paths this firmware is actually installed at across distros (Arch's
-# edk2-ovmf, Debian/Ubuntu's ovmf, Fedora's edk2-ovmf) -- not a guess, each
-# checked against this project's own build/test hosts.
+# Common OVMF install paths across distros -- see docs/ARCHITECTURE.md.
 OVMF_CODE=""
 OVMF_VARS_TEMPLATE=""
 for candidate in \
@@ -83,8 +51,7 @@ login_and_wait_shell() {
 	qemu_wait_for "$LOGIN_MARKER" 30 || { log "FAIL: login didn't reach a shell"; return 1; }
 }
 
-# See test-install.sh's own qemu_run for why this counts fresh prompts
-# rather than waiting for a sentinel embedded in the command itself.
+# See test-install.sh's qemu_run for why this counts fresh prompts.
 qemu_run() {
 	local cmd=$1 timeout=${2:-30}
 	local before; before=$(grep -c "$LOGIN_MARKER" "$QEMU_LOG" 2>/dev/null || echo 0)
@@ -173,11 +140,8 @@ else
 fi
 end_phase
 
-# --- phase 2: boot the installed disk via a FRESH OVMF_VARS ---------------
-# No NVRAM boot entries at all -- specifically exercises the --removable
-# fallback path (EFI/BOOT/BOOTX64.EFI), not an NVRAM entry grub-install
-# might have registered, since that's the whole point of using --removable
-# (see florainstall.c's own header comment).
+# --- phase 2: boot the installed disk via a FRESH OVMF_VARS (no NVRAM
+# entries) -- exercises the --removable EFI/BOOT/BOOTX64.EFI fallback path.
 log "=== phase 2/2: boot the installed disk via OVMF with fresh (empty) NVRAM ==="
 cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_BOOT"
 qemu_boot_serial boot1 \
@@ -213,10 +177,7 @@ else
 fi
 end_phase
 
-# Written to a file, not just stdout -- see test-install.sh's own comment on
-# this: nested backgrounding across qemu_boot_serial sessions has been
-# observed to truncate captured stdout in some invocation contexts even
-# though every phase genuinely ran to completion.
+# Written to a file, not just stdout -- see test-install.sh/ARCHITECTURE.md.
 if [ "$pass" -eq 1 ]; then
 	log "PASS -- florainstall's UEFI/ESP path verified end-to-end (logs under $WORK_DIR/qemu-*.log)"
 	echo "PASS" >> "$WORK_DIR/test-install-uefi-result.txt"

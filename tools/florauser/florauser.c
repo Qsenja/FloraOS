@@ -1,82 +1,4 @@
-/* florauser -- FloraOS's own minimal user/group management tool, written
- * from scratch the same way floralogin/fauelf/floraseat are: small,
- * auditable, purpose-built instead of vendoring shadow-utils (which,
- * like util-linux's login, expects PAM to be part of the picture and
- * pulls in far more than FloraOS needs -- see ARCHITECTURE.md).
- *
- * Closes a real gap: floraseat/eudev/floralogin's own XDG_RUNTIME_DIR
- * setup all work for *any* user already in /etc/passwd, but there was no
- * way to create a second, non-root user at all -- root was the only login
- * that could ever exist. This is what "usermod -aG seat <user>" (mentioned
- * as the migration path in floraseat's own file header) actually needs
- * something to run first.
- *
- * Commands:
- *   florauser add <name> [group1,group2,...]
- *     Creates <name> with a fresh uid/gid pair (>=1000), its own primary
- *     group (same name, classic "user private group" scheme), a locked
- *     password (shadow field "!", NOT floralogin's root-only empty-field
- *     "no password" convention -- a freshly created account can't log in
- *     until `florauser passwd` gives it a real one), and a home directory
- *     at /home/<name> (0700, chowned). Optional comma-separated
- *     supplementary groups (e.g. "seat") are joined too -- those groups
- *     must already exist.
- *   florauser passwd <name>
- *     Prompts twice (termios echo off, same technique as floralogin's own
- *     read_password), hashes via crypt_gensalt()+crypt_r() (libxcrypt's
- *     own strongest default -- not a hand-picked algorithm), rewrites
- *     that user's /etc/shadow line in place. For any <name> other than
- *     root, leaving the first prompt blank copies root's own current
- *     /etc/shadow hash verbatim instead of hashing an empty password --
- *     lets florainstall's own "additional user" step offer "same as root"
- *     to someone who doesn't want to think of and type a second password.
- *     Requires root to already have a real password set (fails otherwise,
- *     same as any other missing-shadow-entry case).
- *   florauser groupadd <name> [gid]
- *     Creates a new, empty group. Auto-picks a free gid >=1000 if none
- *     given.
- *   florauser addtogroup <user> <group>
- *     Appends <user> to an existing group's member list (no-op if
- *     already a member).
- *   florauser rename <old-name> <new-name>
- *     Renames a user across /etc/passwd, /etc/shadow, and /etc/group (its
- *     own user-private group, plus every group's member list), and its
- *     home directory if it follows the standard /home/<name> layout this
- *     tool's own `add` creates. Refuses to rename root. See cmd_rename's
- *     own comment for the exact ordering/failure-mode reasoning.
- *
- * Every lookup (does this user/group already exist? what's their current
- * shadow line?) goes through this file's own PASSWD_PATH/GROUP_PATH/
- * SHADOW_PATH constants and hand-rolled colon-field parser -- deliberately
- * NOT getpwnam()/getgrnam()/getspnam(), which resolve through glibc's NSS
- * and would depend on /etc/nsswitch.conf being present and sane. FloraOS
- * ships no nsswitch.conf at all, so this keeps florauser self-consistent
- * or at least not silently dependent on default. This was
- * confirmed necessary in practice: an early version of this file called
- * getpwnam() from `florauser passwd`, which worked fine on the real
- * rootfs but made the tool untestable in isolation without faking a
- * matching NSS/user database -- switching to the same file-parsing path
- * as every other command fixed both.
- *
- * Deliberately NOT done: no file locking against a second concurrent
- * florauser/floralogin invocation (root is the only admin today, and
- * this is an interactively-run admin tool, not a daemon -- same
- * "known limitation, not a bug" treatment as other small FloraOS tools).
- * No password-complexity policy, no /etc/login.defs, no NIS/LDAP -- none
- * of that exists elsewhere in FloraOS either.
- *
- * Verified in this sandbox (not just compiled): built with -Wall -Wextra
- * (clean, no warnings), then exercised end-to-end against a scratch
- * passwd/group/shadow (uid/gid allocation incl. the "a group already took
- * this gid" case, user-private-group creation, supplementary group join,
- * idempotent addtogroup, groupadd, password set + mismatch handling via
- * crypt_gensalt/crypt_r producing a real yescrypt $y$ hash, and the
- * expected rejections: duplicate user, invalid name, missing group).
- * What's NOT verified: an actual root-privileged run against a real
- * FloraOS rootfs's live /etc/{passwd,group,shadow} or a real login using
- * an florauser-created account (no root/QEMU access in this sandbox --
- * same disclosed limitation as the rest of this round's work).
- */
+/* florauser -- FloraOS's own minimal user/group management tool. See florauser.md. */
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <errno.h>
@@ -96,9 +18,6 @@
 #define MAX_LINE 512
 #define MIN_ID 1000
 
-/* --- tiny whole-file line list: read everything into memory, edit, write
- * back atomically (tmp file + rename). Fine for /etc/passwd-sized files;
- * not meant for anything large. --- */
 struct lines {
 	char **v;
 	size_t n, cap;
@@ -145,7 +64,6 @@ static void lines_free(struct lines *l) {
 	free(l->v);
 }
 
-/* field <n> (0-based) of a colon-delimited line, into a caller buffer. */
 static int field(const char *line, int n, char *out, size_t outsz) {
 	const char *p = line;
 	for (int i = 0; i < n; i++) {
@@ -167,8 +85,6 @@ static int line_name_matches(const char *line, const char *name) {
 	return strcmp(f0, name) == 0;
 }
 
-/* --- validation --- */
-
 static int valid_name(const char *name) {
 	if (!*name || strlen(name) >= 32) return 0;
 	if (!islower((unsigned char)name[0]) && name[0] != '_') return 0;
@@ -189,9 +105,6 @@ static int name_exists_in(const char *path, const char *name) {
 	return found;
 }
 
-/* Highest id (2nd colon field for group, 3rd for passwd -- caller passes
- * the right field index) that's >= MIN_ID, across every line; returns
- * MIN_ID if none found yet. */
 static int next_free_id(const char *path, int id_field) {
 	struct lines l = read_lines(path);
 	int max_id = MIN_ID - 1;
@@ -206,8 +119,6 @@ static int next_free_id(const char *path, int id_field) {
 	lines_free(&l);
 	return max_id + 1;
 }
-
-/* --- password prompt, same echo-off technique as floralogin --- */
 
 static int read_line_noecho(char *buf, size_t bufsz) {
 	struct termios oldt, newt;
@@ -226,8 +137,6 @@ static int read_line_noecho(char *buf, size_t bufsz) {
 	buf[strcspn(buf, "\n")] = '\0';
 	return 0;
 }
-
-/* --- commands --- */
 
 static int cmd_groupadd(const char *name, const char *gid_arg) {
 	if (!valid_name(name)) { fprintf(stderr, "florauser: invalid group name\n"); return 1; }
@@ -273,9 +182,7 @@ static int cmd_addtogroup(const char *user, const char *group) {
 	char members[MAX_LINE] = {0};
 	field(l.v[found], 3, members, sizeof members);
 
-	/* Already a member? Comma-delimited exact-token match, not substring --
-	 * "seat" must not match inside e.g. "seatd". */
-	char tmp[MAX_LINE];
+	char tmp[MAX_LINE]; /* exact comma-token match, not substring */
 	snprintf(tmp, sizeof tmp, ",%s,", members);
 	char needle[64];
 	snprintf(needle, sizeof needle, ",%s,", user);
@@ -307,10 +214,6 @@ static int cmd_addtogroup(const char *user, const char *group) {
 	return 0;
 }
 
-/* Looks up <user>'s current /etc/shadow hash field. Returns 0 and fills
- * `out` on success; -1 if the user has no shadow entry, or its password
- * field is empty/locked ("!"/"*") -- either way, nothing usable to copy
- * from. */
 static int lookup_shadow_hash(const char *user, char *out, size_t outsz) {
 	struct lines l = read_lines(SHADOW_PATH);
 	int found = -1;
@@ -357,9 +260,6 @@ static int cmd_passwd(const char *user) {
 		}
 		memset(pass2, 0, sizeof pass2);
 
-		/* NULL rbytes: crypt_gensalt draws its own salt from /dev/urandom.
-		 * NULL prefix + count 0: libxcrypt's own strongest default algorithm,
-		 * not a hand-picked one -- matches how real passwd(1) does it. */
 		char *setting = crypt_gensalt(NULL, 0, NULL, 0);
 		if (!setting) { perror("florauser: crypt_gensalt"); memset(pass1, 0, sizeof pass1); return 1; }
 
@@ -383,8 +283,6 @@ static int cmd_passwd(const char *user) {
 		return 1;
 	}
 
-	/* Keep every aging field (min/max/warn/inactive/expire/reserved)
-	 * untouched -- only the hash and last-changed day are refreshed. */
 	char minf[64] = "0", maxf[64] = "99999", warnf[64] = "7", inactf[64] = "", expf[64] = "", resf[64] = "";
 	field(l.v[found], 3, minf, sizeof minf);
 	field(l.v[found], 4, maxf, sizeof maxf);
@@ -422,16 +320,11 @@ static int cmd_add(const char *name, const char *supp_groups) {
 
 	int uid = next_free_id(PASSWD_PATH, 2);
 	int gid = next_free_id(GROUP_PATH, 2);
-	if (gid <= uid) gid = uid; /* keep the common convention of uid==gid when both are freshly allocated */
+	if (gid <= uid) gid = uid;
 
 	char home[256];
 	snprintf(home, sizeof home, "/home/%s", name);
 
-	/* passwd: locked ("!") password field -- distinct from floralogin's
-	 * root-only "empty field means no password" convention. A fresh
-	 * account can't log in until `florauser passwd` gives it a real hash;
-	 * an empty field here would silently mean "no password required",
-	 * which is not a safe default for a newly created non-root account. */
 	{
 		struct lines l = read_lines(PASSWD_PATH);
 		char newline[MAX_LINE];
@@ -441,7 +334,6 @@ static int cmd_add(const char *name, const char *supp_groups) {
 		lines_free(&l);
 	}
 
-	/* group: user-private group, same name, no extra members yet. */
 	{
 		struct lines l = read_lines(GROUP_PATH);
 		char newline[MAX_LINE];
@@ -451,8 +343,6 @@ static int cmd_add(const char *name, const char *supp_groups) {
 		lines_free(&l);
 	}
 
-	/* shadow: locked, last-changed today, otherwise the same aging fields
-	 * root's own entry uses. */
 	{
 		struct lines l = read_lines(SHADOW_PATH);
 		long today = (long)(time(NULL) / 86400);
@@ -466,7 +356,7 @@ static int cmd_add(const char *name, const char *supp_groups) {
 	if (mkdir(home, 0700) != 0 && errno != EEXIST) {
 		fprintf(stderr, "florauser: warning: could not create %s: %s\n", home, strerror(errno));
 	} else {
-		if (chown(home, (uid_t)uid, (gid_t)gid) != 0) { /* best effort */ }
+		if (chown(home, (uid_t)uid, (gid_t)gid) != 0) { }
 		chmod(home, 0700);
 	}
 
@@ -486,25 +376,7 @@ static int cmd_add(const char *name, const char *supp_groups) {
 	return 0;
 }
 
-/* Renames a user across /etc/passwd, /etc/shadow, and /etc/group (both its
- * own user-private group, if one matches, and every group's member list),
- * plus /home/<old> -> /home/<new> if the home directory follows the
- * standard layout cmd_add itself creates. Does NOT touch uid/gid, password
- * hash, or group memberships themselves -- only the name. Refuses to
- * rename root: too much of the rest of this project (floralogin's
- * empty-password convention, florainstall's account setup) hardcodes
- * "root" as a literal string to special-case that renaming it would
- * silently break elsewhere, not just here.
- *
- * Not a single atomic transaction across all three files -- same
- * disclosed limitation as the rest of this tool (no locking against a
- * second concurrent invocation, no rollback if interrupted partway
- * through). Ordered passwd -> shadow -> group specifically so that if
- * this is interrupted after the passwd rewrite but before shadow/group,
- * the user's own login identity (passwd) is already consistent; a
- * dangling old-named shadow/group entry is a survivable, fixable leftover,
- * whereas the reverse order would leave a user unable to log in at all
- * under either name. */
+/* renames across passwd/shadow/group; ordering matters, see florauser.md */
 static int cmd_rename(const char *old, const char *new_name) {
 	if (strcmp(old, "root") == 0) { fprintf(stderr, "florauser: refusing to rename root\n"); return 1; }
 	if (!valid_name(new_name)) {
@@ -530,11 +402,6 @@ static int cmd_rename(const char *old, const char *new_name) {
 	field(lp.v[idx], 5, home_f, sizeof home_f);
 	field(lp.v[idx], 6, shell_f, sizeof shell_f);
 
-	/* Rename the home directory before touching any files, so a failed
-	 * directory rename still leaves the old, working home path recorded
-	 * instead of a dangling one -- only attempted if the home dir follows
-	 * cmd_add's own /home/<name> convention; a custom home path is left
-	 * exactly as-is rather than guessed at. */
 	char expected_old_home[300];
 	snprintf(expected_old_home, sizeof expected_old_home, "/home/%s", old);
 	int is_standard_home = strcmp(home_f, expected_old_home) == 0;
@@ -551,9 +418,6 @@ static int cmd_rename(const char *old, const char *new_name) {
 			return 1;
 		}
 		if (rename(home_f, new_home) == 0 || errno == ENOENT) {
-			/* ENOENT: no home directory ever existed to move -- fine,
-			 * just record where it would be, same as cmd_add's own
-			 * best-effort mkdir/chown. */
 			snprintf(final_home, sizeof final_home, "%s", new_home);
 		} else {
 			fprintf(stderr, "florauser: warning: could not rename %s to %s: %s -- keeping the old home path\n",
@@ -568,14 +432,12 @@ static int cmd_rename(const char *old, const char *new_name) {
 	write_lines(PASSWD_PATH, &lp, 0644);
 	lines_free(&lp);
 
-	/* /etc/shadow: rename just the name field, every other field
-	 * (hash, aging) untouched. */
 	{
 		struct lines l = read_lines(SHADOW_PATH);
 		int sidx = -1;
 		for (size_t i = 0; i < l.n; i++) if (line_name_matches(l.v[i], old)) { sidx = (int)i; break; }
 		if (sidx >= 0) {
-			const char *rest = strchr(l.v[sidx], ':'); /* includes the leading ':' */
+			const char *rest = strchr(l.v[sidx], ':');
 			char sline[MAX_LINE];
 			snprintf(sline, sizeof sline, "%s%s", new_name, rest ? rest : "");
 			free(l.v[sidx]);
@@ -585,12 +447,6 @@ static int cmd_rename(const char *old, const char *new_name) {
 		lines_free(&l);
 	}
 
-	/* /etc/group: rename the user-private group (same name AND same gid
-	 * as the user -- cmd_add's own convention, not assumed for every
-	 * group that happens to share the name) if one matches, and replace
-	 * the <old> token with <new_name> in every group's member list
-	 * (supplementary groups joined via addtogroup store the literal
-	 * username there, comma-separated). */
 	{
 		struct lines l = read_lines(GROUP_PATH);
 		for (size_t i = 0; i < l.n; i++) {
@@ -603,8 +459,6 @@ static int cmd_rename(const char *old, const char *new_name) {
 			int renamed_group = strcmp(gname, old) == 0 && strcmp(ggid, gid_f) == 0;
 			const char *use_name = renamed_group ? new_name : gname;
 
-			/* Exact comma-token match, not substring -- same convention
-			 * cmd_addtogroup's own membership check already uses. */
 			char padded[MAX_LINE + 2];
 			snprintf(padded, sizeof padded, ",%s,", gmembers);
 			char needle[64];
@@ -615,13 +469,7 @@ static int cmd_rename(const char *old, const char *new_name) {
 
 			char newmembers[MAX_LINE] = {0};
 			if (in_members) {
-				/* A group can already list a member literally named
-				 * <new_name> alongside <old> (an unrelated real user, or
-				 * this same rename re-run) -- renaming <old>'s own token
-				 * without deduplicating would otherwise produce
-				 * "newname,newname". Skip a token that's either <old>
-				 * (renamed away) or already-seen, so the result always
-				 * has each name at most once. */
+				/* dedup: a group may already have both <old> and <new_name> as members */
 				char padded_new[MAX_LINE + 2];
 				snprintf(padded_new, sizeof padded_new, ",%s,", gmembers);
 				char needle_new[64];
@@ -634,7 +482,7 @@ static int cmd_rename(const char *old, const char *new_name) {
 				for (char *m = strtok_r(copy, ",", &save); m; m = strtok_r(NULL, ",", &save)) {
 					int is_old = strcmp(m, old) == 0;
 					const char *out_tok = is_old ? new_name : m;
-					if (is_old && new_name_already_member) continue; /* already covered by <new_name>'s own token below */
+					if (is_old && new_name_already_member) continue;
 					if (strcmp(out_tok, new_name) == 0) {
 						if (wrote_new_name) continue;
 						wrote_new_name = 1;

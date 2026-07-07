@@ -1,7 +1,4 @@
-# linux-lts: kernel image + modules, and (as a side effect) the sanitized
-# UAPI headers glibc needs to build against. Headers are a build-time-only
-# artifact, not part of the shipped package. LINUX_HEADERS_DIR itself is
-# defined in lib/common.sh, not here -- see the comment there.
+# linux-lts -- see docs/MANIFEST.md.
 PKG_DESCRIPTION="Linux LTS kernel"
 PKG_DEPENDS=""
 
@@ -17,62 +14,8 @@ recipe_build() {
 	log "linux-lts: configuring (defconfig)"
 	make -C "$src" ARCH=x86_64 defconfig >/dev/null
 
-	# GUI-readiness (see ARCHITECTURE.md). Checked directly against the
-	# real upstream linux-6.18.y source tree (git.kernel.org), not assumed:
-	#
-	# - CONFIG_DRM_I915=y and CONFIG_DRM_VIRTIO_GPU=y are ALREADY on in
-	#   x86_64 defconfig, built straight into vmlinuz -- real GPU
-	#   acceleration for Intel hardware and QEMU's virtio-gpu needs zero
-	#   changes here at all. Confirmed by fetching and reading the actual
-	#   defconfig file, not inferred.
-	# - CONFIG_INPUT_EVDEV, CONFIG_HID (and CONFIG_HID_GENERIC, which
-	#   `default HID`s), CONFIG_KEYBOARD_ATKBD, CONFIG_MOUSE_PS2 all
-	#   `default y` in their own Kconfig entries (checked directly) and
-	#   defconfig doesn't override any of them off -- keyboard/mouse input
-	#   was never actually a gap. An earlier version of this recipe forced
-	#   these on explicitly out of caution; removed now that it's confirmed
-	#   unnecessary.
-	# - CONFIG_SYSFB_SIMPLEFB (drivers/firmware/Kconfig) and
-	#   CONFIG_DRM_SIMPLEDRM (drivers/gpu/drm/sysfb/Kconfig -- simpledrm
-	#   moved out of drivers/gpu/drm/tiny/ at some point, confirmed against
-	#   the current tree) are genuinely off by default. Upstream's own
-	#   help text for DRM_SIMPLEDRM literally says "you should also select
-	#   SYSFB_SIMPLEFB" -- the exact pair enabled below. Together they
-	#   bind whatever framebuffer GRUB/firmware already set up as a
-	#   generic KMS device, covering any GPU with no vendor driver at all
-	#   (enough for a software-rendered/llvmpipe Wayland session).
-	# - CONFIG_DRM_AMDGPU and CONFIG_DRM_NOUVEAU are genuinely off by
-	#   default too, and are the real remaining gap for non-Intel/non-QEMU
-	#   GPUs. Enabled as *modules* (=m, not built-in) -- now that
-	#   scripts/recipes/kmod.sh exists and eudev.sh links against it
-	#   (--enable-kmod, not --disable-kmod), these can actually be loaded
-	#   on demand instead of bloating every boot on hardware that doesn't
-	#   have them. `--module` (not `--enable`) is scripts/config's flag
-	#   for "set =m", matching that intent explicitly rather than relying
-	#   on olddefconfig to pick =m as some default.
-	#
-	# `depmod` (from kmod, see build-rootfs.sh's own step after fau
-	# bootstrap) is what turns these built modules into something
-	# modprobe/udev can actually resolve and load -- building the modules
-	# here is necessary but not sufficient on its own.
-	#
-	# CONFIG_BTRFS_FS: needed for tools/florainstall's persistent disk
-	# install (see its own file header) -- the installed system boots with
-	# a real disk as root and no initramfs, so the root filesystem driver
-	# has to be built directly into vmlinuz (=y), not loadable as a module
-	# after the fact the way DRM_AMDGPU/DRM_NOUVEAU are above. Unlike
-	# ext4, btrfs is NOT on by default in x86_64 defconfig (confirmed
-	# against the same linux-6.18.y tree referenced below), so this has to
-	# be turned on explicitly rather than just relying on what defconfig
-	# already gives.
-	#
-	# Kernel config *symbol names* above are verified against the live
-	# linux-6.18.y tree (git.kernel.org), not guessed. What's still not
-	# independently verified in this project's own sandbox: an actual full
-	# `./floraiso build` (kernel+glibc compile is well beyond what's
-	# practical to run here) -- check the real resulting
-	# work/build/linux-lts/.config, or boot dmesg for "simple-framebuffer"
-	# / a populated /dev/dri/, before relying on this.
+	# GUI-readiness config -- see docs/MANIFEST.md. BTRFS_FS must be =y (built-in), not
+	# a module, since florainstall boots the target disk directly with no initramfs.
 	"$src/scripts/config" --file "$src/.config" \
 		--enable SYSFB_SIMPLEFB \
 		--enable DRM \
@@ -92,18 +35,7 @@ recipe_build() {
 	cp "$src/.config" "$files/boot/config-floraos"
 	make -C "$src" ARCH=x86_64 INSTALL_MOD_PATH="$files" modules_install >/dev/null
 
-	# build-rootfs.sh's depmod step (after fau bootstrap merges both this
-	# package's modules and kmod's depmod binary into the same rootfs)
-	# needs to know the exact /lib/modules/<release>/ directory name --
-	# it can't just run `depmod` with no argument, since that defaults to
-	# `uname -r` of whatever's running depmod (this build host's own
-	# kernel, not FloraOS's). `make kernelrelease` prints the exact string
-	# modules_install just used. --no-print-directory: `-C` implies GNU
-	# Make's own -w/--print-directory (documented behavior), which without
-	# this flag interleaves "make: Entering directory .../make: Leaving
-	# directory ..." around the version string in this captured output --
-	# reproduced directly (this exact command, piped to `cat -A`), not
-	# assumed; depmod then fails outright on the corrupted multi-line file
-	# ("ERROR: Bad version passed").
+	# --no-print-directory is required: without it, -C's Entering/Leaving-directory
+	# lines corrupt this captured single-line file and depmod rejects it
 	make --no-print-directory -C "$src" ARCH=x86_64 kernelrelease > "$files/boot/kernelrelease"
 }

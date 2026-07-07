@@ -1,55 +1,12 @@
 #!/usr/bin/env bash
-# fau — FloraOS's system manager. This file is deliberately just the
-# dispatcher: it owns the help/usage text (a coherent, single place to
-# discover every command fau has, same job `git help` does for git's own
-# many `git-<command>` binaries) and routes each command to the real tool
-# that implements it -- it does not itself install a package, take a
-# backup, or touch a service. Package install/remove, `fau backup`'s
-# full-root snapshot/restore, and friendlier front ends over OpenRC/
-# floraseat/florauser are what exist today; the intent is for fau to keep
-# growing into managing the rest of the running system, not stay scoped to
-# packages alone -- each new area of the system gets its own fau-<name>
-# tool alongside these, not more logic bolted onto this file.
-#
-# Real implementations, one executable per area, in this same directory:
-#   fau-bootstrap   build-time only: merges packages straight into FAU_ROOT
-#   fau-install     user-facing: install/remove/list isolated apps
-#   fau-build       builds a package from source on this system, on demand
-#   fau-repo        fau's own local package repo (repo-add/repo-index)
-#   fau-export      export/import (system.json + app configs bundle)
-#   fau-backup      full-root btrfs snapshot/restore
-#   fau-service     front end over OpenRC (rc-update/rc-service)
-#   fau-seat        front end over floraseat's VT-bound switching
-#   fau-user        front end over florauser (useradd/passwd/rename/...)
-# Shared code (die/log/env-var defaults, system.json/apps.json read-write,
-# the local repo, the Arch/Artix alpm fallback) lives in lib/*.sh, sourced
-# by whichever of the above actually need it -- not by this dispatcher,
-# which needs none of it.
-#
-# Every fau-<name> tool above is fully runnable on its own (`fau-backup
-# backup-list` works exactly like `fau backup-list`) -- this script adds
-# nothing but the unified `fau <command>` entry point and the help text.
+# fau — FloraOS's system manager: dispatcher only, see fau.md.
 set -euo pipefail
 
-# readlink -f before dirname, not just dirname "${BASH_SOURCE[0]}" -- this
-# file is staged at /usr/lib/fau/fau with /usr/bin/fau a symlink to it
-# (build-rootfs.sh), and bash's own BASH_SOURCE reports the path *as
-# invoked*, not the symlink's real target: plain dirname on that gives
-# "/usr/bin", where none of this directory's sibling fau-*/lib/*.sh
-# actually live. Found on a real boot test: `florainstall` (which execs
-# `fau` by bare name, resolved via PATH to the /usr/bin symlink) failed
-# with "/usr/bin/lib/common.sh: No such file or directory" before this was
-# fixed. Every fau-* tool below resolves its own SELF_DIR the identical
-# way, on the same reasoning -- none of them are symlinked today, but there's
-# no reason a future one couldn't be, and the fix costs nothing when it isn't.
+# readlink -f before dirname: this file may be reached via a symlink (see fau.md).
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SELF_DIR/lib/common.sh"
 
-# usage() is the short, always-shown overview -- topics (see usage_topic)
-# hold the actual per-command detail, so `fau` with no args or a bad
-# invocation doesn't dump the entire, ever-growing command list every time.
-# `fau help <topic>` / `fau help all` unpack the rest.
 usage() {
 	cat <<'EOF'
 usage: fau <command> [args]
@@ -192,13 +149,6 @@ EOF
 	esac
 }
 
-# Maps a command name to the fau-<name> tool that implements it, then execs
-# it with the *original* command name still as $1 (each fau-<name> tool
-# re-dispatches on that itself, the same way this file used to) followed by
-# the rest of the original arguments. exec, not a plain call: a pure
-# dispatcher has nothing left to do afterward, so replacing this process
-# with the real tool is both simpler and propagates its exit status/signals
-# directly instead of through an extra layer.
 dispatch() {
 	local cmd=$1; shift
 	case "$cmd" in

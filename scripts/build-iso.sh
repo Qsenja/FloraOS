@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# Builds a bootable hybrid BIOS+UEFI ISO from the FloraOS rootfs.
-# The whole rootfs is packed as the initramfs and the kernel execs /init
-# from it directly -- FloraOS boots and runs entirely from RAM (this is the
-# *live* image; a persistent disk install is a separate, later step run
-# from inside it -- see tools/florainstall and ARCHITECTURE.md's
-# florainstall entry). grub-mkrescue (a build-host tool, not a FloraOS
-# package -- see ARCHITECTURE.md) produces both boot paths in one step.
+# Builds a bootable hybrid BIOS+UEFI ISO from the FloraOS rootfs. See
+# docs/ARCHITECTURE.md's "Build pipeline" and "Bootloader" sections.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,9 +47,6 @@ log "running grub-mkrescue"
 rm -f "$ISO_OUT"
 grub-mkrescue -o "$ISO_OUT" "$ISO_STAGE_DIR" >/dev/null 2>&1 || grub-mkrescue -o "$ISO_OUT" "$ISO_STAGE_DIR"
 
-# Record a relative filename, not the absolute build path -- otherwise
-# `sha256sum -c floraos.iso.sha256` only works from this exact machine's
-# build directory and fails with "No such file or directory" anywhere else
-# (a different clone, or the ISO downloaded standalone next to its checksum).
+# Relative filename, not the absolute build path -- see ARCHITECTURE.md.
 (cd "$FLORA_ROOT" && sha256sum "$(basename "$ISO_OUT")") > "$ISO_OUT.sha256"
 log "ISO ready: $ISO_OUT ($(du -h "$ISO_OUT" | cut -f1))"

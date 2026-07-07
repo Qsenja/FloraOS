@@ -1,6 +1,4 @@
-# glibc: built as a native (non-cross) rebuild against this build host's
-# compiler, using the sanitized kernel headers from the linux-lts recipe.
-# Must run after linux-lts (needs $LINUX_HEADERS_DIR).
+# glibc: must build after linux-lts (needs $LINUX_HEADERS_DIR).
 PKG_DESCRIPTION="GNU C library"
 PKG_DEPENDS="linux-lts"
 
@@ -25,13 +23,7 @@ recipe_build() {
 		make -j"$jobs"
 		fakeroot -- make DESTDIR="$files" install
 
-		# memusagestat (the graph-rendering half of `memusage`) links
-		# against libgd, which FloraOS doesn't ship -- it can't load inside
-		# the running OS ("cannot open shared object file: libgd.so.3").
-		# Pruned rather than adding libgd (and its own dependency closure)
-		# just for one debugging tool's optional graph output; `memusage`
-		# itself (the LD_PRELOAD-based profiler) doesn't need memusagestat
-		# and still works without it.
+		# memusagestat needs libgd, which FloraOS doesn't ship -- see docs/MANIFEST.md
 		rm -f "$files/usr/bin/memusagestat"
 	)
 }

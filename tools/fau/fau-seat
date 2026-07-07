@@ -1,20 +1,7 @@
 #!/usr/bin/env bash
-# fau-seat -- a thin front end over floraseat's VT-bound switching
-# (tools/floraseat), same "friendlier front end, don't reimplement the
-# daemon" idea as fau-service. Switching a VT itself is a plain kernel
-# operation (`chvt`, from kbd -- already a base package) identical to a
-# physical Ctrl+Alt+Fn; floraseat reacts to it via its own VT_PROCESS
-# release/acquire signal handlers (see floraseat.c's header comment), so
-# there is nothing seatd-protocol-specific to speak here -- this is a
-# convenience wrapper, not a seatd client. Static/dynamic state is read
-# straight from the kernel (/sys/class/tty/tty0/active, the same
-# "read the real data" convention fau-service already uses) and floraseat's
-# own log, not reconstructed some other way. Called by the `fau`
-# dispatcher; fully runnable standalone too.
+# fau-seat -- a thin front end over floraseat's VT-bound switching. See fau.md.
 set -euo pipefail
 
-# readlink -f before dirname: see tools/fau/fau's own comment on this --
-# only that file is symlinked today (/usr/bin/fau), but the fix is free.
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SELF_DIR/lib/common.sh"
@@ -22,7 +9,6 @@ source "$SELF_DIR/lib/common.sh"
 SEAT_ACTIVE_VT_FILE="/sys/class/tty/tty0/active"
 SEAT_LOG="/var/log/floraseat.log"
 
-# seat_current_vt -> the active VT's bare number ("1", not "tty1")
 seat_current_vt() {
 	[ -r "$SEAT_ACTIVE_VT_FILE" ] \
 		|| die "can't read $SEAT_ACTIVE_VT_FILE -- is this a real console session (not serial-only)?"

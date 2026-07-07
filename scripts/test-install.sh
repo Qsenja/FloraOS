@@ -1,35 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end test for florainstall + `fau backup` -- the two pieces
-# ARCHITECTURE.md's fau-backup section flagged as shipped without a real
-# boot test (no root/loopback-btrfs or QEMU disk-boot harness was available
-# when they were written). This is that harness.
-#
-# Drives florainstall's ncurses TUI entirely over the serial console (same
-# technique test-iso.sh already uses for the login prompt, extended to
-# arrow-key menu navigation and text entry -- see scripts/lib/common.sh's
-# qemu_* helpers) to install FloraOS onto a scratch virtual disk, then reuses
-# that same disk image across several more boots to check:
-#   1. florainstall actually finishes and produces a disk GRUB can boot
-#   2. the installed system really is rootflags=subvol=@ (not the bare
-#      top-level) -- read straight out of /proc/cmdline, not assumed
-#   3. `fau backup` creates a snapshot and regenerates /boot/grub/grub.cfg
-#      with a real extra menuentry
-#   4. `grub-reboot` into that entry once actually boots the *snapshot's*
-#      subvolume (rootflags=subvol=@snapshots/<name>), and that subvolume
-#      really did preserve the pre-backup file state (a marker file written
-#      before the backup, then overwritten after it, is checked to still
-#      read the *old* value once booted into the snapshot)
-#   5. `fau backup-restore` promotes that snapshot to be the new default --
-#      run from *within* the booted snapshot itself, which is the specific
-#      "rename the subvolume you're currently running on" case ARCHITECTURE.md
-#      cites the kernel source for -- and a subsequent normal reboot lands on
-#      the promoted content permanently (rootflags=subvol=@ again, marker
-#      file still reading the pre-backup value)
-#
-# Real disk installs only exercise real hardware/QEMU disk boot -- there is
-# no shortcut here, this genuinely partitions, formats, and boots a scratch
-# disk image every run. Takes several minutes; not part of `floraiso test`
-# (which only boots the ISO itself) since this is a heavier, separate check.
+# End-to-end QEMU disk-boot test for florainstall + `fau backup`/
+# `backup-restore` -- see docs/ARCHITECTURE.md's fau-backup entry and "Test
+# harness" section for the full scope and the qemu_* helpers this uses.
+# Takes several minutes; not part of `floraiso test` (ISO boot only).
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,24 +35,9 @@ login_and_wait_shell() {
 	qemu_wait_for "$LOGIN_MARKER" 30 || { log "FAIL: login didn't reach a shell"; return 1; }
 }
 
-# qemu_run <command-line> [timeout] -- types a command + Enter at the
-# current shell prompt, then waits for a *fresh* shell prompt to reappear
-# (by counting occurrences of $LOGIN_MARKER, which PS1 embeds in every
-# prompt) before returning, proving the command actually finished running.
-#
-# Deliberately NOT "type a command that itself echoes a distinct sentinel,
-# then wait for that sentinel" (an earlier version of this script did
-# exactly that, e.g. `cat marker.txt; echo MARKER_DONE` then waited for
-# MARKER_DONE) -- found via real, intermittently-failing test runs: the pty
-# echoes back whatever bytes you send *immediately*, well before the shell
-# even processes the trailing Enter, so a sentinel that's part of the
-# *command you're sending* can satisfy a wait_for the instant it's echoed
-# back, racing ahead of the command's real output by an unpredictable
-# margin (sometimes losing, sometimes not -- explains the flaky failures).
-# Counting prompts sidesteps this entirely: a new prompt only ever appears
-# after the previous command's own output has already been flushed, and
-# nothing about a command's *own text* can satisfy "a new prompt line
-# appeared".
+# qemu_run <command-line> [timeout] -- waits for a fresh prompt (counting
+# $LOGIN_MARKER) rather than a command-echoed sentinel -- see ARCHITECTURE.md,
+# the latter races the pty's own input echo and was intermittently flaky.
 qemu_run() {
 	local cmd=$1 timeout=${2:-30}
 	local before; before=$(grep -c "$LOGIN_MARKER" "$QEMU_LOG" 2>/dev/null || echo 0)
@@ -93,12 +51,8 @@ qemu_run() {
 	return 1
 }
 
-# qemu_run_ok <command-line> [timeout] -- like qemu_run, but also confirms
-# the command's own exit status was 0, via a safe follow-up `echo "RC=$?"`.
-# Safe from qemu_run's own race concern: the literal bytes sent contain an
-# unexpanded "$?" (a dollar sign and a question mark), which can never
-# satisfy a grep for "RC=0" -- only the shell's real substitution of it,
-# after actually running, can.
+# qemu_run_ok <command-line> [timeout] -- like qemu_run, plus confirms exit
+# status 0 via a follow-up `echo "RC=$?"` (safe from the same echo race).
 qemu_run_ok() {
 	local cmd=$1 timeout=${2:-30}
 	qemu_run "$cmd" "$timeout" || return 1
@@ -107,12 +61,8 @@ qemu_run_ok() {
 }
 
 end_phase() {
-	# `reboot` (util-linux, see docs/MANIFEST.md) if a shell is still up,
-	# then qemu_quit either way -- -no-reboot means a guest-triggered reboot
-	# makes qemu exit outright rather than resetting, so qemu_quit's `wait
-	# "$QEMU_PID"` picks that up naturally; its monitor `quit` is a no-op if
-	# the process is already gone, so this is safe to call unconditionally,
-	# including as a fallback if the shell never came up at all.
+	# -no-reboot means a guest `reboot` makes qemu exit rather than reset;
+	# qemu_quit's monitor `quit` is a safe no-op if it's already gone.
 	qemu_send $'reboot\r' 2>/dev/null || true
 	local waited=0
 	while kill -0 "$QEMU_PID" 2>/dev/null && [ "$waited" -lt 30 ]; do
@@ -135,19 +85,13 @@ qemu_boot_serial install \
 if login_and_wait_shell; then
 	qemu_send $'florainstall\r'
 	if qemu_wait_for "FloraOS disk installer" 20; then
-		# Item 0 ("Target disk") is already highlighted -- select it. The
-		# disk picker behind it lists exactly one entry (list_disks()
-		# filters out sr*/loop*/ram*, so the cdrom doesn't show up), already
-		# highlighted too, so a bare Enter picks it.
+		# Item 0 ("Target disk") and the picker's one entry are both
+		# already highlighted -- a bare Enter picks each.
 		qemu_send $'\r'
 		qemu_wait_for "Select target disk" 10 || fail "disk picker never appeared"
 		qemu_send $'\r'
 
-		# Back at the main menu with a disk chosen. Down x3 reaches "Begin
-		# installation" (items: disk, hostname, additional user, begin,
-		# quit). vt100's terminfo (see agetty's own ttyS0 line in
-		# apply-skeleton.sh) sends ESC O B for the down arrow, not ESC [ B --
-		# confirmed against this repo's own built terminfo db, not guessed.
+		# Down x3 reaches "Begin installation". vt100 sends ESC O B for down, not ESC [ B.
 		qemu_send $'\x1bOB\x1bOB\x1bOB\r'
 		if qemu_wait_for "ERASES" 10; then
 			if qemu_wait_for "/dev/sda" 2; then
@@ -275,13 +219,8 @@ else
 fi
 end_phase
 
-# Written to a file, not just stdout: nested backgrounding across four
-# separate qemu_boot_serial sessions in one script has been observed to
-# truncate this script's own captured stdout partway through in some
-# invocation contexts (background-tool capture, specifically) even though
-# every phase genuinely ran to completion -- the per-phase
-# $WORK_DIR/qemu-*-boot.log transcripts and this result file are the
-# authoritative record regardless of what a live terminal/capture saw.
+# Written to a file, not just stdout -- see docs/ARCHITECTURE.md (captured
+# stdout has been observed truncated across nested-backgrounded phases).
 if [ "$pass" -eq 1 ]; then
 	log "PASS -- florainstall + fau backup/backup-restore verified end-to-end (logs under $WORK_DIR/qemu-*.log)"
 	echo "PASS" >> "$WORK_DIR/test-install-result.txt"

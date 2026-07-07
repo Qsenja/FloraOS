@@ -1,38 +1,4 @@
-/* fauelf -- rewrites absolute-path DT_NEEDED entries in an ELF64 file to
- * their bare basename, in place. Written from scratch (no libelf, no
- * patchelf) the same way floralogin/fau themselves are -- a small,
- * auditable, purpose-built tool rather than a vendored dependency.
- *
- * Why this exists: some Arch/Artix packages (found via neovim's
- * lua51-lpeg dependency) bake a literal absolute path into a DT_NEEDED
- * entry -- e.g. "/usr/lib/lua/5.1/lpeg.so" -- instead of a bare soname
- * like "liblpeg.so". glibc's dynamic linker only consults RPATH/RUNPATH/
- * LD_LIBRARY_PATH for a *bare* soname; an absolute DT_NEEDED is opened
- * literally, bypassing all of that. That's invisible for a normal system
- * install (FAU_ROOT really is "/", so the absolute path happens to
- * resolve) but breaks fau's isolated app installs outright: the
- * dependency is correctly bundled inside ~/apps/<name>/usr/lib/..., and
- * the app wrapper's LD_LIBRARY_PATH already covers that directory, but
- * the dynamic linker never gets a chance to use it. Confirmed by
- * reproducing "cannot open shared object file" for exactly this file
- * inside a real chroot of the built rootfs, not just by reading the code.
- *
- * Rewriting an absolute DT_NEEDED string to its basename is always safe
- * to do in place: the basename is strictly shorter (or equal) in length,
- * so it fits inside the string's already-allocated slot in .dynstr with
- * NUL padding -- no relocation, no resizing, nothing else in the file
- * moves.
- *
- * Usage: fauelf <file>
- *   - Not a regular ELF64 file, or has no PT_DYNAMIC segment: silently
- *     does nothing, exit 0. Meant to be run over *every* file in an
- *     extracted package's payload, most of which won't be ELF at all.
- *   - Rewrites every absolute DT_NEEDED entry found, logs each rewrite to
- *     stdout, exit 0.
- *   - A file that *does* look like ELF64 with a dynamic section but is
- *     truncated/corrupt in a way that breaks the format's own internal
- *     consistency: prints an error to stderr, exit 1.
- */
+/* fauelf -- rewrites absolute-path DT_NEEDED entries in an ELF64 file to their bare basename, in place. See fauelf.md. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,9 +48,6 @@ typedef struct {
 
 static const char *g_path;
 
-/* Not-applicable (not ELF64, no dynamic section, etc): caller exits 0
- * with no message -- this is the expected outcome for the vast majority
- * of files fauelf gets pointed at. */
 static void skip(void) { exit(0); }
 
 static void die(const char *msg) {
@@ -92,9 +55,6 @@ static void die(const char *msg) {
 	exit(1);
 }
 
-/* vaddr_to_offset: translate a virtual address to a file offset via the
- * PT_LOAD segment that contains it -- the standard way a real dynamic
- * linker resolves DT_STRTAB's address back to file bytes. */
 static uint64_t vaddr_to_offset(Elf64_Phdr_min *phdrs, int phnum, uint64_t vaddr) {
 	int i;
 	for (i = 0; i < phnum; i++) {
@@ -118,12 +78,12 @@ int main(int argc, char **argv) {
 	if (st.st_size < (off_t)sizeof(Elf64_Ehdr_min)) skip();
 
 	int fd = open(g_path, O_RDWR);
-	if (fd < 0) skip(); /* permission/race: not fauelf's problem to report */
+	if (fd < 0) skip();
 
 	Elf64_Ehdr_min eh;
 	if (pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh)) skip();
 	if (memcmp(eh.e_ident, "\x7f""ELF", 4) != 0) skip();
-	if (eh.e_ident[4] != 2) skip(); /* ELFCLASS64 only -- FloraOS is x86_64-only */
+	if (eh.e_ident[4] != 2) skip(); /* ELFCLASS64 only */
 	if (eh.e_phnum == 0) skip();
 
 	size_t ph_bytes = (size_t)eh.e_phnum * sizeof(Elf64_Phdr_min);
@@ -137,7 +97,7 @@ int main(int argc, char **argv) {
 	for (i = 0; i < eh.e_phnum; i++) {
 		if (phdrs[i].p_type == PT_DYNAMIC) { dynseg = &phdrs[i]; break; }
 	}
-	if (!dynseg) { free(phdrs); skip(); } /* no dynamic section at all */
+	if (!dynseg) { free(phdrs); skip(); }
 
 	int ndyn = (int)(dynseg->p_filesz / sizeof(Elf64_Dyn_min));
 	Elf64_Dyn_min *dyns = malloc(dynseg->p_filesz);
@@ -157,10 +117,7 @@ int main(int argc, char **argv) {
 	for (i = 0; i < ndyn && dyns[i].d_tag != DT_NULL; i++) {
 		if (dyns[i].d_tag != DT_NEEDED) continue;
 
-		/* Read the NUL-terminated string at strtab_off + d_val. A NEEDED
-		 * entry is realistically well under a few hundred bytes; 4096 is
-		 * generous headroom, not a hard format limit. */
-		char buf[4096];
+		char buf[4096]; /* generous headroom, not a hard format limit */
 		ssize_t n = pread(fd, buf, sizeof(buf) - 1, (off_t)(strtab_off + dyns[i].d_val));
 		if (n <= 0) die("couldn't read a DT_NEEDED string from .dynstr");
 		buf[n] = '\0';
@@ -175,9 +132,6 @@ int main(int argc, char **argv) {
 		off_t str_pos = (off_t)(strtab_off + dyns[i].d_val);
 		if (pwrite(fd, base, base_len, str_pos) != (ssize_t)base_len)
 			die("failed writing rewritten NEEDED string");
-		/* NUL-pad the freed tail so the string ends exactly where the
-		 * shorter basename does, and nothing past the original string's
-		 * end (the next string's own bytes) is touched. */
 		char zeros[256] = {0};
 		size_t pad = orig_len - base_len;
 		off_t pad_pos = str_pos + (off_t)base_len;

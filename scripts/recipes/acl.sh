@@ -1,6 +1,4 @@
-# libacl. Same reasoning as attr.sh: gnulib-based tools (sed here) auto-link
-# against this if present on the build host, regardless of whether their
-# own build was asked to care about ACLs.
+# libacl (POSIX ACLs) -- see docs/MANIFEST.md.
 PKG_DESCRIPTION="POSIX ACL library (libacl) — auto-linked by gnulib-based tools"
 PKG_DEPENDS="glibc,attr"
 

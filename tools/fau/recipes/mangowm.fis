@@ -1,76 +1,4 @@
-# mangowm: a dwl fork (wlroots-based tiling Wayland compositor, "dwm but
-# wayland" -- upstream's own binary is named "mango", AUR package name is
-# "mangowm"), closing the actual `fau install mangowm` request this recipe
-# exists to satisfy. AUR-only -- confirmed directly against
-# https://aur.archlinux.org/packages/mangowm, no official Arch/Artix repo
-# carries it -- so fau's alpm fallback (lib/alpm.sh, official sync-dbs
-# only, no AUR support by design) can never resolve it no matter the exact
-# name. Built on demand, on this system, by `fau build mangowm` (see
-# fau-build's own header comment for the recipe format) -- not part of
-# scripts/recipes/*.sh (that family is base-rootfs-only, built once on a
-# separate dev/build host).
-#
-# Meson, deliberately, as a one-off exception: this project avoids
-# cmake/meson everywhere else it has a choice (mbedtls picked over OpenSSL,
-# real seatd skipped for a from-scratch reimplementation specifically
-# because "seatd is meson/ninja-only upstream", kmod pinned to its last
-# autotools release before upstream itself moved to meson -- see each of
-# those recipes/ARCHITECTURE.md). mangowm's upstream ships meson.build only,
-# no Makefile, and neither it nor its own hard dependency below offers one --
-# unlike every prior case, there's no non-meson alternative to pick instead.
-#
-# scenefx (wlrfx/scenefx, the wlroots scene-API effects renderer mango's own
-# meson.build hard-requires -- no build option disables it): also AUR-only,
-# fetched/built right here inside recipe_build rather than as its own
-# PKG_DEPENDS entry. Reason: fau-build's own dependency merge
-# (build_merge_depends, lib/build.sh) needs a real alpm package name to
-# resolve -- scenefx has none. Built straight into $sandbox_dir (not a
-# separate prefix): the sandbox already carries every header/lib scenefx
-# itself needs (see PKG_BUILD_DEPS below, which lists scenefx's own direct
-# deps for exactly this reason, not just mango's), and installing scenefx's
-# output back into the same sandbox means mango's own meson setup just
-# finds it via the sandbox's already-exported PKG_CONFIG_PATH, no second
-# prefix to track. Its .so is then bundled straight into $app_dir/usr/lib
-# at the end (this function's last step) since it's a private, unnamed
-# runtime dependency mango's own alpm closure has no way to express.
-#
-# wlroots0.19: both scenefx and mango hard-pin it exactly (scenefx's own
-# `dependency('wlroots-0.19', version: '>=0.19.0')`) -- never built by this
-# project (see ARCHITECTURE.md's GUI-readiness section: `fau install <wm>`
-# fetches wlroots precompiled via the alpm fallback), so this recipe builds
-# and links against whatever wlroots0.19 alpm resolves at `fau build`
-# time. Real, disclosed risk: only ABI-correct by version coincidence --
-# the same class of risk this project already accepts for every
-# alpm-fetched binary, just now affecting this build's own output too.
-#
-# mesa/libglvnd/glslang: not in mango's own meson.build dependency list --
-# these are scenefx's own build requirements (egl/gbm/glesv2/glslang),
-# found by actually configuring scenefx and reading what meson reported
-# (`pacman -Qo` against the resulting .so's on a real build host, not
-# guessed): libEGL.so.1/libGLESv2.so.2 come from libglvnd, libgbm.so.1
-# from mesa, and glslang (the shader-compiler *program*, not a linked
-# library -- doesn't appear in `ldd`) from the glslang package. mesa and
-# libglvnd need to be in both PKG_BUILD_DEPS (scenefx links them) and
-# PKG_DEPENDS (mango's own `ldd` shows them as direct runtime deps, via
-# the bundled scenefx.so); glslang is build-only.
-#
-# xorg-xwayland: mango links wlroots' xwayland support (wlr_xwayland_create,
-# confirmed directly in src/mango.c), which execs the real `Xwayland`
-# binary at runtime rather than linking it -- doesn't show up in `ldd`, but
-# is a genuine runtime dependency for that feature to work, so it's listed
-# in PKG_DEPENDS anyway (same "document the non-obvious runtime need"
-# reasoning as kbd depending on gzip).
-#
-# Disclosed, not fixed: mango's own compiled-in system config fallback
-# path is the literal string "/etc/mango/config.conf" (meson.build's own
-# sysconfdir handling), which an isolated app has no way to redirect --
-# app_wrapper_write's XDG_CONFIG_HOME covers mango's *user* config search
-# correctly, but the system-wide fallback still points at the real host's
-# /etc/mango, not this app's own isolated copy. Same class of
-# isolation-model rough edge as perl's own compiled-in @INC (see
-# app_wrapper_write's own comment, lib/common.sh) -- not patched here for
-# the same reason: fixing it means patching mango's own source, a bigger
-# intervention than this recipe's actual job.
+# mangowm: dwl-fork Wayland compositor, AUR-only. Built via `fau build mangowm`. See fau.md.
 PKG_SRC_URL="https://github.com/mangowm/mango/archive/refs/tags/0.14.4.tar.gz"
 PKG_SRC_SHA256="e37e732ff3b0db309fc616cec5ed9699e972f2969f82c1bbc3c5a298168401f8"
 PKG_VERSION="0.14.4"
@@ -83,8 +11,6 @@ recipe_build() {
 	local src=$1 app_dir=$2 sandbox_dir=$3
 	local jobs; jobs=$(nproc)
 
-	# scenefx: see this file's own header comment for why it's built here
-	# rather than declared as a dependency.
 	local scenefx_tarball scenefx_src scenefx_build
 	scenefx_tarball=$(build_fetch_source \
 		"https://github.com/wlrfx/scenefx/archive/refs/tags/0.4.1.tar.gz" \
@@ -108,9 +34,7 @@ recipe_build() {
 	)
 	rm -rf "$mango_build"
 
-	# Bundle scenefx's own .so straight into mango's own app_dir -- see
-	# this file's header comment. mkdir first: mango's own meson install
-	# creates no usr/lib of its own (only usr/bin/usr/share/etc).
+	# mango's own meson install creates no usr/lib (only usr/bin/usr/share/etc), so mkdir it first.
 	mkdir -p "$app_dir/usr/lib"
 	cp -a "$sandbox_dir/usr/lib/libscenefx-0.4.so" "$app_dir/usr/lib/"
 }

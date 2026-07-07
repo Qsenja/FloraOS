@@ -1,110 +1,4 @@
-/* florainstall -- FloraOS's own TUI disk installer, written from scratch the
- * same way fau/floralogin/florauser/floraseat/fauelf are: small, auditable,
- * purpose-built, reusing FloraOS's own existing tools instead of vendoring
- * a general-purpose installer framework.
- *
- * What "installing" FloraOS actually means here: the live ISO boots the
- * entire rootfs unpacked as an initramfs (see scripts/build-iso.sh) -- the
- * running system's "/" already *is* the fully-built OS, RAM-resident. There
- * is no separate "installer payload" to unpack. So florainstall's real job
- * is: partition a real disk, format it, copy the live "/" onto it (rsync,
- * already a base package -- see docs/MANIFEST.md), then make it bootable
- * and give it a real login.
- *
- * Filesystem: btrfs, not ext4 -- FloraOS ships no btrfs-progs in the base
- * image either way (same as it ships no GRUB, see below), so this is
- * fetched at install time via fau's own alpm fallback too, except onto the
- * *live* system itself rather than the target: `fau bootstrap btrfs-progs`
- * with FAU_ROOT left at its default ("/") merges mkfs.btrfs straight into
- * the running image, because it has to actually run before the target disk
- * even has anything mounted on it (unlike grub-install below, which
- * genuinely needs to run inside a chroot into the target). fau's alpm
- * fallback resolves btrfs-progs' own real dependency closure the same way
- * it does for any other package -- this project isn't hand-guessing its
- * linked libraries.
- *
- * Partition scheme: classic MBR (dos label). Deliberately NOT GPT+"ESP GUID":
- * that scheme needs a specific partition-type GUID which isn't something
- * this project can verify against a primary source from inside this build
- * (unlike, say, linux-lts.sh's Kconfig symbols, which were checked directly
- * against git.kernel.org) -- MBR sidesteps the question entirely, both for
- * the BIOS case and, it turns out, for UEFI too: the UEFI spec itself
- * defines MBR partition-type byte 0xEF ("EFI System") as a valid way to mark
- * an ESP on a legacy MBR disk, no GPT required, and sfdisk's own type table
- * (a primary source this project can actually read, `sfdisk --list-types`)
- * confirms the same byte ("ef  EFI (FAT-12/16/32)"). Boot mode is detected
- * at install time by checking whether the *live* system itself booted via
- * UEFI (`/sys/firmware/efi` present) -- the standard convention real
- * installers use (you can only install what you booted), not a user-facing
- * toggle:
- *   - BIOS-booted live media: unchanged from before -- one bootable Linux
- *     (0x83) partition spanning the disk. grub-install --target=i386-pc's
- *     classic embedding gap between the MBR and the first partition
- *     (sfdisk's default 1MiB alignment already leaves this) has been the
- *     standard BIOS-GRUB2 install method for well over a decade, no
- *     dedicated partition required.
- *   - UEFI-booted live media: two partitions -- a small (512MiB, comfortably
- *     larger than any real kernel+GRUB EFI binary this project ships) FAT32
- *     ESP (type 0xEF) first, then a Linux (0x83) partition with the rest of
- *     the disk. FAT32 needs dosfstools (mkfs.fat) -- not a base package any
- *     more than btrfs-progs is (see below), fetched onto the live system the
- *     same way. grub-install runs with --target=x86_64-efi
- *     --efi-directory=/boot/efi --removable: --removable writes the
- *     fallback EFI/BOOT/BOOTX64.EFI path instead of registering an NVRAM
- *     boot entry, sidestepping efibootmgr entirely (confirmed against this
- *     build host's own `grub-install --help`: efibootmgr is listed as an
- *     *optional* dep of grub, needed only for the NVRAM path this project
- *     doesn't use) -- more robust than NVRAM registration anyway, since it
- *     works identically on real firmware and QEMU/OVMF without depending on
- *     any given firmware's NVRAM implementation being reliable.
- *
- * Bootloader: GRUB itself is not built from source (ARCHITECTURE.md already
- * ruled that out for the ISO -- 16-bit real-mode boot code, i386-pc/
- * x86_64-efi module builds are a lot of surface for a from-scratch distro
- * to compile correctly). Fetched instead via fau's own existing alpm
- * (Arch/Artix repo) fallback, straight into the *target* disk's tree
- * (`FAU_ROOT=<target-mount> fau bootstrap grub`) -- same mechanism that
- * already fetches wlroots/sway/mango for `fau install <wm>`, just pointed
- * at a different root. Arch's `grub` package ships both the i386-pc and
- * x86_64-efi platform directories in one package (confirmed on this build
- * host: `pacman -Si grub` lists `Provides: grub-bios grub-efi-x86_64 ...`,
- * and /usr/lib/grub/x86_64-efi exists locally) -- no separate package or
- * fetch needed for the UEFI target. grub-install itself then has to run
- * *inside* a chroot into that target (not just given --boot-directory from
- * the live environment): its shared library dependencies live under the
- * target's own /usr/lib, not the live system's, and the dynamic linker only
- * consults the filesystem root it's actually running under.
- *
- * User accounts: this tool never touches a plaintext password itself. It
- * shells out to the real `florauser` (tools/florauser) inside the same
- * chroot, with the terminal inherited -- florauser's own interactive,
- * termios-masked double-prompt (the same code path floralogin's
- * read_password uses) runs directly against the target's /etc/shadow.
- * "Use the user manager from the system" applies literally: florainstall
- * does not reimplement any part of account creation.
- *
- * Kernel image: build-iso.sh's own initramfs-packing step deliberately
- * excludes ./boot from the live image (GRUB reads boot/vmlinuz-floraos
- * directly off the ISO's own boot/ directory; embedding it a second time
- * inside the initramfs it boots from would be redundant) -- confirmed by
- * reading that script directly, not assumed. That means the *running* live
- * system has no /boot/vmlinuz-floraos to copy from at all. Fixed with one
- * extra staging line in build-rootfs.sh that copies the kernel to
- * /usr/lib/floraos/vmlinuz-floraos (a path that isn't under ./boot, so it
- * does survive into the live initramfs) purely for this tool's own use.
- *
- * Boot-tested end-to-end for real, in QEMU/KVM: the BIOS path by
- * scripts/test-install.sh (install -> boot the installed disk -> `fau
- * backup` -> `grub-reboot` into it -> `fau backup-restore` -> reboot, see
- * that script's own header). The UEFI path (this file's ESP/x86_64-efi
- * addition) was verified the same way by hand against real QEMU+OVMF --
- * install over OVMF, then a *second*, completely fresh OVMF_VARS template
- * (no NVRAM boot entries at all) to specifically confirm the --removable
- * fallback path (EFI/BOOT/BOOTX64.EFI) actually boots without depending on
- * any NVRAM entry grub-install might have registered -- not yet folded into
- * scripts/test-install.sh itself as an automated regression check (see
- * docs/TODO.md if that's still true when you're reading this).
- */
+/* florainstall -- FloraOS's own TUI disk installer. See florainstall.md. */
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <dirent.h>
@@ -124,77 +18,42 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* BLKRRPART ("re-read partition table"): the ioctl number itself
- * (type 0x12, nr 95 -- both stable since the earliest Linux block-ioctl
- * numbering, unchanged for decades) is hand-computed here rather than
- * pulled in via <linux/fs.h>, which on some libc/kernel-header pairings
- * redefines macros <sys/mount.h> (needed just above for mount(2)/MS_BIND)
- * already provides. _IO(0x12, 95) with _IOC_NONE (0) reduces to
- * (0x12 << 8) | 95.
- */
-#ifndef BLKRRPART
+#ifndef BLKRRPART /* hand-computed, not from <linux/fs.h> -- see florainstall.md */
 #define BLKRRPART 0x125f
 #endif
 
 #define TARGET_MNT "/mnt/florainstall"
 #define LIVE_KERNEL_PATH "/usr/lib/floraos/vmlinuz-floraos"
 
-/* ESP size for a UEFI install (see this file's header comment) -- 512MiB is
- * comfortably larger than any real kernel+GRUB EFI binary this project
- * ships (a few MiB each), leaving headroom without being a meaningfully
- * large tax on disk space. */
 #define ESP_SIZE_MIB 512
-
-/* The only supplementary group this OS actually ships (see
- * apply-skeleton.sh's own /etc/group heredoc) -- membership is what lets
- * floraseat hand a session its seat access. This is what the "Standard"
- * extra-groups option below sets, so someone who doesn't know FloraOS's
- * group layout still ends up with a normal, GUI-capable account. */
 #define STANDARD_USER_GROUPS "seat"
-
-/* Throwaway FAU_ROOT for speculatively prefetching grub before a target
- * disk even exists to bootstrap it into (see spawn_prefetch()'s own
- * comment) -- this lives on the live, RAM-resident "/" (see this file's
- * header), so leaving it behind costs nothing and needs no cleanup. */
 #define GRUB_PREFETCH_ROOT "/tmp/florainstall-grub-prefetch"
 
 struct disk_info {
-	char name[256]; /* e.g. "sda", "nvme0n1" -- as it appears under /sys/block */
-	char path[280]; /* "/dev/sda" */
+	char name[256];
+	char path[280];
 	unsigned long long bytes;
 };
 
 struct install_settings {
-	struct disk_info disk; /* disk.name[0] == 0 means "not chosen yet" */
+	struct disk_info disk;
 	char hostname[64];
-	int create_user;      /* 0/1 */
+	int create_user;
 	char username[32];
-	char groups[128];     /* comma-separated, e.g. "seat" -- may be empty */
+	char groups[128];
 };
 
-/* --- cleanup bookkeeping: what's currently mounted, so both the normal
- * end-of-install path and any die() partway through can unwind safely --- */
 static int g_target_mounted = 0;
 static int g_esp_mounted = 0;
 static int g_dev_bound = 0;
 static int g_sys_bound = 0;
 static int g_proc_bound = 0;
 
-/* Whether the *live* system itself booted via UEFI (checked once in main(),
- * read-only after that) -- determines the target's partition scheme and
- * grub-install target, see this file's header comment. Not a user-facing
- * toggle: you can only install what you booted, the same convention real
- * installers use. */
 static int g_uefi = 0;
 
-/* --- background prefetch bookkeeping: pids of the speculative fetches
- * kicked off in main() before the user has even picked a disk, reaped
- * later in do_install() right before the real bootstrap that needs the
- * same package (see spawn_prefetch()'s own comment). -1 = never started
- * or already reaped. --- */
 static pid_t g_prefetch_btrfs_pid = -1;
 static pid_t g_prefetch_grub_pid = -1;
-static pid_t g_prefetch_dosfstools_pid = -1; /* only spawned when g_uefi */
+static pid_t g_prefetch_dosfstools_pid = -1;
 
 static void log_msg(const char *fmt, ...) {
 	va_list ap;
@@ -211,15 +70,10 @@ static void unmount_best_effort(const char *path) {
 	umount2(path, MNT_DETACH);
 }
 
-/* Unwinds every bind-mount/mount this tool may have made, innermost first.
- * Safe to call more than once and safe to call when nothing is mounted yet
- * (each step is guarded by its own flag). */
 static void cleanup_mounts(void) {
 	if (g_dev_bound) { unmount_best_effort(TARGET_MNT "/dev"); g_dev_bound = 0; }
 	if (g_sys_bound) { unmount_best_effort(TARGET_MNT "/sys"); g_sys_bound = 0; }
 	if (g_proc_bound) { unmount_best_effort(TARGET_MNT "/proc"); g_proc_bound = 0; }
-	/* Nested under TARGET_MNT itself (mounted at .../boot/efi) -- must come
-	 * before the target unmount below, same as dev/sys/proc above. */
 	if (g_esp_mounted) { unmount_best_effort(TARGET_MNT "/boot/efi"); g_esp_mounted = 0; }
 	if (g_target_mounted) { unmount_best_effort(TARGET_MNT); g_target_mounted = 0; }
 }
@@ -227,10 +81,6 @@ static void cleanup_mounts(void) {
 static void die(const char *fmt, ...) __attribute__((noreturn));
 static void die(const char *fmt, ...) {
 	va_list ap;
-	/* endwin() may not have been called yet if die() fires while still in
-	 * the TUI (e.g. a setup failure before install even starts) -- calling
-	 * it twice is harmless, and isendwin() lets us skip it if we're already
-	 * in plain-terminal mode during the install phase. */
 	if (!isendwin()) endwin();
 	fprintf(stderr, "florainstall: FATAL: ");
 	va_start(ap, fmt);
@@ -240,14 +90,6 @@ static void die(const char *fmt, ...) {
 	cleanup_mounts();
 	exit(1);
 }
-
-/* --- child-process helpers: every external tool this project already
- * ships (sfdisk, mkfs.btrfs, rsync, blkid, wipefs, fau, florauser,
- * grub-install) is run via fork+exec, matching fau's own philosophy of
- * calling real tools rather than reimplementing them, while chroot(2)/
- * mount(2) themselves are plain direct syscalls (same level as floraseat's
- * own raw syscall use) rather than shelling out to /usr/bin/mount or
- * /usr/sbin/chroot. --- */
 
 static int run_argv(char *const argv[]) {
 	pid_t pid = fork();
@@ -268,8 +110,6 @@ static void run_argv_or_die(char *const argv[]) {
 	if (rc != 0) die("%s exited with status %d", argv[0], rc);
 }
 
-/* Feeds `input` to the child's stdin (used for sfdisk's script format) then
- * waits for it. */
 static void run_argv_input_or_die(char *const argv[], const char *input) {
 	int pipefd[2];
 	if (pipe(pipefd) != 0) die("pipe failed: %s", strerror(errno));
@@ -284,7 +124,7 @@ static void run_argv_input_or_die(char *const argv[], const char *input) {
 		_exit(127);
 	}
 	close(pipefd[0]);
-	if (write(pipefd[1], input, strlen(input)) < 0) { /* child will report its own error */ }
+	if (write(pipefd[1], input, strlen(input)) < 0) { }
 	close(pipefd[1]);
 	int status;
 	waitpid(pid, &status, 0);
@@ -292,8 +132,6 @@ static void run_argv_input_or_die(char *const argv[], const char *input) {
 		die("%s failed (see output above)", argv[0]);
 }
 
-/* Captures the child's stdout (used for `blkid -s UUID -o value`). Trims
- * the trailing newline. Dies if the child produced nothing usable. */
 static void run_argv_capture_or_die(char *const argv[], char *out, size_t outsz) {
 	int pipefd[2];
 	if (pipe(pipefd) != 0) die("pipe failed: %s", strerror(errno));
@@ -321,11 +159,6 @@ static void run_argv_capture_or_die(char *const argv[], char *out, size_t outsz)
 		die("%s produced no output -- can't continue without it", argv[0]);
 }
 
-/* Runs one program inside a chroot at `root`. A fresh fork per call (rather
- * than chroot()-ing this whole process) so each in-chroot step is fully
- * isolated and the parent's own view of "/" never changes. stdio is
- * inherited on purpose: florauser's own interactive password prompt needs
- * the real terminal, not a captured pipe. */
 static void run_in_chroot_or_die(const char *root, char *const argv[]) {
 	pid_t pid = fork();
 	if (pid < 0) die("fork failed: %s", strerror(errno));
@@ -342,35 +175,11 @@ static void run_in_chroot_or_die(const char *root, char *const argv[]) {
 		die("%s failed inside the target chroot", argv[0]);
 }
 
-/* --- speculative background prefetch: do_install()'s two slowest steps
- * (fetching btrfs-progs and grub via fau's alpm fallback) are entirely
- * network-bound and don't depend on anything the user picks in the menu
- * -- btrfs-progs always bootstraps onto the live "/", and grub's package
- * set is the same regardless of which disk ends up as the target. Kicking
- * both off in the background the moment the TUI opens overlaps that
- * network time with however long the user spends on the disk/hostname/
- * user screens, instead of it all sitting on the critical path after they
- * hit "Begin installation".
- *
- * grub can't bootstrap into the real target yet (no disk chosen/
- * partitioned/mounted at this point), so it prefetches into a throwaway
- * root instead (GRUB_PREFETCH_ROOT) -- the merge result there is never
- * used. What actually matters is fau's own alpm_fetch_job now persisting
- * every freshly-downloaded archive into /var/cache/pacman/pkg (see
- * tools/fau/lib/alpm.sh), which is a fixed path independent of FAU_ROOT: the
- * real, later `FAU_ROOT=<target> fau bootstrap grub` call in do_install()
- * just finds everything already cached there and skips the network
- * entirely. btrfs-progs needs no such throwaway root since its real
- * FAU_ROOT (the live "/") is already what this prefetches into. */
-
 static pid_t spawn_prefetch(const char *pkg, const char *fau_root) {
 	pid_t pid = fork();
-	if (pid < 0) return -1; /* best-effort: no prefetch, install still works, just slower */
+	if (pid < 0) return -1;
 	if (pid == 0) {
 		if (fau_root) setenv("FAU_ROOT", fau_root, 1);
-		/* This runs unattended for however long the user stays in the
-		 * menu -- it must not fight the TUI for the terminal or splatter
-		 * its own progress bar over ncurses' screen. */
 		int devnull = open("/dev/null", O_RDWR);
 		if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); close(devnull); }
 		execlp("fau", "fau", "bootstrap", pkg, (char *)NULL);
@@ -379,26 +188,12 @@ static pid_t spawn_prefetch(const char *pkg, const char *fau_root) {
 	return pid;
 }
 
-/* Waits out a still-running prefetch (an instant no-op if it already
- * finished, or was never started). Called right before do_install() runs
- * the real bootstrap for the same package: for btrfs-progs this avoids
- * two concurrent `fau bootstrap` invocations racing against the exact
- * same FAU_ROOT's state (fau keeps no locking of its own, same assumption
- * florauser's own file header documents). Exit status is ignored --
- * prefetching is purely a speed optimization, never a correctness
- * dependency: if it failed (e.g. network wasn't up yet when the TUI
- * opened), the real call right after this still does its own fetch and
- * die()s on failure exactly as if no prefetch had ever been attempted. */
 static void reap_prefetch(pid_t *pid) {
 	if (*pid <= 0) return;
 	int status;
 	waitpid(*pid, &status, 0);
 	*pid = -1;
 }
-
-/* --- disk enumeration: reads /sys/block directly (same "read the real
- * kernel-provided data, don't rely on a wrapper" convention florauser uses
- * for /etc/passwd instead of getpwnam) rather than parsing lsblk output. */
 
 static int is_whole_disk(const char *name) {
 	if (strncmp(name, "loop", 4) == 0) return 0;
@@ -422,7 +217,7 @@ static int list_disks(struct disk_info *out, int max) {
 		unsigned long long sectors = 0;
 		if (fscanf(f, "%llu", &sectors) != 1) sectors = 0;
 		fclose(f);
-		if (sectors == 0) continue; /* empty drive (e.g. no media in a card reader) */
+		if (sectors == 0) continue;
 		snprintf(out[n].name, sizeof(out[n].name), "%s", ent->d_name);
 		snprintf(out[n].path, sizeof(out[n].path), "/dev/%s", ent->d_name);
 		out[n].bytes = sectors * 512ULL;
@@ -432,15 +227,11 @@ static int list_disks(struct disk_info *out, int max) {
 	return n;
 }
 
-/* "sda" -> partition 1 is "/dev/sda1"; "nvme0n1"/"mmcblk0" -> "p1" infix,
- * since their own device names already end in a digit. */
 static void partition_path(const struct disk_info *disk, int partnum, char *out, size_t outsz) {
 	size_t len = strlen(disk->name);
 	int needs_p = len > 0 && isdigit((unsigned char)disk->name[len - 1]);
 	snprintf(out, outsz, "%s%s%d", disk->path, needs_p ? "p" : "", partnum);
 }
-
-/* --- ncurses TUI helpers --- */
 
 static void init_tui(void) {
 	initscr();
@@ -450,8 +241,6 @@ static void init_tui(void) {
 	curs_set(0);
 }
 
-/* Simple scrolling list picker built on <menu.h> -- returns the chosen
- * index, or -1 if the user backs out with 'q'/ESC. */
 static int run_choice_menu(const char *title, const char *const *labels, int n) {
 	ITEM **items = calloc((size_t)n + 1, sizeof(ITEM *));
 	for (int i = 0; i < n; i++) items[i] = new_item(labels[i], "");
@@ -486,7 +275,7 @@ static int run_choice_menu(const char *title, const char *const *labels, int n) 
 		case '\n': case KEY_ENTER:
 			result = item_index(current_item(menu));
 			goto done;
-		case 'q': case 27: /* ESC */
+		case 'q': case 27:
 			result = -1;
 			goto done;
 		default: break;
@@ -504,18 +293,7 @@ done:
 	return result;
 }
 
-/* Freeform text entry in a small centered box. Leaves `buf` untouched (and
- * returns 0) if the user backs out with ESC before typing anything;
- * otherwise writes the typed line (possibly empty) and returns 1.
- *
- * Hand-rolled character loop rather than mvwgetnstr(): that function has no
- * notion of "cancel" at all, so despite the "ESC=cancel" hint printed below,
- * ESC used to just be handed to it as a plain data byte -- and because this
- * window has keypad(TRUE) set (needed for backspace), ncurses would first
- * hold it for the ESCDELAY timeout (~1s) waiting to see if it was the start
- * of a function-key sequence, then insert byte 0x1b into the buffer. Reading
- * input a key at a time here lets ESC actually abort immediately, the same
- * way run_choice_menu()'s own loop already handles it. */
+/* hand-rolled input loop, not mvwgetnstr() -- see florainstall.md */
 static int prompt_text(const char *title, const char *prompt, char *buf, size_t bufsz) {
 	int rows, cols;
 	getmaxyx(stdscr, rows, cols);
@@ -581,10 +359,6 @@ static void show_message(const char *title, const char *const *lines, int n) {
 	refresh();
 }
 
-/* Requires the user to type the disk's own short name (e.g. "sda") back
- * exactly, the same "type the thing you're about to destroy" confirmation
- * pattern real installers use -- a plain y/n is too easy to reflexively
- * confirm for an operation this destructive. */
 static int confirm_destructive(const struct install_settings *s) {
 	int rows, cols;
 	getmaxyx(stdscr, rows, cols);
@@ -614,8 +388,6 @@ static int confirm_destructive(const struct install_settings *s) {
 	return strcmp(typed, s->disk.name) == 0;
 }
 
-/* --- main settings menu --- */
-
 static void format_disk_label(const struct disk_info *d, char *out, size_t outsz) {
 	double gib = (double)d->bytes / (1024.0 * 1024.0 * 1024.0);
 	snprintf(out, outsz, "%s (%.1f GiB)", d->path, gib);
@@ -639,11 +411,6 @@ static void pick_disk(struct install_settings *s) {
 	if (choice >= 0) s->disk = disks[choice];
 }
 
-/* Runs the whole disk-destroying install pipeline. Called only after
- * confirm_destructive() has already returned true. Leaves curses mode
- * permanently (this is a one-shot linear operation, not something you
- * back out of into the menu again) and logs plainly to the terminal, the
- * same style build-rootfs.sh's own log() uses. */
 static void do_install(const struct install_settings *s) {
 	endwin();
 
@@ -669,21 +436,11 @@ static void do_install(const struct install_settings *s) {
 		esp_part[0] = 0;
 	}
 
-	/* sfdisk already re-reads the partition table via BLKRRPART itself on
-	 * a clean write, but doing it explicitly here too is cheap insurance --
-	 * confirmed necessary in practice on some kernel/udev timing (the
-	 * device node for the new partition can otherwise still be missing by
-	 * the time the next step opens it). */
 	int fd = open(s->disk.path, O_RDONLY);
 	if (fd >= 0) { ioctl(fd, BLKRRPART, NULL); close(fd); }
 
-	struct stat st; /* reused below for the kernel-image check too */
+	struct stat st;
 	partition_path(&s->disk, root_partnum, root_part, sizeof(root_part));
-	/* Waits for whichever partition device appears last -- on a fresh MBR
-	 * write the kernel/udev create partition nodes in order, so checking
-	 * root_part (the higher partition number when g_uefi) also confirms
-	 * esp_part already exists; checking it too when g_uefi costs nothing
-	 * and doesn't assume that ordering blindly. */
 	const char *wait_paths[2] = {root_part, g_uefi ? esp_part : NULL};
 	for (int w = 0; w < 2; w++) {
 		if (!wait_paths[w]) continue;
@@ -700,9 +457,6 @@ static void do_install(const struct install_settings *s) {
 		reap_prefetch(&g_prefetch_dosfstools_pid);
 		log_msg("fetching dosfstools (via fau's own alpm fallback, onto the live system itself)");
 		{
-			/* Same reasoning as btrfs-progs just below: mkfs.fat has to run
-			 * before the target has anything mounted on it, so this
-			 * bootstraps onto the live "/" too, not the target. */
 			pid_t pid = fork();
 			if (pid < 0) die("fork failed: %s", strerror(errno));
 			if (pid == 0) {
@@ -722,17 +476,6 @@ static void do_install(const struct install_settings *s) {
 	reap_prefetch(&g_prefetch_btrfs_pid);
 	log_msg("fetching btrfs-progs (via fau's own alpm fallback, onto the live system itself)");
 	{
-		/* Unlike grub below, mkfs.btrfs has to run *before* the target
-		 * disk has anything mounted on it at all, so this bootstraps
-		 * onto the live "/" (FAU_ROOT left at its own default) rather
-		 * than the target -- fau's own --help documents this as a
-		 * supported, intended use (`FAU_ROOT target root for bootstrap
-		 * package(s) (default: /)`), not a build-time-only path. This is
-		 * usually near-instant: main() already prefetched btrfs-progs
-		 * into this same "/" in the background as soon as the TUI opened
-		 * (see spawn_prefetch()), so by the time the user has picked a
-		 * disk and confirmed the install, it's typically already merged
-		 * and this just re-runs against a warm /var/cache/pacman/pkg. */
 		pid_t pid = fork();
 		if (pid < 0) die("fork failed: %s", strerror(errno));
 		if (pid == 0) {
@@ -755,13 +498,6 @@ static void do_install(const struct install_settings *s) {
 		die("mount %s -> " TARGET_MNT " failed: %s", root_part, strerror(errno));
 	g_target_mounted = 1;
 
-	/* @ is a sibling of @snapshots under the top-level (subvolid 5) subvolume
-	 * this bare mount just gave us -- fau backup (tools/fau/fau-backup) later
-	 * creates @snapshots itself, lazily, the first time it's needed. Keeping
-	 * the actual install inside a named subvolume rather than the top-level
-	 * itself is what makes `fau backup`'s read-only snapshots + GRUB
-	 * boot-into-a-snapshot restore (see ARCHITECTURE.md) possible at all --
-	 * you can't snapshot the top-level subvolume itself. */
 	log_msg("creating the @ subvolume");
 	run_argv_or_die((char *[]){"btrfs", "subvolume", "create", TARGET_MNT "/@", NULL});
 	log_msg("remounting %s (subvol=@) at " TARGET_MNT, root_part);
@@ -777,11 +513,6 @@ static void do_install(const struct install_settings *s) {
 		"--exclude=/proc", "--exclude=/sys", "--exclude=/dev",
 		"--exclude=/run", "--exclude=/tmp", "--exclude=/mnt",
 		"/", TARGET_MNT "/", NULL});
-	/* rsync excluded these on purpose (they're runtime-populated
-	 * mountpoints, not real content) -- recreate them as empty dirs so
-	 * the installed system's own /etc/inittab (copied verbatim above) has
-	 * somewhere to mount onto at boot, same as the live rootfs build
-	 * itself provides. */
 	{
 		const char *dirs[] = {"proc", "sys", "dev", "run", "tmp"};
 		for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
@@ -832,11 +563,6 @@ static void do_install(const struct install_settings *s) {
 	reap_prefetch(&g_prefetch_grub_pid);
 	log_msg("fetching grub (via fau's own alpm fallback, into the target only)");
 	{
-		/* By this point the rsync copy above (the single slowest step of
-		 * the whole install) has already run, so main()'s background grub
-		 * prefetch (into GRUB_PREFETCH_ROOT, see spawn_prefetch()) has had
-		 * plenty of time to finish -- this typically just hits a warm
-		 * /var/cache/pacman/pkg rather than touching the network at all. */
 		pid_t pid = fork();
 		if (pid < 0) die("fork failed: %s", strerror(errno));
 		if (pid == 0) {
@@ -867,13 +593,6 @@ static void do_install(const struct install_settings *s) {
 
 	if (g_uefi) {
 		log_msg("installing grub to %s (UEFI/x86_64-efi, removable fallback path)", s->disk.path);
-		/* --removable writes EFI/BOOT/BOOTX64.EFI (the fallback path every
-		 * UEFI firmware probes without needing an NVRAM boot entry) instead
-		 * of registering one via efibootmgr -- see this file's header
-		 * comment for why that's deliberately not used here. No install
-		 * device argument: --efi-directory alone tells grub-install where
-		 * the ESP is; there's no BIOS boot-sector to embed on a disk this
-		 * is otherwise never given raw access to. */
 		run_in_chroot_or_die(TARGET_MNT,
 			(char *[]){"grub-install", "--target=x86_64-efi", "--efi-directory=/boot/efi",
 				"--boot-directory=/boot", "--removable", NULL});
@@ -887,20 +606,6 @@ static void do_install(const struct install_settings *s) {
 	{
 		char path[256];
 		snprintf(path, sizeof(path), TARGET_MNT "/boot/grub/grub.cfg");
-		/* No initrd line: unlike the live ISO (which boots by unpacking its
-		 * whole rootfs as an initramfs), this is a real disk root -- the
-		 * kernel mounts btrfs directly. Assumes CONFIG_BTRFS_FS=y (built
-		 * in, not a module) in this kernel's defconfig -- now explicitly
-		 * enabled in scripts/recipes/linux-lts.sh; see this file's header
-		 * comment for why that's still not independently confirmed by an
-		 * actual kernel build in this sandbox.
-		 *
-		 * The actual menuentry text (including one per `fau backup`
-		 * snapshot under @snapshots) is generated by floragrub-cfg
-		 * (tools/floragrub-cfg), not hand-written here, so the format is
-		 * shared with `fau backup`'s own grub.cfg regeneration after a
-		 * snapshot/remove/restore -- see that script's own header comment
-		 * for the subvolume-path reasoning. */
 		run_argv_or_die((char *[]){"floragrub-cfg", (char *)root_part, uuid, path, NULL});
 	}
 
@@ -921,8 +626,6 @@ static void do_install(const struct install_settings *s) {
 
 	log_msg("done. Remove the installation media and reboot into %s.", s->disk.path);
 }
-
-/* --- main menu loop --- */
 
 static void main_menu(struct install_settings *s) {
 	for (;;) {
@@ -984,7 +687,7 @@ static void main_menu(struct install_settings *s) {
 					snprintf(s->groups, sizeof(s->groups), "%s", groupbuf);
 					break;
 				}
-				default: /* -1: backed out, leave existing groups untouched */
+				default:
 					break;
 				}
 			} else {
@@ -1006,7 +709,7 @@ static void main_menu(struct install_settings *s) {
 				break;
 			}
 			do_install(s);
-			return; /* do_install() already left curses mode for good */
+			return;
 		case 4:
 		case -1:
 			endwin();
@@ -1036,16 +739,8 @@ int main(int argc, char **argv) {
 	}
 	if (!s.hostname[0]) snprintf(s.hostname, sizeof(s.hostname), "floraos");
 
-	/* Checked once, up front: this determines the target's partition
-	 * scheme and grub-install target throughout do_install() (see this
-	 * file's header comment) -- read-only from here on. */
 	g_uefi = access("/sys/firmware/efi", F_OK) == 0;
 
-	/* Speculative prefetch: start these before the user has touched
-	 * anything, so their network time overlaps with however long the
-	 * menu takes instead of sitting on the critical path after "Begin
-	 * installation" (see spawn_prefetch()'s own comment). dosfstools only
-	 * when g_uefi -- BIOS installs never touch mkfs.fat. */
 	g_prefetch_btrfs_pid = spawn_prefetch("btrfs-progs", NULL);
 	g_prefetch_grub_pid = spawn_prefetch("grub", GRUB_PREFETCH_ROOT);
 	if (g_uefi) g_prefetch_dosfstools_pid = spawn_prefetch("dosfstools", NULL);

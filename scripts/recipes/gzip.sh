@@ -1,8 +1,4 @@
-# GNU gzip. kbd's loadkeys/dumpkeys shell out to gzip to decompress
-# .gz-compressed keymaps/fonts, falling back to its own internal
-# decompression when it's missing -- which FloraOS didn't ship, producing
-# cosmetic stderr noise on every boot (see docs/TODO.md). Plain autotools
-# build, no optional deps to turn off.
+# GNU gzip -- see docs/MANIFEST.md.
 PKG_DESCRIPTION="GNU gzip -- lets kbd's loadkeys/dumpkeys decompress .gz keymaps/fonts directly"
 PKG_DEPENDS="glibc"
 

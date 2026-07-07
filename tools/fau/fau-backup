@@ -1,28 +1,13 @@
 #!/usr/bin/env bash
-# fau-backup -- full-root btrfs snapshots, restorable by picking an
-# alternate GRUB menu entry instead of fau-export's config-only coverage.
-# Real disk installs only (see tools/florainstall, which lays the target
-# out as an @ subvolume with @snapshots as its sibling under the
-# filesystem's top-level subvolume, id 5) -- there's no top-level subvolume
-# to snapshot into on the live ISO's own tmpfs/initramfs root.
-#
-# Calls the real btrfs/findmnt/blkid/floragrub-cfg directly -- no
-# reimplementation of any of that, matching fau-service/fau-seat/fau-user's
-# own "thin front end" shape. Called by the `fau` dispatcher; fully
-# runnable standalone too.
+# fau-backup -- full-root btrfs snapshot/restore via GRUB menu entries. See fau.md.
 set -euo pipefail
 
-# readlink -f before dirname: see tools/fau/fau's own comment on this --
-# only that file is symlinked today (/usr/bin/fau), but the fix is free.
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SELF_DIR/lib/common.sh"
 
 backup_name_check() {
-	# Also used as a filesystem path segment (@snapshots/<name>) and as GRUB
-	# menu text, so keep it to a safe charset and explicitly reject ".." --
-	# ".." would otherwise still pass the charset check (its characters are
-	# all allowed) and could walk the path outside @snapshots.
+	# ".." is rejected explicitly: its charset alone would pass the check below.
 	local name=$1
 	[ -n "$name" ] || die "backup name required"
 	case "$name" in *..*) die "backup name can't contain '..'" ;; esac
@@ -30,38 +15,19 @@ backup_name_check() {
 		|| die "backup name must match ^[A-Za-z0-9._-]+\$ (it becomes a GRUB menu entry and a filesystem path segment)"
 }
 
-# root_device -- prints the block device mounted at /, e.g. /dev/sda1.
-# findmnt's SOURCE column annotates a btrfs subvolume mount with a bracketed
-# suffix (e.g. "/dev/sda1[/@]", found via an actual boot test: `fau backup`
-# died with "/dev/sda1[/@] isn't a block device" before this existed) -- that
-# suffix names which subvolume is mounted, not part of the device path, so
-# it's stripped here rather than passed straight through.
+# findmnt's SOURCE column suffixes a subvolume mount, e.g. "/dev/sda1[/@]"; stripped below.
 root_device() {
 	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
 	printf '%s' "${device%%\[*}"
 }
 
-# backup_with_toplevel <fn> [extra args...] -- mounts the running root
-# filesystem's top-level (subvolid 5) subvolume, where @ and @snapshots live
-# as siblings, at a fresh mktemp -d mountpoint, then runs
-# `<fn> <toplevel-mountpoint> <root-device> <root-uuid> [extra args...]` in a
-# subshell (die() calls exit directly, and running the callback in a subshell
-# means a die() partway through only ends the subshell, so the unmount below
-# still runs instead of being skipped) and always unmounts/cleans up
-# afterward, propagating the callback's exit status.
+# Callback runs in a subshell so a die() inside it still lets the unmount below run.
 backup_with_toplevel() {
 	local fn=$1; shift
 	local device; device=$(root_device)
 	[ -b "$device" ] || die "$device (source of /) isn't a block device -- fau backup only supports a real disk install"
 	local uuid; uuid=$(blkid -s UUID -o value "$device") || die "blkid couldn't read $device's UUID"
-	# /dev/shm, not plain mktemp -d's default of $TMPDIR/tmp (usually under
-	# /tmp on the currently-mounted root) -- found via an actual QEMU boot
-	# test: booted into a `fau backup` snapshot (deliberately read-only, see
-	# _backup_do), /tmp lives on that same read-only root, so mktemp died
-	# with "Read-only file system" before backup-restore could even mount
-	# the top-level subvolume. devfs's own init script (see
-	# etc/init.d/devfs) always mounts /dev/shm as its own tmpfs, independent
-	# of whatever's mounted as /, on every FloraOS boot -- live or installed.
+	# /dev/shm, not mktemp -d's default under /tmp: /tmp can be the read-only root (see fau.md).
 	local tmp; tmp=$(mktemp -d -p /dev/shm)
 	mount -o subvolid=5 "$device" "$tmp" || { rmdir "$tmp"; die "mount -o subvolid=5 $device failed"; }
 	local rc=0
@@ -72,9 +38,7 @@ backup_with_toplevel() {
 }
 
 backup_regen_grub() {
-	# $1 device, $2 uuid -- floragrub-cfg (tools/floragrub-cfg) does its own
-	# separate subvolid=5 mount, so this is called after backup_with_toplevel
-	# has already unmounted $tmp, not while it's still held open.
+	# Called after backup_with_toplevel has unmounted $tmp: floragrub-cfg does its own subvolid=5 mount.
 	floragrub-cfg "$1" "$2" /boot/grub/grub.cfg
 }
 
@@ -132,16 +96,7 @@ _backup_restore_do() {
 	local tmp=$1 name=$4
 	[ -e "$tmp/@snapshots/$name" ] || die "no such backup: $name (see 'fau backup-list')"
 	local ts; ts=$(date -u +%Y%m%dT%H%M%SZ)
-	# Not atomic across these two renames -- no tool this project ships
-	# exposes Linux's renameat2(RENAME_EXCHANGE), which is the only way to
-	# swap two subvolume names in one syscall, so a crash between them is a
-	# real, documented risk (see ARCHITECTURE.md's fau-backup section), not
-	# silently glossed over. Clearing the snapshot's read-only property
-	# *first*, before @ is touched at all, matters: if this step itself
-	# fails or is interrupted, @ was never renamed away, so there's nothing
-	# to repair -- just re-run this command. That narrows the genuinely
-	# dangerous window (@ doesn't exist under any name) down to exactly the
-	# two renames below, as small as it gets without RENAME_EXCHANGE.
+	# Not atomic (no renameat2 RENAME_EXCHANGE available); see fau.md for the crash window this narrows.
 	btrfs property set "$tmp/@snapshots/$name" ro false || die "clearing the snapshot's read-only property failed -- @ is untouched, nothing to repair, just re-run 'fau backup-restore $name'"
 	mv "$tmp/@" "$tmp/@pre-restore-$name-$ts" || die "renaming the current @ aside failed"
 	mv "$tmp/@snapshots/$name" "$tmp/@" \
@@ -161,10 +116,7 @@ cmd_backup_restore() {
 
 _backup_repair_do() {
 	local tmp=$1 name=$4
-	# The specific, narrow state this completes: a crash during
-	# _backup_restore_do above, after it renamed @ aside but before it
-	# renamed @snapshots/$name to @. Anything else (an intact @, or @
-	# missing for some unrelated reason) is refused rather than guessed at.
+	# Only completes one specific interrupted-restore state; anything else is refused (see fau.md).
 	[ ! -e "$tmp/@" ] || die "@ already exists -- nothing to repair. If you meant to restore '$name' fresh, use 'fau backup-restore $name' instead"
 	[ -e "$tmp/@snapshots/$name" ] \
 		|| die "@ is missing but @snapshots/$name doesn't exist either -- this isn't the interrupted-restore state backup-repair knows how to fix. Recover manually (see docs/TODO.md's fau-backup entry): the previous root should still be at some @pre-restore-$name-<timestamp>"
@@ -174,12 +126,6 @@ _backup_repair_do() {
 }
 
 cmd_backup_repair() {
-	# Deliberately takes <name> explicitly rather than scanning for
-	# @pre-restore-*-* markers and guessing -- run this after booting the
-	# "FloraOS (backup: <name>)" GRUB entry (see _backup_restore_do's own
-	# error message), which only exists, and only boots successfully, for
-	# the exact backup a crashed restore was promoting. There's no
-	# ambiguity to resolve because the caller already knows which one.
 	[ $# -eq 1 ] || die "usage: fau backup-repair <name>  -- run after booting the \"FloraOS (backup: <name>)\" GRUB entry when a crash interrupted 'backup-restore <name>' (see 'fau help backup')"
 	backup_name_check "$1"
 	backup_with_toplevel _backup_repair_do "$1"
