@@ -1146,15 +1146,34 @@ alpm_fetch_job() {
 	# partway through copying glibc's locale files, even at just 2 at once.
 	local jobs_dir=$1 idx=$2 repo=$3 filename=$4 sha256=$5
 	local dest="$jobs_dir/$idx.pkg.tmp"
+	local from_cache=0
 	if [ -r "/var/cache/pacman/pkg/$filename" ]; then
 		cp "/var/cache/pacman/pkg/$filename" "$dest"
 		echo cached > "$jobs_dir/$idx.source"
+		from_cache=1
 	else
 		alpm_fetch "$repo" "$filename" "$dest" quiet
 		echo fetched > "$jobs_dir/$idx.source"
 	fi
 	local actual; actual=$(sha256sum "$dest" | cut -d' ' -f1)
 	[ "$actual" = "$sha256" ] || die "checksum mismatch: expected $sha256, got $actual"
+	# Persist every freshly-downloaded archive into the same well-known
+	# cache this function already *reads* from above, so a later bootstrap
+	# of the same package -- possibly against a different FAU_ROOT
+	# entirely -- hits this cache instead of the network. This is what
+	# lets florainstall speculatively prefetch btrfs-progs/grub while the
+	# user is still clicking through its TUI, before the real chroot
+	# target even exists to bootstrap into: the real, later bootstrap call
+	# just finds everything already here. Best-effort (mkdir/cp/mv can all
+	# silently fail, e.g. a read-only /var) -- a cache write is never
+	# allowed to fail the actual install over it. tmp-name-then-rename:
+	# same atomic-write pattern write_lines() uses, since multiple
+	# concurrent fau invocations (a background prefetch racing the real
+	# install) can hit this same destination file at once.
+	if [ "$from_cache" -eq 0 ] && mkdir -p /var/cache/pacman/pkg 2>/dev/null; then
+		local cache_tmp="/var/cache/pacman/pkg/.fau-fetch.$$.$filename"
+		cp "$dest" "$cache_tmp" 2>/dev/null && mv -f "$cache_tmp" "/var/cache/pacman/pkg/$filename" 2>/dev/null
+	fi
 	mv "$dest" "$jobs_dir/$idx.pkg"
 }
 

@@ -123,6 +123,12 @@
  * group layout still ends up with a normal, GUI-capable account. */
 #define STANDARD_USER_GROUPS "seat"
 
+/* Throwaway FAU_ROOT for speculatively prefetching grub before a target
+ * disk even exists to bootstrap it into (see spawn_prefetch()'s own
+ * comment) -- this lives on the live, RAM-resident "/" (see this file's
+ * header), so leaving it behind costs nothing and needs no cleanup. */
+#define GRUB_PREFETCH_ROOT "/tmp/florainstall-grub-prefetch"
+
 struct disk_info {
 	char name[256]; /* e.g. "sda", "nvme0n1" -- as it appears under /sys/block */
 	char path[280]; /* "/dev/sda" */
@@ -143,6 +149,14 @@ static int g_target_mounted = 0;
 static int g_dev_bound = 0;
 static int g_sys_bound = 0;
 static int g_proc_bound = 0;
+
+/* --- background prefetch bookkeeping: pids of the speculative fetches
+ * kicked off in main() before the user has even picked a disk, reaped
+ * later in do_install() right before the real bootstrap that needs the
+ * same package (see spawn_prefetch()'s own comment). -1 = never started
+ * or already reaped. --- */
+static pid_t g_prefetch_btrfs_pid = -1;
+static pid_t g_prefetch_grub_pid = -1;
 
 static void log_msg(const char *fmt, ...) {
 	va_list ap;
@@ -285,6 +299,60 @@ static void run_in_chroot_or_die(const char *root, char *const argv[]) {
 	waitpid(pid, &status, 0);
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
 		die("%s failed inside the target chroot", argv[0]);
+}
+
+/* --- speculative background prefetch: do_install()'s two slowest steps
+ * (fetching btrfs-progs and grub via fau's alpm fallback) are entirely
+ * network-bound and don't depend on anything the user picks in the menu
+ * -- btrfs-progs always bootstraps onto the live "/", and grub's package
+ * set is the same regardless of which disk ends up as the target. Kicking
+ * both off in the background the moment the TUI opens overlaps that
+ * network time with however long the user spends on the disk/hostname/
+ * user screens, instead of it all sitting on the critical path after they
+ * hit "Begin installation".
+ *
+ * grub can't bootstrap into the real target yet (no disk chosen/
+ * partitioned/mounted at this point), so it prefetches into a throwaway
+ * root instead (GRUB_PREFETCH_ROOT) -- the merge result there is never
+ * used. What actually matters is fau's own alpm_fetch_job now persisting
+ * every freshly-downloaded archive into /var/cache/pacman/pkg (see
+ * tools/fau/fau), which is a fixed path independent of FAU_ROOT: the
+ * real, later `FAU_ROOT=<target> fau bootstrap grub` call in do_install()
+ * just finds everything already cached there and skips the network
+ * entirely. btrfs-progs needs no such throwaway root since its real
+ * FAU_ROOT (the live "/") is already what this prefetches into. */
+
+static pid_t spawn_prefetch(const char *pkg, const char *fau_root) {
+	pid_t pid = fork();
+	if (pid < 0) return -1; /* best-effort: no prefetch, install still works, just slower */
+	if (pid == 0) {
+		if (fau_root) setenv("FAU_ROOT", fau_root, 1);
+		/* This runs unattended for however long the user stays in the
+		 * menu -- it must not fight the TUI for the terminal or splatter
+		 * its own progress bar over ncurses' screen. */
+		int devnull = open("/dev/null", O_RDWR);
+		if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); close(devnull); }
+		execlp("fau", "fau", "bootstrap", pkg, (char *)NULL);
+		_exit(127);
+	}
+	return pid;
+}
+
+/* Waits out a still-running prefetch (an instant no-op if it already
+ * finished, or was never started). Called right before do_install() runs
+ * the real bootstrap for the same package: for btrfs-progs this avoids
+ * two concurrent `fau bootstrap` invocations racing against the exact
+ * same FAU_ROOT's state (fau keeps no locking of its own, same assumption
+ * florauser's own file header documents). Exit status is ignored --
+ * prefetching is purely a speed optimization, never a correctness
+ * dependency: if it failed (e.g. network wasn't up yet when the TUI
+ * opened), the real call right after this still does its own fetch and
+ * die()s on failure exactly as if no prefetch had ever been attempted. */
+static void reap_prefetch(pid_t *pid) {
+	if (*pid <= 0) return;
+	int status;
+	waitpid(*pid, &status, 0);
+	*pid = -1;
 }
 
 /* --- disk enumeration: reads /sys/block directly (same "read the real
@@ -562,6 +630,7 @@ static void do_install(const struct install_settings *s) {
 	if (stat(part1, &st) != 0)
 		die("partition device %s never appeared -- check `sfdisk -l %s`", part1, s->disk.path);
 
+	reap_prefetch(&g_prefetch_btrfs_pid);
 	log_msg("fetching btrfs-progs (via fau's own alpm fallback, onto the live system itself)");
 	{
 		/* Unlike grub below, mkfs.btrfs has to run *before* the target
@@ -569,7 +638,12 @@ static void do_install(const struct install_settings *s) {
 		 * onto the live "/" (FAU_ROOT left at its own default) rather
 		 * than the target -- fau's own --help documents this as a
 		 * supported, intended use (`FAU_ROOT target root for bootstrap
-		 * package(s) (default: /)`), not a build-time-only path. */
+		 * package(s) (default: /)`), not a build-time-only path. This is
+		 * usually near-instant: main() already prefetched btrfs-progs
+		 * into this same "/" in the background as soon as the TUI opened
+		 * (see spawn_prefetch()), so by the time the user has picked a
+		 * disk and confirmed the install, it's typically already merged
+		 * and this just re-runs against a warm /var/cache/pacman/pkg. */
 		pid_t pid = fork();
 		if (pid < 0) die("fork failed: %s", strerror(errno));
 		if (pid == 0) {
@@ -637,8 +711,14 @@ static void do_install(const struct install_settings *s) {
 		if (f) { fprintf(f, "hostname=\"%s\"\n", s->hostname); fclose(f); }
 	}
 
+	reap_prefetch(&g_prefetch_grub_pid);
 	log_msg("fetching grub (via fau's own alpm fallback, into the target only)");
 	{
+		/* By this point the rsync copy above (the single slowest step of
+		 * the whole install) has already run, so main()'s background grub
+		 * prefetch (into GRUB_PREFETCH_ROOT, see spawn_prefetch()) has had
+		 * plenty of time to finish -- this typically just hits a warm
+		 * /var/cache/pacman/pkg rather than touching the network at all. */
 		pid_t pid = fork();
 		if (pid < 0) die("fork failed: %s", strerror(errno));
 		if (pid == 0) {
@@ -828,6 +908,13 @@ int main(int argc, char **argv) {
 		}
 	}
 	if (!s.hostname[0]) snprintf(s.hostname, sizeof(s.hostname), "floraos");
+
+	/* Speculative prefetch: start these before the user has touched
+	 * anything, so their network time overlaps with however long the
+	 * menu takes instead of sitting on the critical path after "Begin
+	 * installation" (see spawn_prefetch()'s own comment). */
+	g_prefetch_btrfs_pid = spawn_prefetch("btrfs-progs", NULL);
+	g_prefetch_grub_pid = spawn_prefetch("grub", GRUB_PREFETCH_ROOT);
 
 	init_tui();
 	main_menu(&s);
