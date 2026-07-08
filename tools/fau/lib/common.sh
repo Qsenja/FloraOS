@@ -48,24 +48,29 @@ tar_extract_or_die() {
 # so this sees a recipe pushed to FAU_RECIPES_REPO after this ISO was built,
 # not just whatever shipped in it), asks the user whether to build it from
 # source instead, exec'ing `fau-build build <name>[=<version>]` if they say
-# yes. Returns 1 (the caller falls through to its own failure) if there's no
-# recipe, the user declines, or there's no controlling terminal to ask on
-# (e.g. a non-interactive invocation). Only ever called from fau-install,
-# which already sources lib/recipes.sh before running any command -- if a
-# future caller doesn't, the declare -F guard below makes that a clean "no
-# recipe available" instead of an unbound-function error.
+# yes. Two distinct failure states, distinguished by exit status so the
+# caller's own error message doesn't lie about which one happened -- a name
+# with no recipe anywhere is genuinely a different situation from a name
+# that DOES have one, just not built this time:
+#   1 -- no recipe exists for <name> at all (nothing to offer)
+#   2 -- a recipe exists, but nothing came of it: no controlling terminal to
+#        ask on (e.g. a non-interactive invocation), or the user declined
+# Only ever called from fau-install, which already sources lib/recipes.sh
+# before running any command -- if a future caller doesn't, the declare -F
+# guard below makes that a clean "no recipe available" (1) instead of an
+# unbound-function error.
 offer_build() {
 	local name=$1 version=${2:-}
 	declare -F recipe_lookup >/dev/null && declare -F recipes_sync >/dev/null || return 1
 	recipes_sync || true
 	recipe_lookup "$name" >/dev/null 2>&1 || return 1
-	[ -t 0 ] || return 1
+	[ -t 0 ] || return 2
 	local reply
-	printf '"%s" could not be found in FloraOS'"'"'s repos. Build it from source instead? [y/N] ' "$name" > /dev/tty 2>/dev/null || return 1
-	read -r reply < /dev/tty 2>/dev/null || return 1
+	printf '"%s" isn'"'"'t available as a precompiled package, but a fau-build recipe exists for it. Build it from source now? [y/N] ' "$name" > /dev/tty 2>/dev/null || return 2
+	read -r reply < /dev/tty 2>/dev/null || return 2
 	case "$reply" in
 		[Yy]|[Yy][Ee][Ss]) exec "$SELF_DIR/fau-build" build "${name}${version:+=$version}" ;;
-		*) return 1 ;;
+		*) return 2 ;;
 	esac
 }
 

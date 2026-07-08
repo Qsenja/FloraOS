@@ -550,8 +550,21 @@ app_install_one_alpm() {
 	# version is passed through to offer_build -> `fau build name=version`
 	# instead, where it's actually meaningful. See fau.md.
 	local name=$1 version=${2:-}
-	local resolved; resolved=$(alpm_resolve "$name") \
-		|| { offer_build "$name" "$version" || die "couldn't resolve '$name' in any configured Arch/Artix repo"; }
+	local resolved
+	if ! resolved=$(alpm_resolve "$name"); then
+		# offer_build's own exit status distinguishes "no recipe exists at
+		# all" (1) from "a recipe exists, but declined/no tty to ask on" (2)
+		# -- see lib/common.sh. A name with a real recipe (dwm, mangowm)
+		# that just wasn't built this time must not be reported as if it
+		# were entirely unknown to FloraOS.
+		local rc=0
+		offer_build "$name" "$version" || rc=$?
+		if [ "$rc" -eq 2 ]; then
+			die "$name: not installed (declined to build from source, or no interactive terminal to ask on)"
+		elif [ "$rc" -ne 0 ]; then
+			die "$name: not found on any configured Arch/Artix mirror, and no fau-build recipe exists for it either"
+		fi
+	fi
 	if [ -n "$version" ]; then
 		local resolved_version; resolved_version=$(printf '%s' "$resolved" | tail -n1 | cut -d"$ALPM_FS" -f3)
 		[ "$resolved_version" = "$version" ] || die "$name=$version: the Arch/Artix mirrors only have $resolved_version -- mirrors only ever carry the latest version, this can't be pinned to an older/different one. If $name has a 'fau build' recipe supporting a specific version, use 'fau build $name=$version' directly."

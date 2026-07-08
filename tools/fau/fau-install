@@ -41,7 +41,19 @@ app_install_one() {
 			app_install_one_alpm "$name" "$version_req"
 			return
 		fi
-		offer_build "$name" "$version_req" || die "package not found in repo: $name (and no pacman mirrorlist/repo-list available to fall back to)"
+		# offer_build's own exit status distinguishes "no recipe exists at
+		# all" (1) from "a recipe exists, but declined/no tty to ask on" (2)
+		# -- see lib/common.sh. Composing the error here instead of letting
+		# offer_build's own || catch it uniformly, so a real recipe that
+		# just wasn't built this time doesn't get reported as if $name were
+		# entirely unknown to FloraOS.
+		local rc=0
+		offer_build "$name" "$version_req" || rc=$?
+		if [ "$rc" -eq 2 ]; then
+			die "$name: not installed (declined to build from source, or no interactive terminal to ask on)"
+		elif [ "$rc" -ne 0 ]; then
+			die "$name: not in the local repo, no pacman mirrorlist/repo-list available to check the Arch/Artix mirrors, and no fau-build recipe exists for it either"
+		fi
 	fi
 
 	if [ -n "$version_req" ]; then
