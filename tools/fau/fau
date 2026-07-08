@@ -51,7 +51,9 @@ update [pkg ...]          check installed package(s) (default: all) for a newer
                             FAU_RECIPES_REPO's PKG_VERSION (rebuilding via
                             'fau build') for anything only ever installed
                             that way (mangowm)
-list                      list installed packages and versions
+list                      list everything installed: base system packages
+                            (from fau bootstrap, at ISO-build time) plus
+                            isolated apps, combined -- not apps alone
 EOF
 			;;
 		build)

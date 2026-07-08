@@ -248,7 +248,19 @@ cmd_update() {
 }
 
 cmd_list() {
+	# Base system packages (FAU_SYSTEM_JSON, tracked by fau bootstrap at
+	# ISO-build time) plus isolated apps (FAU_APPS_JSON) -- everything
+	# actually on the system, not just the isolated-apps half of it. Used
+	# to be apps only, which made "fau list" and fastfetch's own custom
+	# "Packages: N (fau)" module (assets/fastfetch-config.jsonc, which
+	# used to separately sum `fau bootstrap-list` + `fau list` for exactly
+	# this reason) visibly disagree -- fastfetch's own module is simpler
+	# now too, just `fau list | wc -l`, no separate bootstrap-list call.
 	apps_state_init
+	local n
+	for n in $(json_list_names "$FAU_SYSTEM_JSON"); do
+		printf '%s %s\n' "$n" "$(json_get_version "$FAU_SYSTEM_JSON" "$n")"
+	done
 	for n in $(json_list_names "$FAU_APPS_JSON"); do
 		printf '%s %s\n' "$n" "$(json_get_version "$FAU_APPS_JSON" "$n")"
 	done
