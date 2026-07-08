@@ -235,6 +235,109 @@ main() {
 		# terminal emulator looks for by default, small, no font-specific
 		# licensing complications.
 		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap ttf-dejavu
+
+		log "=== base fontconfig, via fau's alpm fallback ==="
+		# Also installed at the base-system level, same reasoning as
+		# ttf-dejavu above: fontconfig's own hardcoded default config path
+		# is /etc/fonts/fonts.conf -- shipping the real package here means
+		# EVERY app finds it via that same hardcoded default automatically,
+		# no per-app FONTCONFIG_FILE override needed at all (that fix in
+		# lib/common.sh stays anyway, as a fallback for whatever an
+		# individual app happens to bundle, but this is now the primary,
+		# correct path). Confirmed on a real `foot` run that having *a*
+		# fontconfig isn't sufficient on its own though: with only
+		# ttf-dejavu installed, foot rendered fine but picked
+		# "DejaVuMathTeXGyre" (a LaTeX math-symbols font also bundled in
+		# that package) for the generic "monospace" family instead of the
+		# actual "DejaVu Sans Mono" -- fontconfig's real, unmodified
+		# defaults have no deterministic preference between the two absent
+		# an explicit alias (verified: no shipped package installs one by
+		# default). Fixed below via local.conf, fontconfig's own documented
+		# site-override hook (see /etc/fonts/conf.d/51-local.conf).
+		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap fontconfig
+
+		# install_one_alpm (lib/alpm.sh) deliberately strips every package's
+		# own /etc before merging into the base system -- confirmed: the
+		# bootstrap above reports success, but no fonts.conf lands anywhere
+		# (`rm -rf "$extract_dir/etc"`, there to stop random upstream
+		# packages from clobbering FloraOS's own hand-authored /etc). That's
+		# the right call for most packages, but fontconfig's real config
+		# lives nowhere else -- its package's own post-install hook
+		# ordinarily symlinks /usr/share/fontconfig/conf.default/*.conf into
+		# /etc/fonts/conf.d/, but fau never runs post-install hooks
+		# (.INSTALL is deleted, same function) -- so both steps have to
+		# happen here explicitly instead. fonts.conf's own content below is
+		# fontconfig 2.18.1's real upstream default (verified: exact version
+		# match against this build host's own installed copy, not a
+		# reconstruction) -- copied, not hand-written, so it can't drift
+		# from what the package actually ships.
+		mkdir -p "$ROOTFS_DIR/etc/fonts/conf.d"
+		cp "$ROOTFS_DIR/usr/share/fontconfig/conf.default/"*.conf "$ROOTFS_DIR/etc/fonts/conf.d/"
+		cat > "$ROOTFS_DIR/etc/fonts/fonts.conf" <<-'FONTCONFEOF'
+		<?xml version="1.0"?>
+		<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+		<!-- /etc/fonts/fonts.conf file to configure system font access -->
+		<fontconfig>
+			<description>Default configuration file</description>
+			<dir>/usr/share/fonts</dir>
+			<dir>/usr/local/share/fonts</dir>
+			<dir prefix="xdg">fonts</dir>
+			<dir>~/.fonts</dir>
+			<match target="pattern">
+				<test qual="any" name="family">
+					<string>mono</string>
+				</test>
+				<edit name="family" mode="assign" binding="same">
+					<string>monospace</string>
+				</edit>
+			</match>
+			<match target="pattern">
+				<test qual="any" name="family">
+					<string>sans serif</string>
+				</test>
+				<edit name="family" mode="assign" binding="same">
+					<string>sans-serif</string>
+				</edit>
+			</match>
+			<match target="pattern">
+				<test qual="any" name="family">
+					<string>sans</string>
+				</test>
+				<edit name="family" mode="assign" binding="same">
+					<string>sans-serif</string>
+				</edit>
+			</match>
+			<match target="pattern">
+				<test qual="any" name="family">
+					<string>system ui</string>
+				</test>
+				<edit name="family" mode="assign" binding="same">
+					<string>system-ui</string>
+				</edit>
+			</match>
+			<include ignore_missing="yes">conf.d</include>
+			<cachedir>/var/cache/fontconfig</cachedir>
+			<cachedir prefix="xdg">fontconfig</cachedir>
+			<cachedir>~/.fontconfig</cachedir>
+			<config>
+				<rescan>
+					<int>30</int>
+				</rescan>
+			</config>
+		</fontconfig>
+		FONTCONFEOF
+		cat > "$ROOTFS_DIR/etc/fonts/local.conf" <<-'FONTEOF'
+		<?xml version="1.0"?>
+		<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+		<fontconfig>
+			<alias>
+				<family>monospace</family>
+				<prefer>
+					<family>DejaVu Sans Mono</family>
+				</prefer>
+			</alias>
+		</fontconfig>
+		FONTEOF
 	else
 		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- skipping libgcc/fastfetch/fonts"
 	fi
