@@ -38,5 +38,26 @@ file is only for things that could reasonably be finished later.
   it just isn't wired in yet. Found while restoring `sulogin`, not the
   thing that restoration fixed.
 
+- **`alpm_fetch`'s mirror-failover burns tens of seconds retrying mirrors
+  that were never going to work** — observed on a real `fau install
+  mangowm`: for a handful of specific packages (`libxfont2`,
+  `xorg-server-common`, `xorg-xwayland`, `python` seen so far), *nearly
+  every* mirror in Artix's full list failed in a row before one near the
+  end finally succeeded, while every other package in the same closure
+  resolved on the first or second try. Consistent per-package failure
+  across most of the mirror list (not random/scattered) points at mirror
+  sync lag — fau resolved a package version newer than most mirrors have
+  synced yet, so each one 404s until it hits one of the few that's caught
+  up. Each failed attempt still pays a real connection-setup cost (see
+  ARCHITECTURE.md's QEMU-networking note: ~2s cold, since every mirror is a
+  new host), so a handful of stale-everywhere packages can dominate total
+  install time on a slow link even though `fau`'s own fetch logic (4-way
+  parallel, see `lib/alpm.sh`) isn't the bottleneck. No fix decided yet —
+  options worth weighing later: skip mirrors known to lag (needs a
+  freshness signal fau doesn't currently have), reorder the mirror list by
+  historically-most-reliable-first instead of whatever order it's in now,
+  or just cap/shorten the failover attempts for a single package instead
+  of working through the entire list every time.
+
 See ARCHITECTURE.md for the full design-decision history (including
 everything above that's already DONE, and the reasoning behind each).
