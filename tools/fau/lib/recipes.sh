@@ -49,8 +49,15 @@ recipe_lookup() {
 }
 
 recipe_list_names() {
+	# Neither directory existing is a normal, common state (e.g. before any
+	# sync has ever succeeded), not a failure -- explicit `|| true` on each
+	# so a legitimately-missing dir doesn't make the last command in this
+	# group exit non-zero, which under `set -o pipefail` would otherwise
+	# propagate out of the whole pipeline and this function even though the
+	# listing itself is correct.
 	{
 		[ -d "$FAU_RECIPES_REMOTE_DIR" ] && find "$FAU_RECIPES_REMOTE_DIR" -maxdepth 1 -name '*.fis' -printf '%f\n' 2>/dev/null
 		[ -d "$FAU_RECIPES_DIR" ] && find "$FAU_RECIPES_DIR" -maxdepth 1 -name '*.fis' -printf '%f\n' 2>/dev/null
+		true
 	} | sed 's/\.fis$//' | sort -u
 }
