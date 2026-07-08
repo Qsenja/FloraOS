@@ -30,6 +30,16 @@ recipe_build() {
 	# `select`s automatically once DRM_FBDEV_EMULATION is on (confirmed
 	# directly against drivers/gpu/drm/Kconfig's `select FB_CORE if
 	# DRM_FBDEV_EMULATION` lines) -- no need to enable FB/FB_CORE by hand.
+	#
+	# DRM_BOCHS: SIMPLEDRM alone gets text rendering working (see above) but
+	# is a dumb, no-modeset, no-GEM/GBM framebuffer wrapper -- Mesa's EGL
+	# can't get a real context through it. Found running an actual Wayland
+	# compositor (mango) under QEMU: "Could not initialize EGL". DRM_BOCHS
+	# is the real KMS driver for QEMU's std-vga (Bochs dispi) device --
+	# its own Kconfig help text literally says "Choose this option for
+	# qemu" -- and brings real GEM/SHMEM buffer + atomic-KMS support that
+	# EGL/GBM need. Built in, not a module, matching every other DRM_*
+	# option here (no kmod autoload, see eudev's --disable-kmod above).
 	"$src/scripts/config" --file "$src/.config" \
 		--enable SYSFB_SIMPLEFB \
 		--enable DRM \
@@ -37,6 +47,7 @@ recipe_build() {
 		--enable DRM_SIMPLEDRM \
 		--enable DRM_FBDEV_EMULATION \
 		--enable FRAMEBUFFER_CONSOLE \
+		--enable DRM_BOCHS \
 		--module DRM_AMDGPU \
 		--module DRM_NOUVEAU \
 		--enable BTRFS_FS

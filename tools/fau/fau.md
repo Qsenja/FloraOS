@@ -493,16 +493,25 @@ only) real user of `fau build`.
   still needs to be listed in `PKG_DEPENDS` for that feature to work —
   same "document the non-obvious runtime need" reasoning as `kbd`
   depending on `gzip`.
-- **Disclosed, not fixed**: mango's own compiled-in system config
+- DONE (was: disclosed, not fixed): mango's own compiled-in system config
   fallback path is the literal string `/etc/mango/config.conf`
-  (`meson.build`'s own `sysconfdir` handling), which an isolated app has
-  no way to redirect — `app_wrapper_write`'s `XDG_CONFIG_HOME` correctly
-  covers mango's *user* config search, but the system-wide fallback still
-  points at the real host's `/etc/mango`, not this app's own isolated
-  copy. Same class of isolation-model rough edge as perl's own
-  compiled-in `@INC` (see `app_wrapper_write` above) — not patched here
-  since fixing it means patching mango's own source, a bigger
-  intervention than this recipe's actual job.
+  (`meson.build`'s own `sysconfdir` handling), which pointed at the real
+  host's `/etc/mango`, not this app's own isolated copy, when mango's
+  primary lookup failed. Originally assumed this needed patching mango's
+  own source to fix — wrong, found by actually reading
+  `src/config/parse_config.h`'s real lookup order instead of guessing from
+  the error message alone: mango checks `$HOME/.config/mango/config.conf`
+  **first**, and only falls back to the compiled-in `/etc/mango/config.conf`
+  if that's missing. `app_wrapper_write` already sets `HOME="$app_dir"` for
+  every isolated app, so mango's primary lookup already lands somewhere
+  real per-app — it was just empty, since mango's own meson install only
+  ever populates the fallback path. Fixed entirely in the recipe (no
+  mango source patch needed after all): `recipe_build` now also drops the
+  same default `config.conf` at `$app_dir/.config/mango/config.conf`,
+  matching what mango actually checks first. Found on a real `mango` run
+  ("[ERROR]: Failed to open config file: /etc/mango/config.conf" even
+  though a `config.conf` demonstrably existed under the app's own `etc/`),
+  not by inspection.
 
 ## Manifests (`system.json` / `apps.json`) — `lib/manifest.sh`
 
