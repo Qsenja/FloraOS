@@ -111,6 +111,22 @@ app_wrapper_write() {
 	# PERL5LIB covers perl's own compiled-in @INC, which LD_LIBRARY_PATH alone doesn't fix -- see fau.md.
 	local perl5lib; perl5lib=$(find "$app_dir" -iname '*.pm' -exec dirname {} \; 2>/dev/null | sort -u | tr '\n' ':')
 	perl5lib=${perl5lib%:}
+	# XKB_CONFIG_ROOT: libxkbcommon has its own compiled-in default XKB data
+	# root (a real absolute host path, e.g. /usr/share/xkeyboard-config-2 --
+	# confirmed directly via `strings` on the real alpm-fetched
+	# libxkbcommon.so.0), completely unaware of $app_dir -- the xkeyboard-
+	# config package's own data merges correctly into the isolated app, but
+	# libxkbcommon never looks there, so it fails with "Couldn't find file
+	# 'rules/evdev' in include paths" regardless. Same class of bug as
+	# mango's own $HOME-based config.conf gap, just baked into a shared
+	# library instead of one specific app's own source. Verified for real
+	# with bwrap masking the actual system path first: fails identically to
+	# the real error without this override, succeeds with it (see fau.md).
+	# Found via the "rules/evdev" marker file -- present at
+	# <XKB_CONFIG_ROOT>/rules/evdev in every real xkeyboard-config install --
+	# so this only ever fires for an app that actually bundles the data.
+	local xkb_config_root; xkb_config_root=$(find "$app_dir" -type f -path '*/rules/evdev' 2>/dev/null | head -n1)
+	[ -n "$xkb_config_root" ] && xkb_config_root=$(dirname "$(dirname "$xkb_config_root")")
 	cat > "$wrapper" <<-EOF
 	#!/bin/sh
 	export HOME="$app_dir"
@@ -121,6 +137,7 @@ app_wrapper_write() {
 	export LD_LIBRARY_PATH="$app_libdir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 	export PATH="$app_dir/usr/bin:$app_dir/bin\${PATH:+:\$PATH}"
 	${perl5lib:+export PERL5LIB="$perl5lib\${PERL5LIB:+:\$PERL5LIB}"}
+	${xkb_config_root:+export XKB_CONFIG_ROOT="$xkb_config_root"}
 	exec "$app_dir/$relbin" "\$@"
 	EOF
 	chmod 755 "$wrapper"

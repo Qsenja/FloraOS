@@ -628,6 +628,23 @@ isolation.
     the app dir. Fixed via `PERL5LIB` (perl's own supported override,
     exactly analogous to `LD_LIBRARY_PATH` but for `.pm` modules) — no need
     to patch perl or chroot anything.
+  - **libxkbcommon's own compiled-in default XKB data root** (e.g.
+    `/usr/share/xkeyboard-config-2`, confirmed via `strings` on the real
+    alpm-fetched `libxkbcommon.so.0`) is a real absolute host path, same
+    class of bug as perl's `@INC` above — the `xkeyboard-config` package's
+    own data merges correctly into the isolated app, but libxkbcommon never
+    looks there. Found running mango for real: "Couldn't find file
+    'rules/evdev' in include paths" even with `xkeyboard-config` correctly
+    in `PKG_DEPENDS` and correctly merged into the app. Fixed via
+    `XKB_CONFIG_ROOT` (libxkbcommon's own supported override) — set
+    whenever a `rules/evdev` marker file is found anywhere under the app
+    (present at `<root>/rules/evdev` in every real `xkeyboard-config`
+    install, so this only ever fires for an app that actually bundles the
+    data). Verified for real with `bwrap` masking the actual system path
+    first: fails identically to the real error without this override
+    (down to the exact same "1 include paths searched" message), succeeds
+    with it — both through the real generated wrapper script, not just the
+    override in isolation.
 
 ## The alpm (Arch/Artix repo) fallback — `lib/alpm.sh` — no `pacman` binary, ever
 
