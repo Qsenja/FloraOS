@@ -111,6 +111,14 @@ main() {
 
 	# fau (dispatcher + fau-* tools + lib/*.sh) ships in the OS itself, not
 	# just as a build-host tool -- see docs/ARCHITECTURE.md's fau section.
+	# usr/lib/fau/recipes/ (FAU_RECIPES_DIR) is deliberately left EMPTY here,
+	# not pre-populated from fau-recipes/ -- recipes come from
+	# FAU_RECIPES_REPO over the network (fau-build's own recipes_sync), on
+	# purpose, so a new/updated recipe reaches every machine the moment it's
+	# pushed there, with no ISO rebuild involved at all. FAU_RECIPES_DIR
+	# still exists as a directory (and fau still consults it) purely as a
+	# manual local-override spot, e.g. someone's own private, unpublished
+	# recipe -- never auto-filled by this build. See tools/fau/fau.md.
 	mkdir -p "$ROOTFS_DIR/usr/lib/fau/lib" "$ROOTFS_DIR/usr/lib/fau/recipes"
 	for f in "$FAU_TOOLS_DIR"/fau "$FAU_TOOLS_DIR"/fau-*; do
 		[ -f "$f" ] || continue
@@ -118,11 +126,6 @@ main() {
 		chmod 755 "$ROOTFS_DIR/usr/lib/fau/$(basename "$f")"
 	done
 	cp "$FAU_TOOLS_DIR"/lib/*.sh "$ROOTFS_DIR/usr/lib/fau/lib/"
-	shopt -s nullglob
-	for f in "$FAU_RECIPES_SRC_DIR"/*.fis; do
-		cp "$f" "$ROOTFS_DIR/usr/lib/fau/recipes/"
-	done
-	shopt -u nullglob
 	ln -s ../lib/fau/fau "$ROOTFS_DIR/usr/bin/fau"
 
 	# floragrub-cfg ships in the running OS: florainstall and `fau backup`

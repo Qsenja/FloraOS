@@ -11,11 +11,11 @@ VERSIONS_CONF="$FLORA_ROOT/config/versions.conf"
 FAU_TOOLS_DIR="$FLORA_ROOT/tools/fau"
 FAU_BIN="$FAU_TOOLS_DIR/fau"
 # fau-recipes/ is its own separate git repo (github.com/Qsenja/fau-recipes),
-# not part of tools/fau/ itself -- see tools/fau/fau.md. Its recipes/*.fis
-# (not the repo root -- that also holds recipes.db/README.md/etc, which
-# don't belong in FAU_RECIPES_DIR) are still copied into the ISO as
-# FAU_RECIPES_DIR's read-only fallback baseline, same as before.
-FAU_RECIPES_SRC_DIR="$FLORA_ROOT/fau-recipes/recipes"
+# not part of tools/fau/ itself, and deliberately NOT staged into the ISO by
+# this build -- fau fetches it over the network at runtime (FAU_RECIPES_REPO,
+# fau-build's own recipes_sync) so a new/updated recipe reaches every
+# machine the moment it's pushed, with no ISO rebuild involved. See
+# tools/fau/fau.md.
 FLORAGRUB_CFG_BIN="$FLORA_ROOT/tools/floragrub-cfg/floragrub-cfg"
 # Defined unconditionally: build_package() skips sourcing a cached package's
 # recipe, so referencing this lazily would crash under `set -u`.
