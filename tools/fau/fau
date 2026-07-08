@@ -30,6 +30,13 @@ usage_topic() {
 			cat <<'EOF'
 install <pkg> [pkg ...]   install package(s) into FAU_APPS_DIR/<name>/, isolated
 remove <pkg> [pkg ...]    remove package(s) and their PATH wrappers
+update [pkg ...]          check installed package(s) (default: all) against a
+                            fresh fetch of the local repo + configured
+                            Arch/Artix mirrors, reinstalling any that have a
+                            newer version. A package only ever installed via
+                            'fau build' (no repo/mirror entry, e.g. mangowm)
+                            is reported, not updated -- run 'fau build <pkg>'
+                            for that instead
 list                      list installed packages and versions
 EOF
 			;;
@@ -152,7 +159,7 @@ EOF
 dispatch() {
 	local cmd=$1; shift
 	case "$cmd" in
-		install|remove|list)
+		install|remove|update|list)
 			exec "$SELF_DIR/fau-install" "$cmd" "$@" ;;
 		build|build-list)
 			exec "$SELF_DIR/fau-build" "$cmd" "$@" ;;

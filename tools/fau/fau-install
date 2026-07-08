@@ -116,6 +116,72 @@ cmd_remove() {
 	done
 }
 
+cmd_update() {
+	apps_state_init
+	local -a names=()
+	if [ $# -ge 1 ]; then
+		names=("$@")
+	else
+		while IFS= read -r n; do names+=("$n"); done < <(json_list_names "$FAU_APPS_JSON")
+	fi
+	[ "${#names[@]}" -gt 0 ] || { log "no apps installed, nothing to update"; return 0; }
+
+	# Real network refresh, once, up front -- not per-app -- see
+	# alpm_refresh_dbs (lib/alpm.sh) for why a cached/local-shortcut db can
+	# never be trusted to answer "is there a newer version" correctly.
+	local have_alpm=""
+	if alpm_fallback_available; then
+		log "refreshing package index from the configured mirrors..."
+		alpm_refresh_dbs
+		have_alpm=1
+	fi
+
+	local name checked=0 updated=0
+	for name in "${names[@]}"; do
+		local installed; installed=$(json_get_version "$FAU_APPS_JSON" "$name")
+		if [ -z "$installed" ]; then
+			log "$name is not installed, skipping"
+			continue
+		fi
+		checked=$((checked + 1))
+
+		local file; file=$(repo_lookup_file "$name")
+		if [ -n "$file" ]; then
+			local latest; latest=$(repo_lookup_version "$name")
+			if [ -n "$latest" ] && [ "$(alpm_vercmp "$latest" "$installed")" -gt 0 ]; then
+				app_install_one "$name"
+				updated=$((updated + 1))
+			else
+				log "$name $installed is up to date"
+			fi
+			continue
+		fi
+
+		if [ -z "$have_alpm" ]; then
+			log "$name: not in the local repo and no pacman mirrorlist/repo-list available to check for updates -- skipping"
+			continue
+		fi
+		local resolved
+		resolved=$(alpm_resolve "$name" 2>/dev/null) || resolved=""
+		if [ -z "$resolved" ]; then
+			if [ -f "$FAU_RECIPES_DIR/$name.fis" ]; then
+				log "$name: built from a recipe, not resolvable against the mirrors -- run 'fau build $name' to rebuild it instead, skipping"
+			else
+				log "$name: couldn't resolve against the mirrors, skipping"
+			fi
+			continue
+		fi
+		local latest; latest=$(printf '%s' "$resolved" | tail -n1 | cut -d"$ALPM_FS" -f3)
+		if [ -n "$latest" ] && [ "$(alpm_vercmp "$latest" "$installed")" -gt 0 ]; then
+			app_install_one_alpm "$name"
+			updated=$((updated + 1))
+		else
+			log "$name $installed is up to date"
+		fi
+	done
+	log "checked $checked app(s), updated $updated"
+}
+
 cmd_list() {
 	apps_state_init
 	for n in $(json_list_names "$FAU_APPS_JSON"); do
@@ -128,6 +194,7 @@ cmd=${1:-}; [ $# -ge 1 ] && shift
 case "$cmd" in
 	install) cmd_install "$@" ;;
 	remove) cmd_remove "$@" ;;
+	update) cmd_update "$@" ;;
 	list) cmd_list "$@" ;;
 	*) die "fau-install: unknown command: $cmd" ;;
 esac

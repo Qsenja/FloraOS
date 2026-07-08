@@ -88,6 +88,90 @@ Both of those only ever move *already-built* files around (a local
 (`fau-build`) just below for the third mode: compiling something from
 source, on this same live system, on demand.
 
+## `update [pkg ...]` (`fau-install`'s own third command) — checking against a fresh mirror fetch, not a cached one
+
+Lives in `fau-install` rather than its own `fau-update` tool (unlike
+`build`/`repo`/`export`/... each getting their own file) because it's really
+just `app_install_one`/`app_install_one_alpm` called again per already-
+installed name once a newer version is confirmed to exist — no new
+bookkeeping shape of its own to justify a separate file, unlike (say)
+`fau-backup`'s subvolume-snapshot logic.
+
+**The one thing this command cannot get wrong: it must never answer "up to
+date" based on a stale or shortcut-taken index.** Every other alpm-fallback
+caller (`fau install`, `fau build`) is fine reusing whatever's already
+cached at `$FAU_CACHE_DIR/alpm-db/*.db` indefinitely (`alpm_fetch_repo_db`'s
+normal `[ ! -s "$dest" ]` skip) — a package that doesn't resolve yet still
+resolves once *some* copy of the db exists, cached or not, and re-fetching
+on every single invocation would make an unrelated `fau install foo` pay a
+multi-second db-fetch tax it doesn't need. `fau update`'s entire purpose is
+the opposite: notice a version that showed up on the mirrors *since* that
+cache was last written. Calling the normal install path unmodified would
+silently reuse however-old a cached `.db`/`.index`/`.provides.index` already
+sitting in `$FAU_CACHE_DIR` and just never see anything new.
+
+Worse than merely stale on this project's own dev/build host specifically:
+`alpm_fetch_repo_db` also has a *build-host* fast path — `cp
+/var/lib/pacman/sync/$repo.db` straight off the local machine instead of
+fetching over the network at all, deliberately, so `fau build`/`fau install`
+run from this repo during development don't re-download a multi-hundred-MB
+sync db that's already sitting right there. That shortcut is exactly wrong
+for `update`: this project's own dev/build host's local pacman sync db was
+last refreshed whenever someone there last ran `pacman -Sy`, completely
+unrelated to what's actually live on the real mirrors right now — checking
+against it would answer "up to date" based on this machine's own history,
+not the actual upstream state `update` is supposed to be reporting on. (On
+a real deployed FloraOS box this exact path is dead code anyway — no
+`pacman`/`/var/lib/pacman` ever exists there per the alpm-fallback's own
+"no `pacman` binary, ever" design below — but `fau update` needs to be
+correct when run from here too, not just once installed.)
+
+Fixed with an explicit `force` argument threaded through
+`alpm_fetch_repo_db`, and a new `alpm_refresh_dbs` (`lib/alpm.sh`) that
+deletes every configured repo's cached `.db` *and* its two derived
+`.index`/`.provides.index` files (`alpm_repo_index`/
+`alpm_repo_provides_index` have that exact same indefinite-cache shape, so
+deleting only `.db` would rebuild nothing) before calling
+`alpm_fetch_repo_db ... force`, which skips both the cache-skip check and
+the local-pacman-db shortcut unconditionally. `cmd_update` calls this
+**once**, up front, before checking any individual package — not once per
+package — both because the refreshed db already answers every package's
+question and because re-fetching it per package would make `fau update`
+with several installed apps needlessly slow.
+
+Two source kinds get genuinely different treatment, matching how
+`app_install_one` itself branches on `repo_lookup_file`:
+
+- **Local-repo apps** (`repo_lookup_file` finds a `.fau.tar.zst`): compares
+  `repo_lookup_version` (new — same awk-over-`repo.json` shape
+  `repo_lookup_file` already uses, just matching the `"version"` key
+  instead of `"file"`) against the installed version. This path never
+  touches the network at all — the local repo is just files already present
+  under `FAU_REPO_DIR`, refreshed independently by whoever runs
+  `fau repo-add`, not something `update` fetches.
+- **alpm-only apps**: re-resolves the single name via `alpm_resolve` (now
+  against the just-refreshed db) and compares its top-level resolved
+  version — same "last line of the resolved closure is the requested
+  package itself" contract `install_one_alpm`/`app_install_one_alpm`
+  already rely on (see the dependency-resolution section below) — against
+  the installed version.
+
+Either way, "newer" is decided with `alpm_vercmp` (already used for real
+Arch/Artix version strings elsewhere in this file), not a plain string
+inequality — a `.pc`/rebuild artifact or a differently-formatted-but-equal
+version string comparing as "different" would otherwise trigger a pointless
+reinstall.
+
+A name that resolves through neither path (no local-repo entry, and
+`alpm_resolve` fails — the case for anything installed via `fau build`,
+`mangowm` being the only one so far) is reported and skipped, not treated
+as an error that aborts the rest of the run: a recipe-built package's own
+version is whatever's hardcoded in its `.fis` (`PKG_VERSION`/`PKG_SRC_URL`),
+not something resolvable against alpm at all — AUR-only packages need a
+recipe bump and a fresh `fau build <name>`, not a mirror check. The skip
+message says so directly when a matching recipe exists
+(`$FAU_RECIPES_DIR/<name>.fis`), rather than a bare "couldn't resolve".
+
 ## `build <name>` (`fau-build`) — compiling from source, on demand, with a disposable sandbox
 
 Closes a real gap the two install modes above don't cover: a package with

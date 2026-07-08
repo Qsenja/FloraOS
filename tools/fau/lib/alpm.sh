@@ -98,11 +98,16 @@ alpm_db_cache_dir() {
 }
 
 alpm_fetch_repo_db() {
-	local repo=$1
+	# force: skip both the already-cached-skip fast path below AND the
+	# build-host-local-pacman-db shortcut -- always a real network fetch from
+	# the configured mirrors. Used by alpm_refresh_dbs (`fau update`'s own
+	# entry point) -- see fau.md for why a version-check specifically must
+	# never take either shortcut, unlike every other alpm_fetch_repo_db caller.
+	local repo=$1 force=${2:-}
 	local cache_dir; cache_dir=$(alpm_db_cache_dir)
 	local dest="$cache_dir/$repo.db"
-	if [ ! -s "$dest" ]; then
-		if [ -r "/var/lib/pacman/sync/$repo.db" ]; then
+	if [ -n "$force" ] || [ ! -s "$dest" ]; then
+		if [ -z "$force" ] && [ -r "/var/lib/pacman/sync/$repo.db" ]; then
 			cp "/var/lib/pacman/sync/$repo.db" "$dest"
 		else
 			log "fetching $repo.db..."
@@ -111,6 +116,23 @@ alpm_fetch_repo_db() {
 		fi
 	fi
 	echo "$dest"
+}
+
+# Forces a real network re-fetch of every configured repo's sync db (and,
+# by deleting the derived indexes too, a rebuild of those against the fresh
+# db) -- see alpm_fetch_repo_db's own force path above. `fau update`'s whole
+# job is noticing a newer upstream version; resolving against whatever's
+# already sitting in the cache (however old, or copied from this build
+# host's own /var/lib/pacman/sync at some unrelated earlier point) could
+# never show that. See fau.md.
+alpm_refresh_dbs() {
+	alpm_fallback_available || die "no pacman mirrorlist/repo-list available -- can't check for updates"
+	local cache_dir; cache_dir=$(alpm_db_cache_dir)
+	local repo
+	for repo in $(alpm_repo_names); do
+		rm -f "$cache_dir/$repo.db" "$cache_dir/$repo.index" "$cache_dir/$repo.provides.index"
+		alpm_fetch_repo_db "$repo" force >/dev/null
+	done
 }
 
 # Unit separator, not a tab -- a tab-delimited version silently corrupted on empty fields (see fau.md).

@@ -45,6 +45,19 @@ repo_lookup_file() {
 	' "$repo"
 }
 
+repo_lookup_version() {
+	local name=$1 repo; repo=$(repo_json)
+	[ -f "$repo" ] || return 0
+	awk -v n="\"$name\"" '
+		index($0, n":{") { in_pkg=1 }
+		in_pkg && match($0, /"version":"[^"]*"/) {
+			s = substr($0, RSTART, RLENGTH)
+			sub(/"version":"/, "", s); sub(/"$/, "", s)
+			print s; exit
+		}
+	' "$repo"
+}
+
 repo_lookup_depends() {
 	local archive=$1
 	local work; work=$(mktemp -d)
