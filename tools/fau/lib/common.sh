@@ -43,20 +43,28 @@ tar_extract_or_die() {
 	rm -f "$tar_err"
 }
 
-# offer_build <name> -- if a fau-build recipe exists for <name>, asks the
-# user whether to build it from source instead, exec'ing `fau-build build
-# <name>` if they say yes. Returns 1 (the caller falls through to its own
-# failure) if there's no recipe, the user declines, or there's no
-# controlling terminal to ask on (e.g. a non-interactive invocation).
+# offer_build <name> [version] -- if a fau-build recipe exists for <name>
+# (checked via recipe_lookup, lib/recipes.sh -- a fresh recipes_sync first,
+# so this sees a recipe pushed to FAU_RECIPES_REPO after this ISO was built,
+# not just whatever shipped in it), asks the user whether to build it from
+# source instead, exec'ing `fau-build build <name>[=<version>]` if they say
+# yes. Returns 1 (the caller falls through to its own failure) if there's no
+# recipe, the user declines, or there's no controlling terminal to ask on
+# (e.g. a non-interactive invocation). Only ever called from fau-install,
+# which already sources lib/recipes.sh before running any command -- if a
+# future caller doesn't, the declare -F guard below makes that a clean "no
+# recipe available" instead of an unbound-function error.
 offer_build() {
-	local name=$1
-	[ -f "$FAU_RECIPES_DIR/$name.fis" ] || return 1
+	local name=$1 version=${2:-}
+	declare -F recipe_lookup >/dev/null && declare -F recipes_sync >/dev/null || return 1
+	recipes_sync || true
+	recipe_lookup "$name" >/dev/null 2>&1 || return 1
 	[ -t 0 ] || return 1
 	local reply
 	printf '"%s" could not be found in FloraOS'"'"'s repos. Build it from source instead? [y/N] ' "$name" > /dev/tty 2>/dev/null || return 1
 	read -r reply < /dev/tty 2>/dev/null || return 1
 	case "$reply" in
-		[Yy]|[Yy][Ee][Ss]) exec "$SELF_DIR/fau-build" build "$name" ;;
+		[Yy]|[Yy][Ee][Ss]) exec "$SELF_DIR/fau-build" build "${name}${version:+=$version}" ;;
 		*) return 1 ;;
 	esac
 }

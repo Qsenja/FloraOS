@@ -15,17 +15,39 @@ source "$SELF_DIR/lib/alpm.sh"
 source "$SELF_DIR/lib/recipes.sh"
 
 app_install_one() {
-	local name=$1 chain=${2:-}
+	local arg=$1 chain=${2:-}
+	# name=version -- see fau.md. Only meaningful against the local repo
+	# (exact match required, nothing to negotiate) or a recipe's own
+	# recipe_source_for_version (same as `fau build name=version`); alpm's
+	# real Arch/Artix mirrors only ever carry the latest build of anything,
+	# so pinning against that path is a hard error, not silently ignored.
+	local name=$arg version_req=""
+	case "$arg" in
+		*=*) name=${arg%%=*}; version_req=${arg#*=} ;;
+	esac
 	case ":$chain:" in
 		*":$name:"*) die "circular dependency: $chain:$name" ;;
 	esac
 	local file; file=$(repo_lookup_file "$name")
 	if [ -z "$file" ]; then
 		if alpm_fallback_available; then
-			app_install_one_alpm "$name"
+			# app_install_one_alpm decides whether $version_req is even
+			# reachable here: a real alpm-resolved name only ever has the
+			# latest mirror version and rejects a mismatched one, but a
+			# name alpm_resolve can't find at all (dwm, mangowm -- AUR-only)
+			# falls through to offer_build -> `fau build name=version`
+			# instead, where a version request is actually meaningful. See
+			# fau.md and lib/alpm.sh's own app_install_one_alpm.
+			app_install_one_alpm "$name" "$version_req"
 			return
 		fi
-		offer_build "$name" || die "package not found in repo: $name (and no pacman mirrorlist/repo-list available to fall back to)"
+		offer_build "$name" "$version_req" || die "package not found in repo: $name (and no pacman mirrorlist/repo-list available to fall back to)"
+	fi
+
+	if [ -n "$version_req" ]; then
+		local repo_version; repo_version=$(repo_lookup_version "$name")
+		[ "$repo_version" = "$version_req" ] \
+			|| die "$name=$version_req: the local repo only has $repo_version -- a local-repo install can't be pinned to an arbitrary version"
 	fi
 
 	local existing; existing=$(json_get_version "$FAU_APPS_JSON" "$name")

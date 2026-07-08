@@ -542,9 +542,20 @@ install_one_alpm() {
 }
 
 app_install_one_alpm() {
-	local name=$1
+	# version: only meaningful as a *rejection* here -- if alpm_resolve
+	# below actually succeeds, the mirrors only ever carry one (the latest)
+	# version, so a requested version other than exactly that one is a hard
+	# error, not silently ignored. If alpm_resolve instead fails (the name
+	# isn't on the mirrors at all, e.g. an AUR-only package like dwm), the
+	# version is passed through to offer_build -> `fau build name=version`
+	# instead, where it's actually meaningful. See fau.md.
+	local name=$1 version=${2:-}
 	local resolved; resolved=$(alpm_resolve "$name") \
-		|| { offer_build "$name" || die "couldn't resolve '$name' in any configured Arch/Artix repo"; }
+		|| { offer_build "$name" "$version" || die "couldn't resolve '$name' in any configured Arch/Artix repo"; }
+	if [ -n "$version" ]; then
+		local resolved_version; resolved_version=$(printf '%s' "$resolved" | tail -n1 | cut -d"$ALPM_FS" -f3)
+		[ "$resolved_version" = "$version" ] || die "$name=$version: the Arch/Artix mirrors only have $resolved_version -- mirrors only ever carry the latest version, this can't be pinned to an older/different one. If $name has a 'fau build' recipe supporting a specific version, use 'fau build $name=$version' directly."
+	fi
 
 	local -a pkg_repo=() pkg_name=() pkg_version=() pkg_filename=() pkg_sha256=()
 	local total=0 repo pkgname pkgversion filename sha256

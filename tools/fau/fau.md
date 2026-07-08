@@ -219,6 +219,49 @@ sha256 as the second line instead of the empty default) is meant to be
 cheap precisely so this stays an easy thing to tighten over time rather
 than a permanent gap.
 
+## `install <name>[=<version>]` — version pinning, and a real bug it surfaced
+
+Same `name=version` syntax as `build`, but the *meaning* differs by
+install source, and unlike `build` (which only ever has one path — a
+recipe), `install` has three (local repo, alpm, recipe-via-`offer_build`),
+so getting this right meant threading `version` through
+`app_install_one` → `app_install_one_alpm` → `offer_build` correctly:
+
+- **Local repo**: `repo_lookup_version` must match `version` exactly, or
+  it's a hard die — a local repo holds one archive per package name (see
+  the Repo section below), so there's nothing to negotiate.
+- **alpm-resolved**: `app_install_one_alpm` calls `alpm_resolve` *first*,
+  unconditionally — only *after* that succeeds does it check `version`
+  against the one real (latest) version the mirrors actually have,
+  dying if they don't match. This ordering matters: a name
+  `alpm_resolve` can't find at all (any AUR-only package, e.g. `dwm`)
+  must still fall through to `offer_build` below, not die early just
+  because a version was requested and alpm-fallback happens to be
+  configured. An earlier version of this fix got the ordering backwards
+  — checked "is alpm-fallback available at all" before ever attempting
+  resolution, so `fau install dwm=6.8` died with "version pinning isn't
+  supported" even though `dwm` was never going to resolve via alpm in the
+  first place and should have reached the recipe path below.
+- **Recipe, via `offer_build`**: passed straight through to
+  `fau build name=version` (see above) once reached.
+
+**A real, independently-serious bug found while fixing this, unrelated to
+version pinning itself**: `offer_build` (`lib/common.sh`) still checked
+`[ -f "$FAU_RECIPES_DIR/$name.fis" ]` — the flat, ISO-shipped-only check
+that predates `recipes_sync`/`recipe_lookup` (`lib/recipes.sh`) entirely.
+Since `fau install <name>`'s only path to "build it from source" runs
+through `offer_build`, this meant `fau install` could only ever offer to
+build a recipe that happened to already be baked into the *current* ISO —
+completely bypassing the whole point of splitting recipes into their own
+synced-over-HTTPS repo. `fau build <name>` itself was never affected (its
+own `cmd_build` already used `recipe_lookup` directly, not this stale
+check) — only the `install`-time offer was silently stuck on
+whatever-shipped. Caught for real, not by inspection: `dwm` was added to
+`fau-recipes` *after* the currently-booted test ISO was built, and `fau
+install dwm` on that real system never even reached the "build it from
+source?" prompt. Fixed by having `offer_build` call `recipes_sync` +
+`recipe_lookup` itself before deciding whether a recipe exists.
+
 ## `build <name>` (`fau-build`) — compiling from source, on demand, with a disposable sandbox
 
 Closes a real gap the two install modes above don't cover: a package with
