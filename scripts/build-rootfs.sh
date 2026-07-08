@@ -220,9 +220,58 @@ main() {
 		if [ -f "$ROOTFS_DIR/root/apps/.bin/fastfetch" ]; then
 			sed -i "s|$ROOTFS_DIR||g" "$ROOTFS_DIR/root/apps/.bin/fastfetch"
 		fi
+
+		log "=== base fonts: ttf-dejavu, via fau's alpm fallback ==="
+		# FloraOS shipped zero font packages until now -- confirmed on a real
+		# `foot` run: "Fontconfig error: Cannot load default config file" (see
+		# the FONTCONFIG_FILE fix, lib/common.sh) cascading into "failed to
+		# match font" / "failed to load primary fonts" (fatal). Installed at
+		# the base-system level, not per-app: fontconfig's own default config
+		# points at the real, non-isolated /usr/share/fonts (confirmed:
+		# `grep '<dir' /etc/fonts/fonts.conf`), and FloraOS has no chroot, so
+		# one shared copy here is visible to every isolated app identically --
+		# no per-app duplication needed, unlike the libraries fixed above.
+		# ttf-dejavu specifically: covers the "monospace" fontconfig alias any
+		# terminal emulator looks for by default, small, no font-specific
+		# licensing complications.
+		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap ttf-dejavu
 	else
-		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- skipping libgcc/fastfetch"
+		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- skipping libgcc/fastfetch/fonts"
 	fi
+
+	log "=== generating en_US.UTF-8 locale ==="
+	# glibc ships localedef and the raw i18n source data (charmaps,
+	# locale definitions) but generates nothing at build time -- confirmed
+	# empty: no /usr/lib/locale/ at all until this runs. Every program that
+	# checks for a real UTF-8 locale falls back to bare POSIX "C" (not
+	# UTF-8) and either degrades silently or, like `foot`, refuses to start
+	# at all: "'C' is not a UTF-8 locale, and failed to find a fallback" /
+	# "No Compose file for locale 'en_US.UTF-8'" -- confirmed on a real run,
+	# not guessed. `LANG` is set in /etc/profile (apply-skeleton.sh) right
+	# alongside PATH, so every login shell (and anything spawned from it,
+	# including mango's own spawned children) inherits a working locale.
+	# Explicit full paths for -i/-f, not bare names: localedef's own
+	# compiled-in search path is the real /usr/share/i18n/... (confirmed via
+	# `strings` on the binary), which would read the BUILD HOST's i18n data
+	# instead of FloraOS's own if given bare names -- this binary is
+	# FloraOS's own compiled localedef (same cross-execution pattern as
+	# ldconfig -r/depmod -b above), but the source data it reads still needs
+	# pointing at $ROOTFS_DIR explicitly.
+	# localedef doesn't auto-decompress the shipped charmap (confirmed: fed
+	# the raw .gz straight in first, got hundreds of "invalid UTF-8
+	# sequence" errors from it reading gzip's own binary bytes as text) --
+	# decompress to a temp file first. Also needs usr/lib/locale/ to already
+	# exist; localedef won't create it, just fails with "cannot create
+	# temporary file" if it's missing.
+	mkdir -p "$ROOTFS_DIR/usr/lib/locale"
+	utf8_charmap=$(mktemp)
+	zcat "$ROOTFS_DIR/usr/share/i18n/charmaps/UTF-8.gz" > "$utf8_charmap"
+	"$ROOTFS_DIR/usr/bin/localedef" \
+		--prefix "$ROOTFS_DIR" \
+		-i "$ROOTFS_DIR/usr/share/i18n/locales/en_US" \
+		-f "$utf8_charmap" \
+		en_US.UTF-8
+	rm -f "$utf8_charmap"
 
 	log "=== applying /etc skeleton ==="
 	"$SELF_DIR/apply-skeleton.sh" "$ROOTFS_DIR" "${HOSTNAME:-floraos}"

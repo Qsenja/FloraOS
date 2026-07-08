@@ -57,6 +57,11 @@ EOF
 cat > "$ROOTFS/etc/profile" <<'EOF'
 export PS1='floraos-boot-ok # '
 export PATH=/usr/bin:$HOME/apps/.bin
+# en_US.UTF-8 generated at build time (build-rootfs.sh) -- without a real
+# UTF-8 locale, programs fall back to bare POSIX "C" and some (e.g. foot)
+# refuse to start at all ("is not a UTF-8 locale, and failed to find a
+# fallback"). Confirmed on a real run, not guessed.
+export LANG=en_US.UTF-8
 command -v fastfetch >/dev/null 2>&1 && fastfetch --config "$HOME/apps/fastfetch/config/fastfetch/config.jsonc"
 EOF
 

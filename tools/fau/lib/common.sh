@@ -198,6 +198,22 @@ app_wrapper_write() {
 	# of evidence used for XKB_CONFIG_ROOT above).
 	local libinput_quirks_dir; libinput_quirks_dir=$(find "$app_dir" -type f -name '*.quirks' -path '*/libinput/*' 2>/dev/null | head -n1)
 	[ -n "$libinput_quirks_dir" ] && libinput_quirks_dir=$(dirname "$libinput_quirks_dir")
+	# FONTCONFIG_FILE: fontconfig's own default config path is hardcoded to
+	# /etc/fonts/fonts.conf -- any app that bundles fontconfig as a
+	# dependency (e.g. foot, kitty) merges its own copy in at
+	# $app_dir/etc/fonts/fonts.conf fine, fontconfig just never looks
+	# there. Symptom, confirmed against a real `foot` run: "Fontconfig
+	# error: Cannot load default config file: File not found", cascading
+	# into "failed to match font" and a fatal "failed to load primary
+	# fonts" crash. Fixed via FONTCONFIG_FILE (confirmed via `strings` on
+	# the real alpm-fetched libfontconfig.so, alongside FONTCONFIG_PATH/
+	# FONTCONFIG_SYSROOT -- fontconfig's own documented overrides). The
+	# per-app fonts.conf itself points at the real, non-isolated
+	# /usr/share/fonts (confirmed: FloraOS has no chroot, so a real,
+	# shared /usr/share/fonts works identically for every isolated app --
+	# see docs/ARCHITECTURE.md for where that directory's actual contents
+	# come from).
+	local fontconfig_file; fontconfig_file=$(find "$app_dir" -type f -path '*/etc/fonts/fonts.conf' 2>/dev/null | head -n1)
 	cat > "$wrapper" <<-EOF
 	#!/bin/sh
 	export HOME="$app_dir"
@@ -213,6 +229,7 @@ app_wrapper_write() {
 	${gbm_backends_dir:+export GBM_BACKENDS_PATH="$gbm_backends_dir"}
 	${wlr_xwayland:+export WLR_XWAYLAND="$wlr_xwayland"}
 	${libinput_quirks_dir:+export LIBINPUT_QUIRKS_DIR="$libinput_quirks_dir"}
+	${fontconfig_file:+export FONTCONFIG_FILE="$fontconfig_file"}
 	exec "$app_dir/$relbin" "\$@"
 	EOF
 	chmod 755 "$wrapper"
