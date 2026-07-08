@@ -444,7 +444,18 @@ static void handle_open_device(struct client *c, const char *path) {
 	}
 	if (count >= MAX_SEAT_DEVICES) { send_error(c, EMFILE); return; }
 
-	int fd = open(canon, O_RDWR | O_NOCTTY | O_NOFOLLOW | O_CLOEXEC);
+	// O_NONBLOCK matters here, not just as a style default: libinput's own
+	// device-add sync does a plain read() expecting an immediate EAGAIN
+	// once the backlog drains, not a genuine wait for the next event.
+	// Without it, that read() blocks forever on literally any evdev
+	// device passed through this seat -- confirmed on a real mango run
+	// via /proc/<pid>/stack (blocked in the kernel's evdev_read) and
+	// /proc/<pid>/fd (pointing at whatever device libinput happened to
+	// enumerate first: the virtual ACPI "Power Button", then -- after
+	// excluding just that device via a udev LIBINPUT_IGNORE_DEVICE rule
+	// -- the real keyboard next, proving the bug was never specific to
+	// one device at all. See docs/ARCHITECTURE.md.
+	int fd = open(canon, O_RDWR | O_NOCTTY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
 	if (fd == -1) { send_error(c, errno); return; }
 
 	struct device *d = calloc(1, sizeof *d);

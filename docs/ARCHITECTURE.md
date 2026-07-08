@@ -387,6 +387,30 @@ rule (`etc/udev/rules.d/71-libinput-ignore-power-button.rules`,
 `scripts/apply-skeleton.sh`) scoped to `ATTRS{name}=="Power Button"` so only
 that device is excluded.
 
+**That fix turned out to be real but incomplete** -- proven by testing it for
+real, not by inspection: `udevadm info` on a fresh boot confirmed
+`LIBINPUT_IGNORE_DEVICE=1` was actually applied, yet `mango` still hung at
+the exact same `Starting libinput backend` point. Re-running the same
+`/proc/<pid>/stack`/`/proc/<pid>/fd` inspection on the new hang showed it
+now blocked on `event1` -- the real keyboard -- instead of `event0`. The
+Power Button wasn't special; it was just first in enumeration order. Every
+evdev device floraseat hands out triggers the same block, one at a time.
+
+**Actual root cause: `floraseat`'s own `handle_open_device()`
+(`tools/floraseat/floraseat.c`) opened every device fd -- DRM, evdev,
+hidraw alike -- without `O_NONBLOCK`.** libinput's own device-add sync does
+a plain `read()` expecting an immediate `EAGAIN` once the kernel's event
+backlog drains, not a genuine wait for the next event; without
+`O_NONBLOCK` that `read()` blocks for real, on literally any device,
+because a real event might never come (nobody's touched a freshly-added
+device yet). Fixed by adding `O_NONBLOCK` to floraseat's single shared
+`open()` call. This is also just the objectively correct flag for any fd
+handed to an epoll-driven consumer (both libinput and wlroots' own DRM
+backend read events this way), not a narrow libinput-specific workaround.
+The `LIBINPUT_IGNORE_DEVICE` rule above stays regardless -- routing power
+button events through libinput was never correct on its own merits, real
+hardware included -- but it was never the actual fix for the hang.
+
 root's `/etc/shadow` entry ships with an intentionally empty password field
 (traditional Unix for "no password required"), documented in `/etc/issue` so
 a first-time user sees it before being asked for credentials -- appropriate
