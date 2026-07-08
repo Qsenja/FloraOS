@@ -813,7 +813,7 @@ silently doesn't fit.
     device-open call gets ENOENT), leaving the seat-level enable/disable
     protocol verified but the device-level master transfer itself
     unverified against a real DRM node.
-  - **linux-lts** (`scripts/recipes/linux-lts.sh`): now enables
+  - **linux-lts** (`scripts/recipes/linux-lts.sh`): enables
     `CONFIG_SYSFB_SIMPLEFB`+`CONFIG_DRM_SIMPLEDRM` (generic
     firmware-framebuffer-based KMS, works on essentially any x86_64 machine
     and under QEMU with zero hardware-specific driver code -- enough for a
@@ -821,12 +821,35 @@ silently doesn't fit.
     `CONFIG_INPUT_EVDEV`/`CONFIG_USB_HID`/`CONFIG_HID_GENERIC`/
     `CONFIG_USB_XHCI_HCD` as **built-in** (not modules) via `scripts/config`
     + `olddefconfig` after `defconfig`, since there's no kmod to autoload a
-    module in the first place (see eudev's `--disable-kmod` above). NOT
-    independently build-verified in this project's own sandbox this round --
-    a full kernel compile wasn't practical there; option names are correct
-    to the best of available knowledge for the pinned 6.18.38 tree, but
-    treat this the same as any other unverified change (check the real
-    `.config`/dmesg on an actual `./floraiso build`).
+    module in the first place (see eudev's `--disable-kmod` above).
+  - DONE: **`/dev/dri/card0` now actually appears on a real boot** (was:
+    the kernel config above was correct but had never produced a working
+    DRM device end to end -- see the "Not independently exercised" note
+    just above, and a real user hitting `dwm`/`mango` both failing with
+    "cannot open display"/no-GPU errors). Root cause had nothing to do with
+    the kernel config itself, which was already right: GRUB's own
+    `grub.cfg` (`scripts/build-iso.sh`) never switched into a graphics mode
+    before the `linux`/`initrd` handoff, so the kernel's `screen_info` never
+    described a linear framebuffer for `CONFIG_SYSFB_SIMPLEFB`/`simpledrm`
+    to wrap -- confirmed directly via `dmesg` in a real QEMU boot: the
+    Bochs VGA PCI device was correctly enumerated and claimed by `vgaarb`
+    as the boot VGA device, but nothing ever bound a framebuffer driver to
+    it, and `/dev/dri` didn't exist. `gfxpayload=keep` alone doesn't fix
+    this -- it only *preserves* whatever mode GRUB is already in, and GRUB
+    defaults to its own text-mode `console` terminal, so there was nothing
+    graphical for "keep" to preserve. Fixed by adding
+    `insmod all_video`/`insmod gfxterm`/`set gfxmode=auto`/
+    `set gfxpayload=keep`/`terminal_output gfxterm` to `grub.cfg` --
+    `terminal_output gfxterm` is the part that actually makes GRUB switch
+    itself into a graphics mode; `gfxpayload=keep` then carries that same
+    mode into the kernel. Verified for real in a fresh QEMU boot (not just
+    reasoned about): `/dev/dri/card0` now exists, and `dmesg` shows
+    `[drm] Initialized simpledrm 1.0.0 for simple-framebuffer.0`. Not yet
+    independently verified: an actual Wayland compositor (mango) drawing
+    through this device from a real VT (tty1/tty2) -- this was tested via
+    the serial console only (`-display none`, no way to see actual pixel
+    output), and floraseat's own VT-bound seat handoff needs a real
+    graphical VT session, not a serial one, to exercise.
   - **floralogin** (`tools/floralogin/floralogin.c`): now also creates
     `/run/user/<uid>` (0700, chowned) and exports `XDG_RUNTIME_DIR` before
     exec'ing the login shell -- every Wayland compositor hard-requires this

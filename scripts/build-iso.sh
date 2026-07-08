@@ -42,6 +42,32 @@ cat > "$ISO_STAGE_DIR/boot/grub/grub.cfg" <<EOF
 set timeout=3
 set default=0
 
+# Without this, GRUB hands the kernel off in plain VGA text mode -- the
+# kernel's own CONFIG_SYSFB_SIMPLEFB/CONFIG_DRM_SIMPLEDRM
+# (scripts/recipes/linux-lts.sh) only ever wraps whatever linear
+# framebuffer the firmware/bootloader already set up before boot; with none
+# set up, /dev/dri/card0 never exists at all and any Wayland compositor
+# (mango) fails to find a GPU, independent of the actual host/VM display
+# hardware. insmod all_video covers both legacy BIOS VESA (video_bochs/vbe)
+# and UEFI GOP (efi_gop) in this hybrid BIOS+UEFI image; gfxpayload=keep
+# hands that mode's framebuffer info to the kernel via the Linux boot
+# protocol's screen_info instead of GRUB dropping back to text mode right
+# before the linux/initrd handoff -- but "keep" only PRESERVES whatever
+# mode GRUB is already in, it doesn't switch into one itself. Confirmed for
+# real in a QEMU boot (dmesg): without the terminal_output gfxterm line
+# below, GRUB stays on its default text-mode 'console' terminal the entire
+# time, so there's nothing graphical for "keep" to preserve -- the Bochs
+# VGA PCI device shows up in dmesg (vgaarb claims it as the boot VGA
+# device) but no framebuffer driver ever binds to it, and /dev/dri never
+# appears. terminal_output gfxterm is what actually makes GRUB switch
+# itself into a graphics mode; gfxpayload=keep then carries that same mode
+# into the kernel instead of reverting to text right before the jump.
+insmod all_video
+insmod gfxterm
+set gfxmode=auto
+set gfxpayload=keep
+terminal_output gfxterm
+
 menuentry "${HOSTNAME:-FloraOS}" {
 	linux /boot/vmlinuz-floraos console=tty0 console=ttyS0
 	initrd /boot/initramfs-floraos.img
