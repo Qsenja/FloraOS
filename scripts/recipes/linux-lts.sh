@@ -16,11 +16,27 @@ recipe_build() {
 
 	# GUI-readiness config -- see docs/MANIFEST.md. BTRFS_FS must be =y (built-in), not
 	# a module, since florainstall boots the target disk directly with no initramfs.
+	#
+	# DRM_FBDEV_EMULATION/FRAMEBUFFER_CONSOLE: without these, /dev/dri/card0
+	# exists and simpledrm initializes fine (confirmed via dmesg on a real
+	# boot), but nothing actually renders TEXT through it -- GRUB's own
+	# gfxpayload=keep switch (scripts/build-iso.sh) takes the console out of
+	# legacy VGA text mode, and with no fbcon bound to the new framebuffer,
+	# the kernel falls back to CONFIG_DUMMY_CONSOLE for tty0: it accepts
+	# output and renders none of it. Result: a real black screen on a real
+	# monitor/QEMU window, even though the underlying GPU device is
+	# genuinely working. Found on a real boot, not by inspection.
+	# FRAMEBUFFER_CONSOLE depends on FB_CORE, which DRM's own Kconfig
+	# `select`s automatically once DRM_FBDEV_EMULATION is on (confirmed
+	# directly against drivers/gpu/drm/Kconfig's `select FB_CORE if
+	# DRM_FBDEV_EMULATION` lines) -- no need to enable FB/FB_CORE by hand.
 	"$src/scripts/config" --file "$src/.config" \
 		--enable SYSFB_SIMPLEFB \
 		--enable DRM \
 		--enable DRM_KMS_HELPER \
 		--enable DRM_SIMPLEDRM \
+		--enable DRM_FBDEV_EMULATION \
+		--enable FRAMEBUFFER_CONSOLE \
 		--module DRM_AMDGPU \
 		--module DRM_NOUVEAU \
 		--enable BTRFS_FS
