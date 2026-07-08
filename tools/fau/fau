@@ -16,10 +16,14 @@ topics: install, build, repo, export, backup, service, seat, user, bootstrap
         (or `fau help all` for every topic at once)
 
 environment:
-  FAU_ROOT        target root for bootstrap package(s) (default: /)
-  FAU_REPO_DIR    directory holding .fau.tar.zst archives + repo.json (default: /etc/fau/repo)
-  FAU_APPS_DIR    directory for isolated user apps (default: $HOME/apps)
-  FAU_RECIPES_DIR directory of `fau build` recipes (default: /usr/lib/fau/recipes)
+  FAU_ROOT          target root for bootstrap package(s) (default: /)
+  FAU_REPO_DIR      directory holding .fau.tar.zst archives + repo.json (default: /etc/fau/repo)
+  FAU_APPS_DIR      directory for isolated user apps (default: $HOME/apps)
+  FAU_RECIPES_DIR   read-only `fau build` recipes shipped in the ISO (default: /usr/lib/fau/recipes)
+  FAU_RECIPES_REPO  recipes repo synced over HTTPS before build/update, takes
+                      priority over FAU_RECIPES_DIR (default:
+                      https://github.com/Qsenja/fau-recipes); set empty to
+                      disable and only ever use the ISO-shipped copy
 EOF
 }
 
@@ -33,16 +37,19 @@ remove <pkg> [pkg ...]    remove package(s) and their PATH wrappers
 update [pkg ...]          check installed package(s) (default: all) for a newer
                             version and reinstall it: against a fresh fetch of
                             the local repo + configured Arch/Artix mirrors for
-                            a normal install, or against the recipe's own
-                            PKG_VERSION (rebuilding via 'fau build') for
-                            anything only ever installed that way (mangowm)
+                            a normal install, or against a freshly-synced
+                            FAU_RECIPES_REPO's PKG_VERSION (rebuilding via
+                            'fau build') for anything only ever installed
+                            that way (mangowm)
 list                      list installed packages and versions
 EOF
 			;;
 		build)
 			cat <<'EOF'
 build <name>[=<version>]  build a package from source on this system, on demand,
-                            from a recipe shipped at FAU_RECIPES_DIR/<name>.fis --
+                            from a recipe fetched fresh from FAU_RECIPES_REPO
+                            (falling back to the ISO-shipped FAU_RECIPES_DIR
+                            copy if that fetch fails or is disabled) --
                             fetches whatever build-only tools that recipe needs
                             (a compiler, meson, ninja, ...) into a throwaway
                             sandbox, builds, installs into FAU_APPS_DIR/<name>/
@@ -60,7 +67,10 @@ build <name>[=<version>]  build a package from source on this system, on demand,
                             recipe is fetched and used anyway, with a loud
                             warning instead of a hard failure: there's nothing
                             to verify it against.
-build-list                 list every recipe available at FAU_RECIPES_DIR
+build-list                 list every recipe available (synced repo + shipped fallback)
+recipes-update              explicitly (re-)sync FAU_RECIPES_REPO now, rather than
+                            waiting for the next 'fau build'/'fau update' to do it
+                            as a side effect
 EOF
 			;;
 		repo)
@@ -167,7 +177,7 @@ dispatch() {
 	case "$cmd" in
 		install|remove|update|list)
 			exec "$SELF_DIR/fau-install" "$cmd" "$@" ;;
-		build|build-list)
+		build|build-list|recipes-update)
 			exec "$SELF_DIR/fau-build" "$cmd" "$@" ;;
 		repo-add|repo-index)
 			exec "$SELF_DIR/fau-repo" "$cmd" "$@" ;;

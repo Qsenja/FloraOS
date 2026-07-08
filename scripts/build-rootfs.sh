@@ -119,7 +119,7 @@ main() {
 	done
 	cp "$FAU_TOOLS_DIR"/lib/*.sh "$ROOTFS_DIR/usr/lib/fau/lib/"
 	shopt -s nullglob
-	for f in "$FAU_TOOLS_DIR"/recipes/*.fis; do
+	for f in "$FAU_RECIPES_SRC_DIR"/*.fis; do
 		cp "$f" "$ROOTFS_DIR/usr/lib/fau/recipes/"
 	done
 	shopt -u nullglob

@@ -226,13 +226,55 @@ no precompiled binary anywhere (`mangowm`, AUR-only — no official
 Arch/Artix repo carries it, so the alpm fallback can never resolve it no
 matter the exact name) has no path into this project short of someone
 rebuilding it by hand on a separate machine. `fau-build` builds it right
-here instead, from a recipe shipped inside the image at `FAU_RECIPES_DIR`
-(default `/usr/lib/fau/recipes/*.fis`) — a completely separate thing from
+here instead, from a recipe — a completely separate thing from
 `scripts/recipes/*.sh`, which stays exactly as it was: base-rootfs
 packages, built once on a separate dev/build host, never touched by fau at
 runtime. ".fis" ("fau install script") is just a distinct extension so the
 two are never confused for each other — plain bash either way, no special
 syntax of its own.
+
+### Where a recipe actually comes from: `FAU_RECIPES_REPO`, synced over HTTPS, not baked into the ISO
+
+Recipes used to live only at `FAU_RECIPES_DIR` (default
+`/usr/lib/fau/recipes/*.fis`), copied verbatim into the image at ISO-build
+time same as the rest of `tools/fau/` (see Staging above). That means a new
+recipe, or a version bump to an existing one's `PKG_VERSION`/`PKG_SRC_SHA256`
+pin, only ever reached an already-installed FloraOS machine via a whole new
+ISO — not an acceptable turnaround for something as small as "someone
+pinned a newer mango tag." Recipes now live in their own repo,
+[`github.com/Qsenja/fau-recipes`](https://github.com/Qsenja/fau-recipes)
+(`FAU_RECIPES_REPO`), split out of this one specifically so pushing there is
+enough on its own — no FloraOS release involved.
+
+**Fetched as a plain HTTPS tarball (`lib/recipes.sh`'s `recipes_sync`), never
+via `git clone`** — FloraOS ships no `git` binary on the live system at all
+(confirmed directly: meson's own optional `git`-version-probe during a real
+`mango` build reported "Program git found: NO"), so a runtime `git clone`
+was never actually an option here. `git` only needs to exist on whoever's
+*maintaining* fau-recipes' own machine, to commit and push to it — the same
+"read the real data format directly, don't shell out to the heavyweight
+tool" principle the whole alpm fallback below is already built on, just
+applied to GitHub's own `codeload`-style
+`archive/refs/heads/<branch>.tar.gz` endpoint instead of pacman's sync-db
+format.
+
+`recipes_sync` runs automatically as a side effect of `fau build <name>`,
+`fau build-list`, and `fau update` alike — every path that needs to know
+what recipes/versions actually exist right now triggers a sync first,
+**always best-effort, never fatal**: a
+failed fetch (offline, DNS hiccup, GitHub down) is logged as a warning and
+swallowed, falling back to whatever `FAU_RECIPES_REMOTE_DIR` already has
+from a previous successful sync, and beneath that, to the read-only
+`FAU_RECIPES_DIR` copy still shipped in the ISO as a baseline — a build
+that would have worked offline yesterday must keep working offline today
+just because this network call happened to fail. `recipe_lookup` checks the
+synced copy first, the shipped one second, so a synced update always wins
+when present. Setting `FAU_RECIPES_REPO=""` explicitly (distinct from
+leaving it unset, which takes the real default via `${VAR-default}` instead
+of `${VAR:-default}`) opts out of network syncing entirely, for anyone who
+wants strictly offline, shipped-recipes-only behavior on purpose. An
+explicit `fau recipes-update` also exists for triggering a sync on its own,
+without also doing a build or a full dependency-version check.
 
 A recipe here declares two independent dependency lists, not one, because
 they have genuinely different lifetimes:

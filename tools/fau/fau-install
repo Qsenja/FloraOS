@@ -11,6 +11,8 @@ source "$SELF_DIR/lib/manifest.sh"
 source "$SELF_DIR/lib/repo.sh"
 # shellcheck source=lib/alpm.sh
 source "$SELF_DIR/lib/alpm.sh"
+# shellcheck source=lib/recipes.sh
+source "$SELF_DIR/lib/recipes.sh"
 
 app_install_one() {
 	local name=$1 chain=${2:-}
@@ -128,13 +130,17 @@ cmd_update() {
 
 	# Real network refresh, once, up front -- not per-app -- see
 	# alpm_refresh_dbs (lib/alpm.sh) for why a cached/local-shortcut db can
-	# never be trusted to answer "is there a newer version" correctly.
+	# never be trusted to answer "is there a newer version" correctly. The
+	# recipes repo gets the same treatment, same reasoning: a recipe-built
+	# app's own "newer available" check below needs today's PKG_VERSION
+	# pin, not whatever was last synced (possibly never, on a fresh install).
 	local have_alpm=""
 	if alpm_fallback_available; then
 		log "refreshing package index from the configured mirrors..."
 		alpm_refresh_dbs
 		have_alpm=1
 	fi
+	recipes_sync || true
 
 	local name checked=0 updated=0
 	for name in "${names[@]}"; do
@@ -181,13 +187,14 @@ cmd_update() {
 		# recipe shipped on this system is now pinned ahead of what's
 		# installed", so rebuild against that pin instead of only pointing
 		# the user at the command themselves. See fau.md.
-		if [ -f "$FAU_RECIPES_DIR/$name.fis" ]; then
+		local recipe; recipe=$(recipe_lookup "$name") || recipe=""
+		if [ -n "$recipe" ]; then
 			# Subshell: sourcing a recipe defines recipe_build/PKG_* in
 			# whatever sources it, and this loop sources a different
 			# recipe every iteration -- a subshell via $(...) throws that
 			# away on exit instead of leaking it into the next iteration.
 			local recipe_version
-			recipe_version=$(source "$FAU_RECIPES_DIR/$name.fis"; echo "${PKG_VERSION:-}") || recipe_version=""
+			recipe_version=$(source "$recipe"; echo "${PKG_VERSION:-}") || recipe_version=""
 			if [ -n "$recipe_version" ] && [ "$(alpm_vercmp "$recipe_version" "$installed")" -gt 0 ]; then
 				log "$name: recipe pinned to $recipe_version (installed: $installed) -- rebuilding"
 				if "$SELF_DIR/fau-build" build "$name"; then

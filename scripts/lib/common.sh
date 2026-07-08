@@ -10,6 +10,10 @@ ROOTFS_DIR="$WORK_DIR/rootfs"
 VERSIONS_CONF="$FLORA_ROOT/config/versions.conf"
 FAU_TOOLS_DIR="$FLORA_ROOT/tools/fau"
 FAU_BIN="$FAU_TOOLS_DIR/fau"
+# fau-recipes/ is its own separate git repo (github.com/Qsenja/fau-recipes),
+# not part of tools/fau/ itself -- see tools/fau/fau.md. Still copied into
+# the ISO as FAU_RECIPES_DIR's read-only fallback baseline, same as before.
+FAU_RECIPES_SRC_DIR="$FLORA_ROOT/fau-recipes"
 FLORAGRUB_CFG_BIN="$FLORA_ROOT/tools/floragrub-cfg/floragrub-cfg"
 # Defined unconditionally: build_package() skips sourcing a cached package's
 # recipe, so referencing this lazily would crash under `set -u`.

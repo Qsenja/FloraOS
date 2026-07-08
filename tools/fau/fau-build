@@ -11,6 +11,8 @@ source "$SELF_DIR/lib/manifest.sh"
 source "$SELF_DIR/lib/alpm.sh"
 # shellcheck source=lib/build.sh
 source "$SELF_DIR/lib/build.sh"
+# shellcheck source=lib/recipes.sh
+source "$SELF_DIR/lib/recipes.sh"
 
 csv_words() {
 	local item
@@ -27,8 +29,14 @@ cmd_build() {
 		*=*) name=${arg%%=*}; version_req=${arg#*=} ;;
 		*) name=$arg ;;
 	esac
-	local recipe="$FAU_RECIPES_DIR/$name.fis"
-	[ -f "$recipe" ] || die "no recipe for '$name' (looked in $FAU_RECIPES_DIR) -- see 'fau build-list'"
+	# Freshest recipes first, every build -- a recipe (or a version pin/bump
+	# inside one) pushed to FAU_RECIPES_REPO should reach this machine
+	# without a new ISO. Non-fatal: recipe_lookup falls back to whatever's
+	# already cached from a previous sync, then to the ISO-shipped copy, so
+	# a build doesn't hard-fail just because the network's down right now.
+	recipes_sync || true
+	local recipe; recipe=$(recipe_lookup "$name") \
+		|| die "no recipe for '$name' (looked in $FAU_RECIPES_REMOTE_DIR and $FAU_RECIPES_DIR) -- see 'fau build-list'"
 
 	local PKG_SRC_URL="" PKG_SRC_SHA256="" PKG_VERSION="" PKG_DESCRIPTION=""
 	local PKG_DEPENDS="" PKG_BUILD_DEPS="" PKG_BIN=""
@@ -180,13 +188,16 @@ cmd_build() {
 
 cmd_build_list() {
 	[ $# -eq 0 ] || die "build-list takes no arguments"
-	[ -d "$FAU_RECIPES_DIR" ] || { log "no recipes directory at $FAU_RECIPES_DIR"; return 0; }
-	local f
-	shopt -s nullglob
-	for f in "$FAU_RECIPES_DIR"/*.fis; do
-		basename "$f" .fis
-	done
-	shopt -u nullglob
+	recipes_sync || true
+	recipe_list_names
+}
+
+cmd_recipes_update() {
+	[ $# -eq 0 ] || die "recipes-update takes no arguments"
+	[ -n "${FAU_RECIPES_REPO:-}" ] || die "FAU_RECIPES_REPO is explicitly empty -- recipe syncing is disabled"
+	recipes_sync || die "fetching recipes from $FAU_RECIPES_REPO failed (see warning above)"
+	local n; n=$(find "$FAU_RECIPES_REMOTE_DIR" -maxdepth 1 -name '*.fis' 2>/dev/null | wc -l)
+	log "synced $n recipe(s) from $FAU_RECIPES_REPO"
 }
 
 cmd=${1:-}; [ $# -ge 1 ] && shift
@@ -194,5 +205,6 @@ cmd=${1:-}; [ $# -ge 1 ] && shift
 case "$cmd" in
 	build) cmd_build "$@" ;;
 	build-list) cmd_build_list "$@" ;;
+	recipes-update) cmd_recipes_update "$@" ;;
 	*) die "fau-build: unknown command: $cmd" ;;
 esac

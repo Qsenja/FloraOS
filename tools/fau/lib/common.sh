@@ -12,6 +12,11 @@ FAU_APPS_BIN_DIR="${FAU_APPS_DIR}/.bin"
 FAU_APPS_JSON="${FAU_APPS_DIR}/.fau-apps.json"
 
 FAU_RECIPES_DIR="${FAU_RECIPES_DIR:-/usr/lib/fau/recipes}"
+# Synced from FAU_RECIPES_REPO at runtime (recipes_sync, lib/recipes.sh) --
+# takes priority over the read-only, ISO-build-time copy above when present.
+FAU_RECIPES_REMOTE_DIR="${FAU_RECIPES_REMOTE_DIR:-${FAU_CACHE_DIR}/recipes-remote}"
+FAU_RECIPES_REPO="${FAU_RECIPES_REPO-https://github.com/Qsenja/fau-recipes}"
+FAU_RECIPES_BRANCH="${FAU_RECIPES_BRANCH:-main}"
 
 # See ../fauelf/fauelf.md -- rewrites absolute DT_NEEDED entries for isolated app installs.
 FAU_ELF_PATCH="${FAU_ELF_PATCH:-fauelf}"
