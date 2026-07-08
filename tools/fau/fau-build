@@ -21,8 +21,12 @@ csv_words() {
 }
 
 cmd_build() {
-	[ $# -eq 1 ] || die "usage: fau build <name>"
-	local name=$1
+	[ $# -eq 1 ] || die "usage: fau build <name>[=<version>]"
+	local arg=$1 name version_req=""
+	case "$arg" in
+		*=*) name=${arg%%=*}; version_req=${arg#*=} ;;
+		*) name=$arg ;;
+	esac
 	local recipe="$FAU_RECIPES_DIR/$name.fis"
 	[ -f "$recipe" ] || die "no recipe for '$name' (looked in $FAU_RECIPES_DIR) -- see 'fau build-list'"
 
@@ -33,6 +37,23 @@ cmd_build() {
 	[ -n "$PKG_SRC_URL" ] && [ -n "$PKG_SRC_SHA256" ] && [ -n "$PKG_VERSION" ] \
 		|| die "$recipe: PKG_SRC_URL/PKG_SRC_SHA256/PKG_VERSION must all be set"
 	declare -F recipe_build >/dev/null || die "$recipe: doesn't define recipe_build"
+
+	# A version other than the recipe's own pinned default needs the recipe's
+	# opt-in cooperation (recipe_source_for_version) to even know what URL to
+	# fetch -- see fau.md. Its output is two lines: the URL, then a pinned
+	# sha256 if the recipe author bothered to add one for this exact version,
+	# or an empty line if not -- build_fetch_source treats that empty line as
+	# "fetch it anyway, just say so loudly" rather than a hard failure.
+	if [ -n "$version_req" ] && [ "$version_req" != "$PKG_VERSION" ]; then
+		declare -F recipe_source_for_version >/dev/null \
+			|| die "$recipe: doesn't support installing a specific version (no recipe_source_for_version defined) -- only $PKG_VERSION is available"
+		local src_info; src_info=$(recipe_source_for_version "$version_req") \
+			|| die "$recipe: recipe_source_for_version failed for version $version_req"
+		PKG_SRC_URL=$(printf '%s\n' "$src_info" | sed -n '1p')
+		PKG_SRC_SHA256=$(printf '%s\n' "$src_info" | sed -n '2p')
+		[ -n "$PKG_SRC_URL" ] || die "$recipe: recipe_source_for_version didn't return a URL for version $version_req"
+		PKG_VERSION=$version_req
+	fi
 
 	apps_state_init
 	local app_dir="${FAU_APPS_DIR%/}/${name}"

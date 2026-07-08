@@ -7,6 +7,19 @@ PKG_DEPENDS="glibc,wlroots0.19,wayland,libxkbcommon,libinput,libdrm,libxcb,xcb-u
 PKG_BUILD_DEPS="gcc,meson,ninja,pkgconf,wayland-protocols,glslang,wayland,wlroots0.19,libxkbcommon,libinput,libdrm,libxcb,xcb-util-wm,pcre2,pixman,cjson,pango,mesa,libglvnd"
 PKG_BIN="usr/bin/mango,usr/bin/mmsg"
 
+# `fau build mangowm=<tag>` -- see fau.md's "installing a specific version"
+# section. mango's own tag names ARE its release versions 1:1 (no "v" prefix,
+# confirmed against https://github.com/mangowm/mango/tags), so the URL is a
+# straight template; no case statement of per-version pins needed yet. Add
+# one here (matching PKG_SRC_SHA256's own format) the day someone wants a
+# specific older mango build to be checksum-verified instead of fetched with
+# just the printed unverified-download warning.
+recipe_source_for_version() {
+	local version=$1
+	echo "https://github.com/mangowm/mango/archive/refs/tags/${version}.tar.gz"
+	echo ""
+}
+
 recipe_build() {
 	local src=$1 app_dir=$2 sandbox_dir=$3
 	local jobs; jobs=$(nproc)

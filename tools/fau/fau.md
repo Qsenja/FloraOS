@@ -162,15 +162,62 @@ inequality — a `.pc`/rebuild artifact or a differently-formatted-but-equal
 version string comparing as "different" would otherwise trigger a pointless
 reinstall.
 
-A name that resolves through neither path (no local-repo entry, and
-`alpm_resolve` fails — the case for anything installed via `fau build`,
-`mangowm` being the only one so far) is reported and skipped, not treated
-as an error that aborts the rest of the run: a recipe-built package's own
-version is whatever's hardcoded in its `.fis` (`PKG_VERSION`/`PKG_SRC_URL`),
-not something resolvable against alpm at all — AUR-only packages need a
-recipe bump and a fresh `fau build <name>`, not a mirror check. The skip
-message says so directly when a matching recipe exists
-(`$FAU_RECIPES_DIR/<name>.fis`), rather than a bare "couldn't resolve".
+A **third** kind gets checked when a name resolves through neither path
+above (no local-repo entry, and either `alpm_resolve` fails or no
+mirrorlist/repo-list is configured at all) — anything only ever installed
+via `fau build` (`mangowm` being the only one so far). Its own version is
+whatever's hardcoded in its `.fis` as `PKG_VERSION`, a static pin a person
+bumps by hand when they update the recipe (e.g. to a newer upstream mango
+tag) — not something resolvable against alpm at all, and not something
+`update` can discover by polling anything remote (that would mean hitting
+each recipe's own upstream host's release API, a different and much bigger
+feature than what was asked for here). So "newer available" for this kind
+means something narrower but still real: *the recipe file shipped on this
+system is now pinned ahead of what's actually installed* — sourced in a
+subshell (`$(source "$recipe"; echo "$PKG_VERSION")`, discarding the
+`recipe_build`/`PKG_*` it defines on exit rather than leaking them into the
+next loop iteration's different recipe) purely to read that one variable,
+then `fau build <name>` is shelled out to for real (matching this project's
+existing "call the tool, don't inline its logic" convention, same as
+`fau-export`'s `import` calling `fau-install` as a subprocess) if the pin
+moved forward. A name matching none of the three kinds at all — not in the
+local repo, not resolvable via alpm, no recipe either — is reported and
+skipped, same as an individual rebuild failure: nothing here aborts the
+rest of a multi-package `update` run.
+
+## `build <name>[=<version>]` — installing a specific version, not just the recipe's pinned default
+
+`PKG_SRC_URL`/`PKG_SRC_SHA256`/`PKG_VERSION` are one fixed triple per
+recipe by original design — supply-chain safety via a pinned checksum, the
+same reasoning every other fetch path in this project pins a hash. An
+explicit `=<version>` on the command line (`fau build mangowm=0.14.3`) needs
+the recipe's own cooperation to even know what URL corresponds to an
+arbitrary version string, since URL shape varies per upstream (some tag
+paths, some releases, some with a `v` prefix) — there's no generic template
+that would work project-wide. Recipes opt in by defining
+`recipe_source_for_version <version>`, printing exactly two lines: the
+source URL, then a pinned sha256 for that exact version if the recipe
+author has one, or an empty second line if not. `cmd_build` only calls it
+at all when the requested version differs from the recipe's own default
+(the default path is completely untouched, still fully pinned exactly as
+before); a recipe that doesn't define the function fails the request with a
+clear "doesn't support installing a specific version" instead of silently
+falling through to the default.
+
+The empty-second-line case is the actual hard problem: there is no
+checksum to pin for a version nobody's added to the recipe yet, so
+`build_fetch_source` (`lib/build.sh`) grew a genuine third state, not just
+its existing match/mismatch pair — empty `sha256` skips verification
+entirely and fetches anyway, but with a loud `warning: ... downloaded
+UNVERIFIED` line, never silently. `mangowm.fis`'s own
+`recipe_source_for_version` currently has no per-version pins at all
+(mango's tag names are exactly its version strings, confirmed against
+https://github.com/mangowm/mango/tags, so the URL is a plain template) —
+every non-default mango version is fetched unverified today. Adding a pin
+for a specific version later (a `case` branch printing that version's real
+sha256 as the second line instead of the empty default) is meant to be
+cheap precisely so this stays an easy thing to tighten over time rather
+than a permanent gap.
 
 ## `build <name>` (`fau-build`) — compiling from source, on demand, with a disposable sandbox
 

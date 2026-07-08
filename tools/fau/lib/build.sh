@@ -2,6 +2,11 @@
 # Requires lib/common.sh, lib/manifest.sh, and lib/alpm.sh already sourced.
 
 # Cached under $FAU_CACHE_DIR/build-sources/, never wiped (unlike PKG_BUILD_DEPS) -- see fau.md.
+# sha256 empty (not just wrong) means "no pin exists for this download" -- an
+# explicit, distinct state from a checksum mismatch, used by `fau build
+# <name>=<version>` for a version nobody's pinned a hash for yet (see fau.md's
+# "installing a specific version" section). Fetched and used anyway, but
+# loudly, not silently -- there's genuinely nothing to verify it against.
 build_fetch_source() {
 	local url=$1 sha256=$2
 	local dir="${FAU_CACHE_DIR%/}/build-sources"
@@ -13,7 +18,11 @@ build_fetch_source() {
 		mv "$path.part" "$path"
 	fi
 	local actual; actual=$(sha256sum "$path" | cut -d' ' -f1)
-	[ "$actual" = "$sha256" ] || { rm -f "$path"; die "checksum mismatch for $(basename "$url"): expected $sha256, got $actual"; }
+	if [ -n "$sha256" ]; then
+		[ "$actual" = "$sha256" ] || { rm -f "$path"; die "checksum mismatch for $(basename "$url"): expected $sha256, got $actual"; }
+	else
+		log "warning: no pinned checksum for $(basename "$url") -- downloaded UNVERIFIED (sha256: $actual)"
+	fi
 	echo "$path"
 }
 

@@ -157,27 +157,51 @@ cmd_update() {
 			continue
 		fi
 
-		if [ -z "$have_alpm" ]; then
-			log "$name: not in the local repo and no pacman mirrorlist/repo-list available to check for updates -- skipping"
-			continue
+		if [ -n "$have_alpm" ]; then
+			local resolved
+			resolved=$(alpm_resolve "$name" 2>/dev/null) || resolved=""
+			if [ -n "$resolved" ]; then
+				local latest; latest=$(printf '%s' "$resolved" | tail -n1 | cut -d"$ALPM_FS" -f3)
+				if [ -n "$latest" ] && [ "$(alpm_vercmp "$latest" "$installed")" -gt 0 ]; then
+					app_install_one_alpm "$name"
+					updated=$((updated + 1))
+				else
+					log "$name $installed is up to date"
+				fi
+				continue
+			fi
 		fi
-		local resolved
-		resolved=$(alpm_resolve "$name" 2>/dev/null) || resolved=""
-		if [ -z "$resolved" ]; then
-			if [ -f "$FAU_RECIPES_DIR/$name.fis" ]; then
-				log "$name: built from a recipe, not resolvable against the mirrors -- run 'fau build $name' to rebuild it instead, skipping"
+
+		# Not in the local repo, and either alpm has nothing by this name or
+		# no mirrorlist/repo-list is configured at all -- the only other
+		# source fau ever installs from is a `fau build` recipe (mangowm and
+		# anything else AUR-only). A recipe's own PKG_VERSION is a static
+		# pin an actual person bumps by hand, not something to resolve
+		# against a live index -- "newer available" here just means "the
+		# recipe shipped on this system is now pinned ahead of what's
+		# installed", so rebuild against that pin instead of only pointing
+		# the user at the command themselves. See fau.md.
+		if [ -f "$FAU_RECIPES_DIR/$name.fis" ]; then
+			# Subshell: sourcing a recipe defines recipe_build/PKG_* in
+			# whatever sources it, and this loop sources a different
+			# recipe every iteration -- a subshell via $(...) throws that
+			# away on exit instead of leaking it into the next iteration.
+			local recipe_version
+			recipe_version=$(source "$FAU_RECIPES_DIR/$name.fis"; echo "${PKG_VERSION:-}") || recipe_version=""
+			if [ -n "$recipe_version" ] && [ "$(alpm_vercmp "$recipe_version" "$installed")" -gt 0 ]; then
+				log "$name: recipe pinned to $recipe_version (installed: $installed) -- rebuilding"
+				if "$SELF_DIR/fau-build" build "$name"; then
+					updated=$((updated + 1))
+				else
+					log "$name: rebuild failed, skipping"
+				fi
 			else
-				log "$name: couldn't resolve against the mirrors, skipping"
+				log "$name $installed is up to date (built from a recipe, still pinned to $recipe_version)"
 			fi
 			continue
 		fi
-		local latest; latest=$(printf '%s' "$resolved" | tail -n1 | cut -d"$ALPM_FS" -f3)
-		if [ -n "$latest" ] && [ "$(alpm_vercmp "$latest" "$installed")" -gt 0 ]; then
-			app_install_one_alpm "$name"
-			updated=$((updated + 1))
-		else
-			log "$name $installed is up to date"
-		fi
+
+		log "$name: not found in the local repo, the configured mirrors, or as a build recipe -- skipping"
 	done
 	log "checked $checked app(s), updated $updated"
 }

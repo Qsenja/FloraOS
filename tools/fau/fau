@@ -30,20 +30,19 @@ usage_topic() {
 			cat <<'EOF'
 install <pkg> [pkg ...]   install package(s) into FAU_APPS_DIR/<name>/, isolated
 remove <pkg> [pkg ...]    remove package(s) and their PATH wrappers
-update [pkg ...]          check installed package(s) (default: all) against a
-                            fresh fetch of the local repo + configured
-                            Arch/Artix mirrors, reinstalling any that have a
-                            newer version. A package only ever installed via
-                            'fau build' (no repo/mirror entry, e.g. mangowm)
-                            is reported, not updated -- run 'fau build <pkg>'
-                            for that instead
+update [pkg ...]          check installed package(s) (default: all) for a newer
+                            version and reinstall it: against a fresh fetch of
+                            the local repo + configured Arch/Artix mirrors for
+                            a normal install, or against the recipe's own
+                            PKG_VERSION (rebuilding via 'fau build') for
+                            anything only ever installed that way (mangowm)
 list                      list installed packages and versions
 EOF
 			;;
 		build)
 			cat <<'EOF'
-build <name>              build a package from source on this system, on demand,
-                            from a recipe shipped at FAU_RECIPES_DIR/<name>.sh --
+build <name>[=<version>]  build a package from source on this system, on demand,
+                            from a recipe shipped at FAU_RECIPES_DIR/<name>.fis --
                             fetches whatever build-only tools that recipe needs
                             (a compiler, meson, ninja, ...) into a throwaway
                             sandbox, builds, installs into FAU_APPS_DIR/<name>/
@@ -54,6 +53,13 @@ build <name>              build a package from source on this system, on demand,
                             only ever hints at this, never falls back to it
                             automatically. 'fau remove <name>' works on a built
                             package exactly like any other installed app.
+                            An explicit =<version> builds a different version
+                            than the recipe's own pinned default, if (and only
+                            if) that recipe supports it -- see the recipe's own
+                            .fis file. A version with no pinned checksum in the
+                            recipe is fetched and used anyway, with a loud
+                            warning instead of a hard failure: there's nothing
+                            to verify it against.
 build-list                 list every recipe available at FAU_RECIPES_DIR
 EOF
 			;;
