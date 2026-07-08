@@ -106,11 +106,22 @@ int main(int argc, char **argv) {
 		die("truncated dynamic section");
 
 	uint64_t strtab_vaddr = 0;
-	int have_strtab = 0;
+	int have_strtab = 0, have_needed = 0;
 	for (i = 0; i < ndyn && dyns[i].d_tag != DT_NULL; i++) {
-		if (dyns[i].d_tag == DT_STRTAB) { strtab_vaddr = dyns[i].d_val; have_strtab = 1; break; }
+		if (dyns[i].d_tag == DT_STRTAB) { strtab_vaddr = dyns[i].d_val; have_strtab = 1; }
+		if (dyns[i].d_tag == DT_NEEDED) have_needed = 1;
 	}
-	if (!have_strtab) die("no DT_STRTAB entry in a file with a dynamic section");
+	/* A dynamic section with zero DT_NEEDED entries has nothing for this tool
+	   to do, whether or not it happens to also carry a DT_STRTAB -- e.g. a
+	   Guile .go bytecode module's own minimal dynamic section, which can
+	   omit DT_STRTAB entirely when there's nothing needing a string-table
+	   lookup. Only a file that actually HAS a DT_NEEDED entry but no
+	   DT_STRTAB to resolve it against is genuinely inconsistent. Found for
+	   real via a Guile .go file inside `make`'s own alpm dependency closure
+	   (make links against guile on Arch/Artix) failing a real `fau build`,
+	   not by inspection. */
+	if (!have_needed) skip();
+	if (!have_strtab) die("has a DT_NEEDED entry but no DT_STRTAB -- genuinely inconsistent dynamic section");
 	uint64_t strtab_off = vaddr_to_offset(phdrs, eh.e_phnum, strtab_vaddr);
 
 	int patched = 0;

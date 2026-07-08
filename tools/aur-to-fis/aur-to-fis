@@ -71,11 +71,19 @@ pkgbuild_scalar() {
 }
 pkgbuild_array() {
 	local key=$2
+	# Elements don't have to be quoted -- real PKGBUILDs mix both freely
+	# (dwm's own source=() is `dwm.desktop <newline> https://...tar.gz
+	# <newline> config.h)`, no quotes anywhere) -- so after isolating the
+	# key=( ... ) block and stripping its own opening/closing parens, tokenize
+	# on EITHER a quoted string OR a bare whitespace-delimited run, not just
+	# quoted strings.
 	printf '%s\n' "$1" | awk -v key="$key" '
 		$0 ~ "^" key "=\\(" { inarr=1 }
 		inarr { print }
 		inarr && /\)/ { exit }
-	' | grep -oE "'[^']*'|\"[^\"]*\"" | sed -E "s/^['\"]//; s/['\"]\$//" || true
+	' | sed -E "1s/^${key}=\(//" | sed -E 's/\)[[:space:]]*$//' \
+	  | grep -oE "'[^']*'|\"[^\"]*\"|[^[:space:]()]+" \
+	  | sed -E "s/^['\"]//; s/['\"]\$//" || true
 }
 pkgbuild_func_body() {
 	local key=$2
@@ -91,7 +99,7 @@ pkgrel=$(pkgbuild_scalar "$pkgbuild" pkgrel)
 pkgname_var=$(pkgbuild_scalar "$pkgbuild" pkgname)
 underscore_pkgname=$(pkgbuild_scalar "$pkgbuild" _pkgname)
 mapfile -t sources < <(pkgbuild_array "$pkgbuild" source)
-declared_sha256=$(pkgbuild_array "$pkgbuild" sha256sums | head -n1)
+mapfile -t declared_sha256s < <(pkgbuild_array "$pkgbuild" sha256sums)
 
 dynamic_version=""
 grep -qE '^pkgver\(\)' <<< "$pkgbuild" && dynamic_version=1
@@ -113,19 +121,35 @@ resolve_vars() {
 src_url_resolved="" src_url_status="ok"
 if [ "${#sources[@]}" -eq 0 ]; then
 	src_url_status="no source= array found"
-elif [ "${#sources[@]}" -gt 1 ]; then
-	src_url_status="multiple source= entries (${#sources[@]}) -- only the first was considered, review the rest by hand"
-fi
-if [ "${#sources[@]}" -ge 1 ]; then
-	first_source=${sources[0]#*::}   # AUR's "filename::url" form -- drop any filename:: prefix
-	first_source=$(resolve_vars "$first_source" \
-		"pkgname=${pkgname_var:-$aur_name}" "_pkgname=$underscore_pkgname" "pkgver=$pkgver" "pkgrel=$pkgrel")
-	case "$first_source" in
-		*'${'*|*'$('*|*'`'*)
-			src_url_status="source URL still has an unresolved \${...}/\$(...) expression after substitution -- resolve by hand: $first_source" ;;
-		http*) src_url_resolved=$first_source ;;
-		*) src_url_status="resolved source doesn't look like a URL: $first_source" ;;
-	esac
+else
+	# A local file (a .desktop entry, a config.h override, a patch --
+	# dwm.fis's own real source= is exactly this: local file, real tarball,
+	# local file, in that order) is common alongside the one real download,
+	# and not necessarily first -- scan every entry for the first one that
+	# resolves to an actual http(s) URL instead of assuming index 0.
+	local_sources=() candidate="" picked_idx=""
+	idx=0
+	for s in "${sources[@]}"; do
+		s=${s#*::}   # AUR's "filename::url" form -- drop any filename:: prefix
+		s=$(resolve_vars "$s" \
+			"pkgname=${pkgname_var:-$aur_name}" "_pkgname=$underscore_pkgname" "pkgver=$pkgver" "pkgrel=$pkgrel")
+		case "$s" in
+			*'${'*|*'$('*|*'`'*)
+				[ -z "$candidate" ] && candidate="unresolved: $s" ;;
+			http*)
+				if [ -z "$src_url_resolved" ]; then src_url_resolved=$s; picked_idx=$idx; fi ;;
+			*)
+				local_sources+=("$s") ;;
+		esac
+		idx=$((idx + 1))
+	done
+	if [ -n "$src_url_resolved" ]; then
+		[ "${#sources[@]}" -gt 1 ] && src_url_status="ok (picked the one http(s) source out of ${#sources[@]} total -- others look local/patches: ${local_sources[*]:-none})"
+	elif [ -n "$candidate" ]; then
+		src_url_status="source URL still has an unresolved \${...}/\$(...) expression after substitution -- resolve by hand: ${candidate#unresolved: }"
+	else
+		src_url_status="no http(s) source= entry found among ${#sources[@]} total (all looked local: ${local_sources[*]:-none})"
+	fi
 fi
 
 # --- Compute a REAL sha256 by actually downloading -- never trust the ------
@@ -171,6 +195,13 @@ classify_deps makedepends_resolved makedepends_unresolved "${aur_makedepends[@]}
 
 join_csv() { local IFS=,; echo "$*"; }
 
+# sha256sums[] is positional, matched to source[] by index -- show the entry
+# for whichever index was actually picked above, not always index 0 (which
+# would be the .desktop/patch/etc.'s own checksum, not the tarball's, for a
+# PKGBUILD shaped like dwm's).
+declared_sha256=""
+[ -n "$picked_idx" ] && [ "$picked_idx" -lt "${#declared_sha256s[@]}" ] && declared_sha256=${declared_sha256s[$picked_idx]}
+
 # --- Emit the draft ----------------------------------------------------------
 
 {
@@ -181,7 +212,8 @@ join_csv() { local IFS=,; echo "$*"; }
 	echo "#"
 	echo "# source= status: $src_url_status"
 	echo "# download status: $download_status"
-	[ -n "$declared_sha256" ] && echo "# PKGBUILD's own declared sha256sums[0] (NOT what PKG_SRC_SHA256 below uses -- cross-check, don't trust blindly): $declared_sha256"
+	[ -n "$declared_sha256" ] && [ "$declared_sha256" != "SKIP" ] && \
+		echo "# PKGBUILD's own declared sha256sums[$picked_idx] for the picked source (NOT what PKG_SRC_SHA256 below uses -- cross-check, don't trust blindly): $declared_sha256"
 	echo "#"
 	if [ "${#depends_unresolved[@]}" -gt 0 ] || [ "${#makedepends_unresolved[@]}" -gt 0 ]; then
 		echo "# TODO: these AUR dependencies did NOT resolve via fau's own alpm lookup (likely AUR-only"
