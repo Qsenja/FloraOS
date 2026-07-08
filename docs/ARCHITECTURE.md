@@ -410,6 +410,12 @@ backend read events this way), not a narrow libinput-specific workaround.
 The `LIBINPUT_IGNORE_DEVICE` rule above stays regardless -- routing power
 button events through libinput was never correct on its own merits, real
 hardware included -- but it was never the actual fix for the hang.
+Confirmed fixed on a real boot, not just in theory: `mango` rendered an
+actual desktop for the first time this project has ever seen one.
+Qsenja screams "IT WORKED OH MY GOD" because this was the moon-landing
+moment for FloraOS's entire GUI effort -- from a black screen and a wall
+of misdirection (EGL vendor paths, GBM backend paths, Xwayland/libinput
+isolation gaps) down to one missing flag in one custom daemon.
 
 root's `/etc/shadow` entry ships with an intentionally empty password field
 (traditional Unix for "no password required"), documented in `/etc/issue` so
