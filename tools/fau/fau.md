@@ -645,6 +645,27 @@ isolation.
     (down to the exact same "1 include paths searched" message), succeeds
     with it — both through the real generated wrapper script, not just the
     override in isolation.
+  - **libglvnd's EGL vendor ICD search path** is hardcoded to
+    `/etc/glvnd/egl_vendor.d` and `/usr/share/glvnd/egl_vendor.d` — mesa's
+    own `50_mesa.json` (the file that tells glvnd's `libEGL.so.1` dispatcher
+    where mesa's actual `libEGL_mesa.so.0` lives) merges correctly into the
+    isolated app at `$app_dir/usr/share/glvnd/egl_vendor.d/50_mesa.json`
+    (confirmed via `pacman -Ql mesa`), but glvnd never looks there — same
+    bug class as the two above, just one library further down the chain.
+    Symptom: mango's `render/fx_renderer/fx_renderer.c:282` "Could not
+    initialize EGL", preceded by "EGL_EXT_platform_base not supported" and
+    "Failed to create EGL context" — glvnd silently finds zero vendor ICDs
+    and EGL init fails outright, even with a working KMS driver underneath
+    and mesa's real `.so` sitting right there in `LD_LIBRARY_PATH`. Fixed
+    via `__EGL_VENDOR_LIBRARY_DIRS` (libglvnd's own documented override,
+    see `icd_enumeration.md` in the libglvnd repo) — set whenever a
+    `glvnd/egl_vendor.d` marker directory is found anywhere under the app.
+    Verified for real with `bwrap` masking the real `/usr/share/glvnd` path
+    first: `eglinfo` fails identically to the real symptom (empty EGL
+    client-extensions string, `eglInitialize failed`) without the
+    override, and `EGL_EXT_platform_base` reappears in the extensions list
+    once `__EGL_VENDOR_LIBRARY_DIRS` points at a copy of the vendor JSON,
+    even with the real path still masked.
 
 ## The alpm (Arch/Artix repo) fallback — `lib/alpm.sh` — no `pacman` binary, ever
 

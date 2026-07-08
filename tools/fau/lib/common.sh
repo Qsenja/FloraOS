@@ -127,6 +127,26 @@ app_wrapper_write() {
 	# so this only ever fires for an app that actually bundles the data.
 	local xkb_config_root; xkb_config_root=$(find "$app_dir" -type f -path '*/rules/evdev' 2>/dev/null | head -n1)
 	[ -n "$xkb_config_root" ] && xkb_config_root=$(dirname "$(dirname "$xkb_config_root")")
+	# __EGL_VENDOR_LIBRARY_DIRS: libglvnd's libEGL.so.1 dispatcher (mesa's
+	# EGL is loaded through it, not directly) only ever scans its own
+	# compiled-in vendor config dirs -- /etc/glvnd/egl_vendor.d and
+	# /usr/share/glvnd/egl_vendor.d -- for *.json ICD descriptors, never
+	# $app_dir, even though the mesa package's own 50_mesa.json lands at
+	# $app_dir/usr/share/glvnd/egl_vendor.d/50_mesa.json same as any other
+	# alpm-fetched file (confirmed: `pacman -Ql mesa` lists that exact
+	# path). With zero vendor JSON visible, glvnd finds no ICD at all --
+	# "EGL_EXT_platform_base not supported" / "Failed to create EGL
+	# context" / "Could not initialize EGL" (mango's own
+	# fx_renderer.c:282), even with a working KMS driver underneath and
+	# even though the real mesa EGL driver .so is sitting right there in
+	# LD_LIBRARY_PATH. Same bug class as XKB_CONFIG_ROOT above, this time
+	# in libglvnd's loader instead of libxkbcommon. Confirmed via
+	# libglvnd's own icd_enumeration.md: __EGL_VENDOR_LIBRARY_DIRS is a
+	# colon-separated list of directories scanned for *.json ICD files,
+	# explicitly documented as the override for the default search path.
+	# Found via the "glvnd/egl_vendor.d" marker directory -- only ever
+	# fires for an app that actually bundles mesa/libglvnd.
+	local egl_vendor_dir; egl_vendor_dir=$(find "$app_dir" -type d -path '*/glvnd/egl_vendor.d' 2>/dev/null | head -n1)
 	cat > "$wrapper" <<-EOF
 	#!/bin/sh
 	export HOME="$app_dir"
@@ -138,6 +158,7 @@ app_wrapper_write() {
 	export PATH="$app_dir/usr/bin:$app_dir/bin\${PATH:+:\$PATH}"
 	${perl5lib:+export PERL5LIB="$perl5lib\${PERL5LIB:+:\$PERL5LIB}"}
 	${xkb_config_root:+export XKB_CONFIG_ROOT="$xkb_config_root"}
+	${egl_vendor_dir:+export __EGL_VENDOR_LIBRARY_DIRS="$egl_vendor_dir"}
 	exec "$app_dir/$relbin" "\$@"
 	EOF
 	chmod 755 "$wrapper"
