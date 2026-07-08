@@ -74,10 +74,50 @@ cmd_build() {
 	( build_fetch_source "$PKG_SRC_URL" "$PKG_SRC_SHA256" > "$src_result" ) > "$src_log" 2>&1 &
 	local src_pid=$!
 
+	# Each stage's own progress bar is stuck inside its redirected log (see
+	# comment above) until it's done, so without this the whole thing looks
+	# hung for however long the slowest of the three takes -- a full
+	# mangowm-sized build-deps closure or a large source tarball can be
+	# minutes. Poll all three with `kill -0` instead of blocking `wait`ing on
+	# them one at a time, and redraw a single \r status line listing which
+	# ones are still outstanding -- one line on this terminal, not three
+	# interleaved ones, same constraint the log-redirection above exists for.
 	local deps_status=0 build_deps_status=0 src_status=0
-	[ -n "$deps_pid" ] && { wait "$deps_pid" || deps_status=$?; }
-	[ -n "$build_deps_pid" ] && { wait "$build_deps_pid" || build_deps_status=$?; }
-	wait "$src_pid" || src_status=$?
+	local deps_done="" build_deps_done="" src_done=""
+	local spin='-\|/' spin_i=0 start_ts=$SECONDS
+	while :; do
+		local -a pending=()
+		if [ -n "$deps_pid" ] && [ -z "$deps_done" ]; then
+			if kill -0 "$deps_pid" 2>/dev/null; then
+				pending+=("deps")
+			else
+				wait "$deps_pid" || deps_status=$?
+				deps_done=1
+			fi
+		fi
+		if [ -n "$build_deps_pid" ] && [ -z "$build_deps_done" ]; then
+			if kill -0 "$build_deps_pid" 2>/dev/null; then
+				pending+=("build-deps")
+			else
+				wait "$build_deps_pid" || build_deps_status=$?
+				build_deps_done=1
+			fi
+		fi
+		if [ -z "$src_done" ]; then
+			if kill -0 "$src_pid" 2>/dev/null; then
+				pending+=("source")
+			else
+				wait "$src_pid" || src_status=$?
+				src_done=1
+			fi
+		fi
+		[ "${#pending[@]}" -eq 0 ] && break
+		spin_i=$(( (spin_i + 1) % 4 ))
+		local joined; joined=$(IFS=,; echo "${pending[*]}")
+		printf '\r%s: waiting on %s %s (%ds)  ' "$name" "$joined" "${spin:$spin_i:1}" "$((SECONDS - start_ts))" >&2
+		sleep 0.2
+	done
+	printf '\r%*s\r' 70 '' >&2
 
 	[ -s "$deps_log" ] && cat "$deps_log" >&2
 	[ -s "$build_deps_log" ] && cat "$build_deps_log" >&2

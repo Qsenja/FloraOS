@@ -238,6 +238,38 @@ only) real user of `fau build`.
   and `libglvnd` are needed in both `PKG_BUILD_DEPS` (scenefx links them)
   and `PKG_DEPENDS` (mango's own `ldd` shows them as direct runtime deps
   via the bundled `scenefx.so`); `glslang` is build-only.
+- **scenefx's own `.pc` file needs the same absolute-path rewrite alpm-fetched
+  packages get, but `recipe_build` builds it directly instead of going
+  through `alpm_sandbox_fetch`, so nothing did that rewrite for it.**
+  scenefx's `meson setup --prefix=/usr` bakes `prefix=/usr` into the `.pc` it
+  generates; installing it with `DESTDIR="$sandbox_dir"` relocates the files
+  but not that baked-in string, so `scenefx.pc`'s `includedir` still resolves
+  to the real host's `/usr/include`. `PKG_CONFIG_PATH` already points mango's
+  `meson setup` at the sandbox's `pkgconfig` dir, so it finds the `.pc` file
+  and configures successfully — the failure only shows up one step later, at
+  `ninja` compile time, as `fatal error:
+  scenefx/render/fx_renderer/fx_renderer.h: No such file or directory`,
+  which reads like a missing dependency rather than a wrong path. Fixed by
+  pulling the `.pc`-rewrite loop out of `alpm_sandbox_fetch` into its own
+  `alpm_rewrite_pc_paths <dest> <dir>` (`lib/alpm.sh`). **First version of
+  this fix regressed the build it was meant to fix**: it called
+  `alpm_rewrite_pc_paths "$sandbox_dir" "$sandbox_dir"` straight after
+  `DESTDIR="$sandbox_dir" ninja install`, which re-scans *every* `.pc` file
+  already in the sandbox — including the ones `alpm_sandbox_fetch` already
+  rewrote while fetching `PKG_BUILD_DEPS` (e.g. `wayland-protocols.pc`'s
+  `pkgdatadir` already pointing at `$sandbox_dir/usr/share/wayland-protocols`).
+  Since that value still matches `key=/absolute/path`, the rewrite fired a
+  second time and prepended `$sandbox_dir` again, producing a doubled path
+  (`/tmp/tmp.XXX/tmp/tmp.XXX/usr/...`) that then failed mango's own
+  `meson.build` with `ERROR: File //tmp/tmp.XXX/tmp/tmp.XXX/us...` — found by
+  actually running `fau install mangowm` after the first fix, not by
+  inspection. Fixed for real by installing scenefx with
+  `DESTDIR="$scenefx_stage"` (its own fresh `mktemp -d`, touched by nothing
+  else), rewriting only *that* directory's `.pc` file, then merging the
+  already-correct result into `$sandbox_dir` with `cp -a` — same
+  extract-then-rewrite-then-merge shape `alpm_sandbox_fetch` itself already
+  uses per-package, just applied to a locally-built package instead of an
+  alpm-fetched one.
 - **`xorg-xwayland`** is a genuine runtime dependency that never shows up
   in `ldd`: mango links wlroots' xwayland support
   (`wlr_xwayland_create`, confirmed directly in `src/mango.c`), which

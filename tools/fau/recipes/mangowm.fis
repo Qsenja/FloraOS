@@ -11,19 +11,33 @@ recipe_build() {
 	local src=$1 app_dir=$2 sandbox_dir=$3
 	local jobs; jobs=$(nproc)
 
-	local scenefx_tarball scenefx_src scenefx_build
+	local scenefx_tarball scenefx_src scenefx_build scenefx_stage
 	scenefx_tarball=$(build_fetch_source \
 		"https://github.com/wlrfx/scenefx/archive/refs/tags/0.4.1.tar.gz" \
 		"fa23f6ff509168d4a5eb0c5a7ef3b8cf3d39e3fba18320c28256e6c91c85d9ff")
 	scenefx_src=$(build_extract_source scenefx "$scenefx_tarball")
 	scenefx_build=$(mktemp -d)
+	scenefx_stage=$(mktemp -d)
 	(
 		cd "$scenefx_src"
 		meson setup --prefix=/usr --buildtype=release "$scenefx_build" "$scenefx_src"
 		ninja -C "$scenefx_build" -j"$jobs"
-		DESTDIR="$sandbox_dir" ninja -C "$scenefx_build" install
+		DESTDIR="$scenefx_stage" ninja -C "$scenefx_build" install
 	)
 	rm -rf "$scenefx_build"
+	# scenefx's own meson setup bakes in prefix=/usr, but it's actually installed
+	# under $sandbox_dir -- without this, scenefx.pc's Cflags points at the real
+	# host's /usr/include (no scenefx headers there), and mango's build fails with
+	# "fatal error: scenefx/render/fx_renderer/fx_renderer.h" even though
+	# pkg-config found the .pc file fine via PKG_CONFIG_PATH. See fau.md. Rewritten
+	# in a fresh staging dir, not straight in $sandbox_dir, and merged in after --
+	# rewriting in place would re-match .pc files alpm_sandbox_fetch already
+	# rewrote for the alpm-fetched build deps (e.g. wayland-protocols.pc's
+	# pkgdatadir already points at $sandbox_dir/usr/share/...), doubling the
+	# sandbox prefix on those instead of leaving them alone.
+	alpm_rewrite_pc_paths "$sandbox_dir" "$scenefx_stage"
+	cp -a "$scenefx_stage/." "$sandbox_dir/"
+	rm -rf "$scenefx_stage"
 
 	local mango_build; mango_build=$(mktemp -d)
 	(

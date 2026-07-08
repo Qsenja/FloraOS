@@ -605,6 +605,36 @@ app_install_one_alpm() {
 	esac
 }
 
+# Real Arch .pc files (and any locally-built package's own DESTDIR-installed
+# .pc files, e.g. mangowm.fis's scenefx step) assume they're installed at the
+# real /, so a variable derived from "prefix=/usr" (e.g. wayland-scanner.pc's
+# own "wayland_scanner=${bindir}/wayland-scanner") resolves to the literal
+# host path "/usr/bin/wayland-scanner" -- which doesn't exist on FloraOS at
+# all, only this sandbox's own relocated copy does. Found on a real FloraOS
+# boot, not in this dev sandbox: this machine happens to already have the
+# real wayland package installed, which masked the bug entirely until tested
+# somewhere that doesn't (confirmed for real with bwrap hiding the real
+# wayland-scanner). Rewrites ANY "key=/absolute/path" variable assignment
+# line, not just prefix=/exec_prefix= -- some real .pc files hardcode other
+# variables as literal absolute paths instead of deriving them from ${prefix}
+# at all (elogind.pc's own "includedir=/usr/include/elogind"/"libdir=/usr/lib",
+# found the same way: scenefx's own build failed with "cc1: error:
+# /usr/include/elogind: No such file or directory" the first time prefix-only
+# rewriting was tried). Only matches "key=..." lines (pkgconfig's own KEY:
+# metadata lines -- Cflags:, Libs:, Requires: -- use a colon, untouched here),
+# and only lines starting with the variable name at column 1, so a
+# commented-out "# includedir=/usr/include" line is correctly left alone.
+# Doesn't catch an absolute path hardcoded directly inside a Cflags:/Libs:
+# line rather than via a variable -- a smaller, disclosed gap, same class as
+# mango's own /etc/mango/config.conf one -- not fixed here.
+alpm_rewrite_pc_paths() {
+	local dest=$1 dir=$2
+	local f
+	while IFS= read -r -d '' f; do
+		sed -E -i "s#^([A-Za-z_][A-Za-z0-9_]*)=/#\1=${dest}/#" "$f"
+	done < <(find "$dir" -name '*.pc' -type f -print0)
+}
+
 # Resolves PKG_BUILD_DEPS' alpm closure with usr/include KEPT into <dest-dir>, flat, for fau-build. See fau.md.
 alpm_sandbox_fetch() {
 	local dest=$1; shift
@@ -674,33 +704,8 @@ alpm_sandbox_fetch() {
 					;;
 			esac
 		done < <(find "$extract_dir" -type f -print0)
-		# Real Arch .pc files assume they're installed at the real /, so
-		# a variable derived from "prefix=/usr" (e.g. wayland-scanner.pc's
-		# own "wayland_scanner=${bindir}/wayland-scanner") resolves to the
-		# literal host path "/usr/bin/wayland-scanner" -- which doesn't
-		# exist on FloraOS at all, only this sandbox's own relocated copy
-		# does. Found on a real FloraOS boot, not in this dev sandbox: this
-		# machine happens to already have the real wayland package
-		# installed, which masked the bug entirely until tested somewhere
-		# that doesn't (confirmed for real with bwrap hiding the real
-		# wayland-scanner). Rewrites ANY "key=/absolute/path" variable
-		# assignment line, not just prefix=/exec_prefix= -- some real .pc
-		# files hardcode other variables as literal absolute paths instead
-		# of deriving them from ${prefix} at all (elogind.pc's own
-		# "includedir=/usr/include/elogind"/"libdir=/usr/lib", found the
-		# same way: scenefx's own build failed with "cc1: error:
-		# /usr/include/elogind: No such file or directory" the first time
-		# prefix-only rewriting was tried). Only matches "key=..." lines
-		# (pkgconfig's own KEY: metadata lines -- Cflags:, Libs:,
-		# Requires: -- use a colon, untouched here), and only lines
-		# starting with the variable name at column 1, so a commented-out
-		# "# includedir=/usr/include" line is correctly left alone. Doesn't
-		# catch an absolute path hardcoded directly inside a Cflags:/Libs:
-		# line rather than via a variable -- a smaller, disclosed gap, same
-		# class as mango's own /etc/mango/config.conf one -- not fixed here.
-		while IFS= read -r -d '' f; do
-			sed -E -i "s#^([A-Za-z_][A-Za-z0-9_]*)=/#\1=${dest}/#" "$f"
-		done < <(find "$extract_dir" -name '*.pc' -type f -print0)
+		# See alpm_rewrite_pc_paths below for why this runs.
+		alpm_rewrite_pc_paths "$dest" "$extract_dir"
 		cp -a "$extract_dir/." "$dest"
 		rm -rf "$extract_dir"
 	done
