@@ -94,6 +94,42 @@ pkgbuild_func_body() {
 	' || true
 }
 
+# translate_pkgpaths: rewrites $pkgdir/$srcdir references (real PKGBUILD
+# vocabulary) to $app_dir/$src (a .fis recipe_build's own vocabulary) in the
+# build()/package() reference text shown in the draft -- cosmetic (this text
+# is a comment, never executed), but makes the shown reference read directly
+# in terms of the isolated-app paths a human needs to translate it INTO,
+# instead of leaving that substitution as one more manual step every single
+# time. $pkgdir and $app_dir are the same concept (package staging root);
+# $srcdir and $src are the same concept (extracted source dir).
+translate_pkgpaths() {
+	sed -E 's/\$\{pkgdir\}/$app_dir/g; s/\$pkgdir\b/$app_dir/g; s/\$\{srcdir\}/$src/g; s/\$srcdir\b/$src/g'
+}
+
+# has_etc_install: true if build()/package() installs anything under etc/ --
+# a config file, going by real-world PKGBUILD convention. Not precise (a
+# plain string check, not a path parser -- same "heuristic, not a parser"
+# tradeoff as pkgbuild_scalar/pkgbuild_array), but reliable enough to trigger
+# a warning that's cheap to read and skip if it doesn't apply.
+has_etc_install() {
+	printf '%s\n' "$1" | grep -qE '(pkgdir\}?/etc/|"/etc/|[[:space:]]/etc/)'
+}
+
+# uses_external_build_system: true if build()/package() hands off to
+# meson/cmake, which install their OWN declared files (including configs)
+# with NO explicit install command ever appearing in the PKGBUILD text at
+# all -- mango's own real AUR PKGBUILD is exactly this: package() is just
+# `DESTDIR="$pkgdir" ninja -C build install`, and its /etc/mango/config.conf
+# install is declared entirely inside meson.build's own install_data(),
+# invisible to has_etc_install's PKGBUILD-text-only scan. Found for real
+# testing this tool against mangowm itself: has_etc_install correctly found
+# nothing (there IS nothing to find at the PKGBUILD level), which would
+# have silently looked like "no config install, nothing to worry about"
+# without this separate, broader check.
+uses_external_build_system() {
+	printf '%s\n' "$1" | grep -qE '\b(meson|cmake|ninja)\b'
+}
+
 pkgver=$(pkgbuild_scalar "$pkgbuild" pkgver)
 pkgrel=$(pkgbuild_scalar "$pkgbuild" pkgrel)
 pkgname_var=$(pkgbuild_scalar "$pkgbuild" pkgname)
@@ -103,6 +139,24 @@ mapfile -t declared_sha256s < <(pkgbuild_array "$pkgbuild" sha256sums)
 
 dynamic_version=""
 grep -qE '^pkgver\(\)' <<< "$pkgbuild" && dynamic_version=1
+
+# Real lesson from a real recipe (fau-recipes/recipes/mangowm.fis): a
+# package's own build()/package() installing a config file under etc/ does
+# NOT mean an isolated app will actually find it there at runtime. mango's
+# own binary checks $HOME/.config/mango/config.conf FIRST and only falls
+# back to the compiled-in /etc/mango/config.conf if that's missing --
+# app_wrapper_write sets HOME to the app's own isolated dir, so the SYSTEM
+# fallback path (which nothing ever isolates) silently never gets found,
+# while the primary lookup was just never populated. Found on a real `mango`
+# run ("Failed to open config file: /etc/mango/config.conf" despite the file
+# existing right there under the app's own etc/), not by inspection -- flag
+# it here so every future recipe doesn't have to hit the same thing once.
+etc_install_build=""; etc_install_package=""
+has_etc_install "$(pkgbuild_func_body "$pkgbuild" build)" && etc_install_build=1
+has_etc_install "$(pkgbuild_func_body "$pkgbuild" package)" && etc_install_package=1
+external_build_system=""
+{ uses_external_build_system "$(pkgbuild_func_body "$pkgbuild" build)" || uses_external_build_system "$(pkgbuild_func_body "$pkgbuild" package)"; } \
+	&& external_build_system=1
 
 # --- Resolve the first source= entry's $var interpolations, best-effort ---
 
@@ -224,6 +278,29 @@ declared_sha256=""
 		[ "${#makedepends_unresolved[@]}" -gt 0 ] && echo "#   makedepends: ${makedepends_unresolved[*]}"
 		echo "#"
 	fi
+	if [ -n "$etc_install_build" ] || [ -n "$etc_install_package" ]; then
+		echo "# TODO: installs something under etc/ (a config file, going by build()/package()"
+		echo "# below) -- check whether the built binary actually reads its config from there, or"
+		echo "# from a \$HOME-based path FIRST (many apps check \$HOME/.config/<name>/... before ever"
+		echo "# falling back to /etc/<name>/...). fau's own app_wrapper_write gives each isolated app"
+		echo "# a private \$HOME, but nothing ever populates a real system-wide /etc/<name>/... for it"
+		echo "# to fall back to -- if the binary checks \$HOME first, recipe_build needs to ALSO copy"
+		echo "# the default config to \$app_dir/.config/<name>/... (or wherever it actually checks --"
+		echo "# read the source, don't guess). See fau-recipes/recipes/mangowm.fis's own real fix for"
+		echo "# exactly this case."
+		echo "#"
+	fi
+	if [ -n "$external_build_system" ]; then
+		echo "# TODO: build()/package() hands off to meson/cmake/ninja -- those install their OWN"
+		echo "# declared files (very much including config files: mango's own real"
+		echo "# /etc/mango/config.conf is installed entirely by meson.build's install_data(), with"
+		echo "# NO explicit install command anywhere in its actual PKGBUILD for this tool to catch)."
+		echo "# The etc/ check above can only ever see what's literally written in THIS PKGBUILD text"
+		echo "# -- it found nothing here for exactly that reason, not because there's nothing to find."
+		echo "# If you have (or fetch) the real source, grep its own meson.build/CMakeLists.txt for"
+		echo "# install_data/install(FILES to see what actually gets installed where."
+		echo "#"
+	fi
 	echo "PKG_SRC_URL=\"${src_url_resolved:-TODO-fill-in}\""
 	echo "PKG_SRC_SHA256=\"${computed_sha256:-TODO-could-not-verify-see-download-status-above}\""
 	echo "PKG_VERSION=\"${pkgver:-TODO}${pkgrel:+-$pkgrel}\""
@@ -232,15 +309,29 @@ declared_sha256=""
 	echo "PKG_BUILD_DEPS=\"$(join_csv "${makedepends_resolved[@]}")\""
 	echo "PKG_BIN=\"TODO-e.g.-usr/bin/$aur_name\""
 	echo
-	echo "# --- original PKGBUILD build()/package(), for reference only -- NOT auto-translated: ---"
-	pkgbuild_func_body "$pkgbuild" build | sed 's/^/# build: /'
-	pkgbuild_func_body "$pkgbuild" package | sed 's/^/# package: /'
+	echo "# --- original PKGBUILD build()/package(), for reference only -- NOT auto-translated."
+	echo "# \$pkgdir/\$srcdir already rewritten to \$app_dir/\$src below (a .fis recipe_build's own"
+	echo "# vocabulary for the exact same two paths) so this reads directly in those terms: ---"
+	pkgbuild_func_body "$pkgbuild" build | translate_pkgpaths | sed 's/^/# build: /'
+	pkgbuild_func_body "$pkgbuild" package | translate_pkgpaths | sed 's/^/# package: /'
 	echo
 	echo "recipe_build() {"
 	echo "	local src=\$1 app_dir=\$2 sandbox_dir=\$3"
 	echo "	# TODO: translate the PKGBUILD build()/package() steps above into this function."
 	echo "	# A .fis's recipe_build installs straight into \$app_dir (no fakeroot, no \$pkgdir --"
 	echo "	# see fau-recipes/recipes/mangowm.fis for a real worked example: meson + DESTDIR)."
+	if [ -n "$etc_install_build" ] || [ -n "$etc_install_package" ]; then
+		echo "	# TODO: also verify the \$HOME-based config path question flagged above before"
+		echo "	# considering this done -- an etc/ install alone does not mean the isolated app will"
+		echo "	# ever find it at runtime. See fau-recipes/recipes/mangowm.fis."
+	fi
+	if [ -n "$external_build_system" ]; then
+		echo "	# TODO: this builds via meson/cmake/ninja -- check ITS OWN install_data/install(FILES"
+		echo "	# for config files it installs that this PKGBUILD-only scan can't see (mango's own"
+		echo "	# config.conf is exactly this). If one exists, copy it to \$app_dir/.config/<name>/..."
+		echo "	# (or wherever the binary actually checks) the same way mangowm.fis does, after the"
+		echo "	# main DESTDIR install below."
+	fi
 	echo "	die \"TODO: recipe_build for $aur_name is not written yet -- see the PKGBUILD comment above\""
 	echo "}"
 }
