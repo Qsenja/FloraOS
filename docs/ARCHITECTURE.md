@@ -362,6 +362,31 @@ to `uname -r` of whatever machine runs it -- the build host's kernel, not
 FloraOS's. Runs cross-root the same way `ldconfig -r` does just before it: a
 plain userspace indexing tool over files, no actual module loading involved.
 
+**libinput silently hangs forever on the virtual ACPI "Power Button" device
+(`LNXPWRBN`)**, found running `mango` (a wlroots-based compositor) for real:
+the compositor's own startup log (`mango -d`) runs cleanly all the way through
+DRM backend init, EGL, GBM allocator, and even scenefx's renderer ("FX
+RENDERER: Shaders Initialized Successfully"), then stops dead at
+`[backend/libinput/backend.c] Starting libinput backend` -- no crash, no
+further output, process stays alive indefinitely. `/proc/<pid>/stack` on the
+live process showed it blocked in the kernel's `evdev_read`, and
+`/proc/bus/input/devices` identified the specific device as `event0`, `N:
+Name="Power Button"` -- not the real keyboard (`event1`) or mouse (`event2`).
+`udevadm info -q property -n /dev/input/event0` confirmed udev tags it
+`ID_INPUT_KEY=1` (correct, standard behavior -- it does have `KEY_POWER`, and
+every machine, real or QEMU, exposes this exact device), so libinput picks it
+up and tries to manage it like any other keyboard, but its own device-add
+sync blocks forever on this specific device rather than returning. No
+compositor ever needs raw power-button events through libinput anyway --
+that's normally handled by a separate ACPI listener -- so the fix is to keep
+libinput from ever touching it in the first place, via `LIBINPUT_IGNORE_DEVICE`
+(confirmed via `strings` on the real alpm-fetched `libinput.so.10`, sitting
+right next to `ID_INPUT_KEY`/`ID_INPUT_KEYBOARD` -- libinput's own documented
+udev property for excluding a device outright), added as a local override
+rule (`etc/udev/rules.d/71-libinput-ignore-power-button.rules`,
+`scripts/apply-skeleton.sh`) scoped to `ATTRS{name}=="Power Button"` so only
+that device is excluded.
+
 root's `/etc/shadow` entry ships with an intentionally empty password field
 (traditional Unix for "no password required"), documented in `/etc/issue` so
 a first-time user sees it before being asked for credentials -- appropriate

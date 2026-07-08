@@ -153,6 +153,27 @@ depend() {
 EOF
 chmod 755 "$ROOTFS/etc/init.d/udevd"
 
+# libinput tries to manage every device udev tags ID_INPUT_KEY, including the
+# virtual ACPI "Power Button" device (LNXPWRBN) every machine (real or QEMU)
+# exposes -- udev tagging it that way is correct/standard (it does have
+# KEY_POWER), but libinput's own device-add sync for it blocks forever on a
+# real mango run: confirmed via /proc/<pid>/stack showing evdev_read, and
+# /proc/bus/input/devices identifying event0 as exactly this device -- no
+# further compositor startup ever happens, no output gets committed, nothing
+# renders, yet the process never crashes so it looks like a silent freeze.
+# Every desktop environment routes power-button handling through a separate
+# ACPI listener, never through libinput/the compositor, so this device was
+# never meant to be here in the first place. Fixed via LIBINPUT_IGNORE_DEVICE
+# (confirmed via `strings` on the real alpm-fetched libinput.so.10, sitting
+# right next to ID_INPUT_KEY/ID_INPUT_KEYBOARD -- libinput's own documented
+# udev property for excluding a device outright). Scoped to ATTRS{name} so
+# only the power button is excluded -- the real keyboard/mouse devices are
+# untouched.
+mkdir -p "$ROOTFS/etc/udev/rules.d"
+cat > "$ROOTFS/etc/udev/rules.d/71-libinput-ignore-power-button.rules" <<'EOF'
+SUBSYSTEM=="input", ATTRS{name}=="Power Button", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+EOF
+
 cat > "$ROOTFS/etc/init.d/floraseat" <<'EOF'
 #!/usr/bin/openrc-run
 description="Seat management daemon (floraseat, seatd-protocol-compatible)"
