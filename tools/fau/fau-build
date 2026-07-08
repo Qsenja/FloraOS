@@ -195,9 +195,13 @@ cmd_build_list() {
 cmd_recipes_update() {
 	[ $# -eq 0 ] || die "recipes-update takes no arguments"
 	[ -n "${FAU_RECIPES_REPO:-}" ] || die "FAU_RECIPES_REPO is explicitly empty -- recipe syncing is disabled"
-	recipes_sync || die "fetching recipes from $FAU_RECIPES_REPO failed (see warning above)"
-	local n; n=$(find "$FAU_RECIPES_REMOTE_DIR" -maxdepth 1 -name '*.fis' 2>/dev/null | wc -l)
-	log "synced $n recipe(s) from $FAU_RECIPES_REPO"
+	recipes_sync || die "fetching the recipes index from $FAU_RECIPES_REPO failed (see warning above)"
+	# Only the index itself is fetched eagerly -- individual .fis files are
+	# lazy, one at a time, on first actual use (see lib/recipes.sh) -- so
+	# report the index's own count, not how many .fis happen to be cached
+	# locally yet (which would misleadingly read 0 right after a sync).
+	local n; n=$(wc -l < "$FAU_RECIPES_REMOTE_DIR/recipes.db" 2>/dev/null || echo 0)
+	log "synced the recipes index from $FAU_RECIPES_REPO: $n recipe(s) available"
 }
 
 cmd=${1:-}; [ $# -ge 1 ] && shift
