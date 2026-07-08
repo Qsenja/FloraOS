@@ -666,6 +666,24 @@ isolation.
     override, and `EGL_EXT_platform_base` reappears in the extensions list
     once `__EGL_VENDOR_LIBRARY_DIRS` points at a copy of the vendor JSON,
     even with the real path still masked.
+  - **mesa's own `libgbm.so` backend loader** has a THIRD, separate
+    hardcoded search path (`$libdir/gbm`, i.e. `/usr/lib/gbm`) for
+    dlopen'ing its actual backend (`dri_gbm.so`, confirmed via
+    `pacman -Ql mesa`: merges correctly into
+    `$app_dir/usr/lib/gbm/dri_gbm.so`) — one library deeper than the
+    `__EGL_VENDOR_LIBRARY_DIRS` fix above, same bug class again. Symptom,
+    confirmed byte-for-byte against a real `mango` run via a live
+    screenshot (not guessed): `fx_renderer.c:282] Could not initialize EGL
+    object file: No such file or directory (search paths /usr/lib/gbm,
+    suffix _gbm)` — the `__EGL_VENDOR_LIBRARY_DIRS` fix gets glvnd to find
+    mesa's EGL driver, which then fails one step further in trying to load
+    its GBM backend. Fixed via `GBM_BACKENDS_PATH` (mesa's own documented
+    override, `src/gbm/main/backend.c`). Verified for real with `bwrap`
+    masking the real `/usr/lib/gbm` path first: `eglinfo -p gbm` fails with
+    the exact same "search paths /usr/lib/gbm, suffix _gbm" text without
+    the override, and succeeds end-to-end (full EGL/GL context creation)
+    once `GBM_BACKENDS_PATH` points at a copy of the backend `.so`, even
+    with the real path still masked.
 
 ## The alpm (Arch/Artix repo) fallback — `lib/alpm.sh` — no `pacman` binary, ever
 

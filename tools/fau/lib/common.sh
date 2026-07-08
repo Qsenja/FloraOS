@@ -147,6 +147,27 @@ app_wrapper_write() {
 	# Found via the "glvnd/egl_vendor.d" marker directory -- only ever
 	# fires for an app that actually bundles mesa/libglvnd.
 	local egl_vendor_dir; egl_vendor_dir=$(find "$app_dir" -type d -path '*/glvnd/egl_vendor.d' 2>/dev/null | head -n1)
+	# GBM_BACKENDS_PATH: even with libEGL correctly finding mesa via the
+	# __EGL_VENDOR_LIBRARY_DIRS fix above, mesa's own libgbm.so has a THIRD,
+	# separate hardcoded search path of its own -- defaults to
+	# "$libdir/gbm" -- for dlopen'ing its actual backend (`dri_gbm.so`,
+	# confirmed via `pacman -Ql mesa`: lands at
+	# $app_dir/usr/lib/gbm/dri_gbm.so, alpm-fetched same as everything
+	# else). Symptom, one step further than the glvnd fix: mango's
+	# fx_renderer.c:282 "Could not initialize EGL object file: No such
+	# file or directory (search paths /usr/lib/gbm, suffix _gbm)" --
+	# confirmed as an exact byte-for-byte match against a real mango run,
+	# not just a plausible guess. Same bug class as XKB_CONFIG_ROOT and
+	# __EGL_VENDOR_LIBRARY_DIRS above, one library deeper in the same EGL
+	# init chain each time. Fixed via GBM_BACKENDS_PATH (mesa's own
+	# documented override, src/gbm/main/backend.c). Verified for real with
+	# bwrap masking the real /usr/lib/gbm path first: eglinfo -p gbm fails
+	# with the exact same "search paths /usr/lib/gbm, suffix _gbm" text
+	# without the override, and succeeds end-to-end (full EGL/GL context
+	# creation) once GBM_BACKENDS_PATH points at a copy of the backend .so,
+	# even with the real path still masked.
+	local gbm_backends_dir; gbm_backends_dir=$(find "$app_dir" -type f -name '*_gbm.so' 2>/dev/null | head -n1)
+	[ -n "$gbm_backends_dir" ] && gbm_backends_dir=$(dirname "$gbm_backends_dir")
 	cat > "$wrapper" <<-EOF
 	#!/bin/sh
 	export HOME="$app_dir"
@@ -159,6 +180,7 @@ app_wrapper_write() {
 	${perl5lib:+export PERL5LIB="$perl5lib\${PERL5LIB:+:\$PERL5LIB}"}
 	${xkb_config_root:+export XKB_CONFIG_ROOT="$xkb_config_root"}
 	${egl_vendor_dir:+export __EGL_VENDOR_LIBRARY_DIRS="$egl_vendor_dir"}
+	${gbm_backends_dir:+export GBM_BACKENDS_PATH="$gbm_backends_dir"}
 	exec "$app_dir/$relbin" "\$@"
 	EOF
 	chmod 755 "$wrapper"
