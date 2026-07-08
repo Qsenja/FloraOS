@@ -168,6 +168,36 @@ app_wrapper_write() {
 	# even with the real path still masked.
 	local gbm_backends_dir; gbm_backends_dir=$(find "$app_dir" -type f -name '*_gbm.so' 2>/dev/null | head -n1)
 	[ -n "$gbm_backends_dir" ] && gbm_backends_dir=$(dirname "$gbm_backends_dir")
+	# WLR_XWAYLAND: wlroots' own Xwayland integration checks a hardcoded
+	# absolute "/usr/bin/Xwayland" rather than searching PATH, even though
+	# PATH is already set to include $app_dir/usr/bin above -- xorg-xwayland
+	# (already in mango's PKG_DEPENDS) merges its real binary in at
+	# $app_dir/usr/bin/Xwayland fine (confirmed via `pacman -Ql
+	# xorg-xwayland`), wlroots just never looks there. Symptom, confirmed
+	# against a real mango run: "[xwayland/server.c:472] Cannot find
+	# Xwayland binary '/usr/bin/Xwayland'" -- non-fatal (mango continues
+	# without X11 app support) but still a real isolation gap, same class
+	# as every other fix in this function. Fixed via WLR_XWAYLAND, wlroots'
+	# own documented override (see wlroots' docs/env_vars.md) -- exists
+	# specifically so a caller can swap in an alternate Xwayland without a
+	# global system change, which is exactly this situation.
+	local wlr_xwayland; wlr_xwayland=$(find "$app_dir" -type f -path '*/bin/Xwayland' 2>/dev/null | head -n1)
+	# LIBINPUT_QUIRKS_DIR: libinput's own device-quirks loader is hardcoded
+	# to /usr/share/libinput -- libinput (already in mango's PKG_DEPENDS)
+	# merges its real quirks files in at
+	# $app_dir/usr/share/libinput/*.quirks fine (confirmed via `pacman -Ql
+	# libinput`), libinput just never looks there. Symptom, confirmed
+	# against a real mango run: "libinput error: /usr/share/libinput:
+	# failed to find data files" -- non-fatal (libinput continues with
+	# degraded device behavior) but same isolation gap as everything else
+	# here. Fixed via LIBINPUT_QUIRKS_DIR -- not documented in any man
+	# page, but confirmed directly via `strings` on the real alpm-fetched
+	# libinput.so.10: the literal string sits right next to
+	# "../libinput/src/quirks.c" and the "/usr/share/libinput" default,
+	# unambiguously the env var backing this exact lookup (same standard
+	# of evidence used for XKB_CONFIG_ROOT above).
+	local libinput_quirks_dir; libinput_quirks_dir=$(find "$app_dir" -type f -name '*.quirks' -path '*/libinput/*' 2>/dev/null | head -n1)
+	[ -n "$libinput_quirks_dir" ] && libinput_quirks_dir=$(dirname "$libinput_quirks_dir")
 	cat > "$wrapper" <<-EOF
 	#!/bin/sh
 	export HOME="$app_dir"
@@ -181,6 +211,8 @@ app_wrapper_write() {
 	${xkb_config_root:+export XKB_CONFIG_ROOT="$xkb_config_root"}
 	${egl_vendor_dir:+export __EGL_VENDOR_LIBRARY_DIRS="$egl_vendor_dir"}
 	${gbm_backends_dir:+export GBM_BACKENDS_PATH="$gbm_backends_dir"}
+	${wlr_xwayland:+export WLR_XWAYLAND="$wlr_xwayland"}
+	${libinput_quirks_dir:+export LIBINPUT_QUIRKS_DIR="$libinput_quirks_dir"}
 	exec "$app_dir/$relbin" "\$@"
 	EOF
 	chmod 755 "$wrapper"

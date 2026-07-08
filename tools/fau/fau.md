@@ -684,6 +684,50 @@ isolation.
     the override, and succeeds end-to-end (full EGL/GL context creation)
     once `GBM_BACKENDS_PATH` points at a copy of the backend `.so`, even
     with the real path still masked.
+  - **wlroots' own Xwayland integration** checks a hardcoded absolute
+    `/usr/bin/Xwayland` rather than searching `PATH` (which already
+    includes `$app_dir/usr/bin`) — `xorg-xwayland` (already in mango's
+    `PKG_DEPENDS`) merges its real binary in at
+    `$app_dir/usr/bin/Xwayland` fine (confirmed via `pacman -Ql
+    xorg-xwayland`), wlroots just never looks there. Symptom, confirmed
+    against a real `mango` run (over a working serial console, once the
+    interactive graphical session hit the seat-freeze below):
+    `[xwayland/server.c:472] Cannot find Xwayland binary
+    "/usr/bin/Xwayland"` — non-fatal, mango continues without X11 app
+    support, but still a real isolation gap. Fixed via `WLR_XWAYLAND`,
+    wlroots' own documented override (`docs/env_vars.md`) — exists
+    specifically so a caller can swap in an alternate Xwayland without a
+    global system change, which is exactly this situation.
+  - **libinput's own device-quirks loader** is hardcoded to
+    `/usr/share/libinput` — `libinput` (already in mango's `PKG_DEPENDS`)
+    merges its real quirks files in at
+    `$app_dir/usr/share/libinput/*.quirks` fine (confirmed via `pacman -Ql
+    libinput`), libinput just never looks there. Symptom, confirmed
+    against the same real `mango` run: `libinput error:
+    /usr/share/libinput: failed to find data files` — non-fatal (degraded
+    device behavior, not a crash), same isolation gap as everything else
+    here. Fixed via `LIBINPUT_QUIRKS_DIR` — not documented in any man
+    page, but confirmed directly via `strings` on the real alpm-fetched
+    `libinput.so.10`: the literal env var name sits right next to
+    `../libinput/src/quirks.c` and the `/usr/share/libinput` default,
+    unambiguously the same lookup (same standard of evidence used for
+    `XKB_CONFIG_ROOT` above — a synthetic CLI-based `bwrap` check wasn't
+    possible this time, `libinput-tools` isn't installed and installing it
+    needs a root password this session doesn't have, so this one is
+    pending the next real `mango` run for final confirmation instead).
+  - **The actual freeze that motivated finding these two**: once EGL/GBM
+    init succeeded (the three fixes above), `mango` stopped crashing but
+    the interactive graphical QEMU session it ran in still hung completely
+    — no display update, no response to input, not even VT-switch
+    (`Ctrl+Alt+F2`) getting through. Root cause not yet found; what's
+    confirmed so far is that it's a real hang, not a crash (the process
+    stays alive in `ps`), and that it survives past both the Xwayland and
+    libinput errors above (both non-fatal, logged and continued past) with
+    nothing further printed to `mango.log` afterward — so whatever it's
+    stuck on happens after libinput's error and produces no further log
+    output at all. Reproducing it needs a real VT (a serial-only session
+    never seizes a seat the same way), so the normal `bwrap` methodology
+    doesn't apply here directly.
 
 ## The alpm (Arch/Artix repo) fallback — `lib/alpm.sh` — no `pacman` binary, ever
 
