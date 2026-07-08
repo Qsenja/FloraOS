@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# aur-to-fis -- scaffolds a DRAFT .fis recipe from a real AUR package, for a
+# human to review and finish, never to be used unreviewed. See aur-to-fis.md
+# for why this can only ever be a draft generator, not a real converter:
+# PKGBUILD is arbitrary, unvetted, AUR-submitted bash, so this NEVER sources
+# or executes one -- only fetches it as plain text (AUR's RPC API + cgit raw
+# file endpoint, both read-only HTTP) and best-effort greps/parses known
+# field shapes out of it.
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+FAU_LIB_DIR="$SELF_DIR/../fau/lib"
+# lib/common.sh's own default (FAU_ROOT=/) assumes a real FloraOS install and
+# needs root to write /var/cache/fau -- wrong default for a maintainer running
+# this by hand on their own dev machine. Override before sourcing it, but
+# only if the caller hasn't already set FAU_ROOT themselves.
+export FAU_ROOT="${FAU_ROOT:-$HOME/.cache/aur-to-fis}"
+# shellcheck source=../fau/lib/common.sh
+source "$FAU_LIB_DIR/common.sh"
+# shellcheck source=../fau/lib/alpm.sh
+source "$FAU_LIB_DIR/alpm.sh"
+
+warn() { echo "aur-to-fis: warning: $*" >&2; }
+
+[ $# -eq 1 ] || die "usage: aur-to-fis <aur-pkgname>  (writes the draft .fis to stdout, notes/warnings to stderr)"
+pkgname_arg=$1
+
+# --- AUR RPC v5: package metadata (JSON, read-only) -------------------------
+
+json_unescape() { sed -E 's/\\u003e/>/g; s/\\u003c/</g; s/\\u0026/\&/g; s/\\\//\//g'; }
+
+json_str() {
+	# json_str <json> <key> -- first "key":"value" match, unescaped.
+	printf '%s' "$1" | grep -oP "\"$2\":\"[^\"]*\"" | head -n1 \
+		| sed -E "s/^\"$2\":\"//; s/\"\$//" | json_unescape
+}
+
+json_arr() {
+	# json_arr <json> <key> -- each "a","b" element of a "key":[...] array, one per line.
+	printf '%s' "$1" | grep -oP "\"$2\":\[[^]]*\]" | head -n1 \
+		| grep -oP '"[^"]*"' | tail -n +2 | sed -E 's/^"//; s/"$//' | json_unescape
+}
+
+log "fetching AUR metadata for $pkgname_arg..."
+aur_json=$(curl -sL --fail "https://aur.archlinux.org/rpc/v5/info?arg[]=$pkgname_arg") \
+	|| die "fetching AUR RPC info for '$pkgname_arg' failed (network?)"
+[ "$(printf '%s' "$aur_json" | grep -oP '"resultcount":\K[0-9]+')" != "0" ] \
+	|| die "'$pkgname_arg' isn't an AUR package (AUR RPC returned 0 results) -- check the exact name at https://aur.archlinux.org/packages/$pkgname_arg"
+
+aur_name=$(json_str "$aur_json" Name)
+aur_desc=$(json_str "$aur_json" Description)
+aur_url=$(json_str "$aur_json" URL)
+mapfile -t aur_depends < <(json_arr "$aur_json" Depends)
+mapfile -t aur_makedepends < <(json_arr "$aur_json" MakeDepends)
+
+# --- The real PKGBUILD, as plain text -- NEVER sourced/executed ------------
+
+log "fetching PKGBUILD for $aur_name (read-only, not executed)..."
+pkgbuild=$(curl -sL --fail "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$aur_name") \
+	|| die "fetching the PKGBUILD for '$aur_name' failed"
+
+# pkgbuild_scalar/pkgbuild_array: best-effort plain-text extraction of known
+# PKGBUILD field shapes -- a heuristic over real-world PKGBUILD conventions
+# (top-level, column-1 `key=value`/`key=(...)`), not a bash parser. Fine for
+# a draft a human reviews; wrong for a deliberately obfuscated PKGBUILD, same
+# tradeoff this whole tool makes everywhere by design.
+pkgbuild_scalar() {
+	local key=$2
+	printf '%s\n' "$1" | grep -E "^${key}=" | head -n1 \
+		| sed -E "s/^${key}=//; s/^[\"']//; s/[\"']\$//" || true
+}
+pkgbuild_array() {
+	local key=$2
+	printf '%s\n' "$1" | awk -v key="$key" '
+		$0 ~ "^" key "=\\(" { inarr=1 }
+		inarr { print }
+		inarr && /\)/ { exit }
+	' | grep -oE "'[^']*'|\"[^\"]*\"" | sed -E "s/^['\"]//; s/['\"]\$//" || true
+}
+pkgbuild_func_body() {
+	local key=$2
+	printf '%s\n' "$1" | awk -v key="$key" '
+		$0 ~ "^" key "\\(\\)" { infn=1; next }
+		infn && /^}/ { exit }
+		infn { print }
+	' || true
+}
+
+pkgver=$(pkgbuild_scalar "$pkgbuild" pkgver)
+pkgrel=$(pkgbuild_scalar "$pkgbuild" pkgrel)
+pkgname_var=$(pkgbuild_scalar "$pkgbuild" pkgname)
+underscore_pkgname=$(pkgbuild_scalar "$pkgbuild" _pkgname)
+mapfile -t sources < <(pkgbuild_array "$pkgbuild" source)
+declared_sha256=$(pkgbuild_array "$pkgbuild" sha256sums | head -n1)
+
+dynamic_version=""
+grep -qE '^pkgver\(\)' <<< "$pkgbuild" && dynamic_version=1
+
+# --- Resolve the first source= entry's $var interpolations, best-effort ---
+
+resolve_vars() {
+	local s=$1; shift
+	local pair name val
+	for pair in "$@"; do
+		[ -n "$pair" ] || continue
+		name=${pair%%=*}; val=${pair#*=}
+		[ -n "$val" ] || continue
+		s=$(printf '%s' "$s" | sed -E "s/\\\$\{${name}\}/${val}/g; s/\\\$${name}([^a-zA-Z0-9_]|\$)/${val}\\1/g")
+	done
+	printf '%s' "$s"
+}
+
+src_url_resolved="" src_url_status="ok"
+if [ "${#sources[@]}" -eq 0 ]; then
+	src_url_status="no source= array found"
+elif [ "${#sources[@]}" -gt 1 ]; then
+	src_url_status="multiple source= entries (${#sources[@]}) -- only the first was considered, review the rest by hand"
+fi
+if [ "${#sources[@]}" -ge 1 ]; then
+	first_source=${sources[0]#*::}   # AUR's "filename::url" form -- drop any filename:: prefix
+	first_source=$(resolve_vars "$first_source" \
+		"pkgname=${pkgname_var:-$aur_name}" "_pkgname=$underscore_pkgname" "pkgver=$pkgver" "pkgrel=$pkgrel")
+	case "$first_source" in
+		*'${'*|*'$('*|*'`'*)
+			src_url_status="source URL still has an unresolved \${...}/\$(...) expression after substitution -- resolve by hand: $first_source" ;;
+		http*) src_url_resolved=$first_source ;;
+		*) src_url_status="resolved source doesn't look like a URL: $first_source" ;;
+	esac
+fi
+
+# --- Compute a REAL sha256 by actually downloading -- never trust the ------
+# --- PKGBUILD's own (declared, unverified-by-us) checksum -------------------
+
+computed_sha256="" download_status="not attempted"
+if [ -n "$src_url_resolved" ]; then
+	log "downloading $src_url_resolved to compute its real sha256 (this is the only network side effect that touches the actual package source)..."
+	tmp=$(mktemp)
+	if curl -sL --fail -o "$tmp" "$src_url_resolved" 2>/dev/null; then
+		computed_sha256=$(sha256sum "$tmp" | cut -d' ' -f1)
+		download_status="downloaded OK, sha256 computed directly from the bytes fetched"
+	else
+		download_status="download failed -- verify the resolved URL by hand"
+	fi
+	rm -f "$tmp"
+else
+	download_status="skipped -- no resolved URL (see above)"
+fi
+
+# --- Dependency names: strip version operators, then check each one --------
+# --- against fau's OWN alpm resolution (same repos fau install/build use) --
+
+classify_deps() {
+	local -n _out_resolved=$1 _out_unresolved=$2; shift 2
+	local spec name op ver
+	for spec in "$@"; do
+		[ -n "$spec" ] || continue
+		IFS="$ALPM_FS" read -r name op ver <<< "$(alpm_dep_parse "$spec")"
+		if alpm_find_provider "$name" "" "" >/dev/null 2>&1; then
+			_out_resolved+=("$name")
+		else
+			_out_unresolved+=("$name")
+		fi
+	done
+}
+
+log "checking each AUR dependency against fau's own alpm resolution (this actually queries the real Arch/Artix repo indexes)..."
+depends_resolved=() depends_unresolved=()
+classify_deps depends_resolved depends_unresolved "${aur_depends[@]}"
+makedepends_resolved=() makedepends_unresolved=()
+classify_deps makedepends_resolved makedepends_unresolved "${aur_makedepends[@]}"
+
+join_csv() { local IFS=,; echo "$*"; }
+
+# --- Emit the draft ----------------------------------------------------------
+
+{
+	echo "# $aur_name: $aur_desc"
+	echo "# DRAFT generated by tools/aur-to-fis from https://aur.archlinux.org/packages/$aur_name -- REVIEW EVERY LINE BEFORE USE."
+	echo "# Nothing from the real PKGBUILD was executed to produce this file -- only fetched as plain text and pattern-matched."
+	[ -n "$dynamic_version" ] && echo "# WARNING: PKGBUILD defines pkgver() -- version is computed dynamically upstream; the pkgver below is only whatever HEAD happened to be when this draft was generated, re-check it."
+	echo "#"
+	echo "# source= status: $src_url_status"
+	echo "# download status: $download_status"
+	[ -n "$declared_sha256" ] && echo "# PKGBUILD's own declared sha256sums[0] (NOT what PKG_SRC_SHA256 below uses -- cross-check, don't trust blindly): $declared_sha256"
+	echo "#"
+	if [ "${#depends_unresolved[@]}" -gt 0 ] || [ "${#makedepends_unresolved[@]}" -gt 0 ]; then
+		echo "# TODO: these AUR dependencies did NOT resolve via fau's own alpm lookup (likely AUR-only"
+		echo "# themselves, or a name mismatch) -- each needs either a real Arch/Artix package name"
+		echo "# substituted in by hand, or its own fetch+build inside recipe_build below, the same way"
+		echo "# fau-recipes/recipes/mangowm.fis handles its own scenefx dependency:"
+		[ "${#depends_unresolved[@]}" -gt 0 ] && echo "#   depends:     ${depends_unresolved[*]}"
+		[ "${#makedepends_unresolved[@]}" -gt 0 ] && echo "#   makedepends: ${makedepends_unresolved[*]}"
+		echo "#"
+	fi
+	echo "PKG_SRC_URL=\"${src_url_resolved:-TODO-fill-in}\""
+	echo "PKG_SRC_SHA256=\"${computed_sha256:-TODO-could-not-verify-see-download-status-above}\""
+	echo "PKG_VERSION=\"${pkgver:-TODO}${pkgrel:+-$pkgrel}\""
+	echo "PKG_DESCRIPTION=\"$aur_desc\""
+	echo "PKG_DEPENDS=\"$(join_csv "${depends_resolved[@]}")\""
+	echo "PKG_BUILD_DEPS=\"$(join_csv "${makedepends_resolved[@]}")\""
+	echo "PKG_BIN=\"TODO-e.g.-usr/bin/$aur_name\""
+	echo
+	echo "# --- original PKGBUILD build()/package(), for reference only -- NOT auto-translated: ---"
+	pkgbuild_func_body "$pkgbuild" build | sed 's/^/# build: /'
+	pkgbuild_func_body "$pkgbuild" package | sed 's/^/# package: /'
+	echo
+	echo "recipe_build() {"
+	echo "	local src=\$1 app_dir=\$2 sandbox_dir=\$3"
+	echo "	# TODO: translate the PKGBUILD build()/package() steps above into this function."
+	echo "	# A .fis's recipe_build installs straight into \$app_dir (no fakeroot, no \$pkgdir --"
+	echo "	# see fau-recipes/recipes/mangowm.fis for a real worked example: meson + DESTDIR)."
+	echo "	die \"TODO: recipe_build for $aur_name is not written yet -- see the PKGBUILD comment above\""
+	echo "}"
+}
+
+log "draft complete for $aur_name -- this is a STARTING POINT, not a finished recipe. Review PKG_SRC_URL/PKG_SRC_SHA256, the unresolved-dependency TODOs, and write a real recipe_build() before this goes anywhere near fau-recipes/recipes/."
