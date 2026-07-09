@@ -108,6 +108,7 @@ app_install_one() {
 			app_wrapper_write "$name" "$app_dir" "$relbin"
 		done
 	fi
+	app_desktop_merge "$app_dir"
 
 	json_set "$FAU_APPS_JSON" "$name" "$version"
 	if [ -n "$existing" ]; then
@@ -144,6 +145,15 @@ cmd_remove() {
 				relbin=$(echo "$relbin" | xargs)
 				[ -z "$relbin" ] && continue
 				rm -f "$FAU_APPS_BIN_DIR/$(basename "$relbin")"
+			done
+		fi
+		# Mirrors app_desktop_merge (lib/common.sh): remove whatever this
+		# app's own .desktop files put into the shared FAU_APPS_DIR/.data
+		# tree, by the same source list, before app_dir itself is gone.
+		if [ -d "$app_dir/usr/share/applications" ]; then
+			for f in "$app_dir/usr/share/applications"/*.desktop; do
+				[ -f "$f" ] || continue
+				rm -f "${FAU_APPS_DIR%/}/.data/applications/$(basename "$f")"
 			done
 		fi
 		rm -rf "$app_dir"

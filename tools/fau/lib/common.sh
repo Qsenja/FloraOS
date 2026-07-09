@@ -214,6 +214,17 @@ app_wrapper_write() {
 	# see docs/ARCHITECTURE.md for where that directory's actual contents
 	# come from).
 	local fontconfig_file; fontconfig_file=$(find "$app_dir" -type f -path '*/etc/fonts/fonts.conf' 2>/dev/null | head -n1)
+	# XDG_DATA_DIRS: every isolated app's own XDG_DATA_HOME is its private
+	# $app_dir/data -- fine for that app's own state, but it means no app
+	# can ever see another app's .desktop entries, icons, etc. (each app is
+	# its own island, same root cause as everything above). Set
+	# unconditionally, not just when this app happens to have its own data
+	# to contribute: a launcher like rofi needs this on ITS OWN wrapper to
+	# find *other* apps' entries, merged in by app_desktop_merge below.
+	# FAU_APPS_DIR/.data mirrors the existing FAU_APPS_BIN_DIR/.bin
+	# convention (see fau.md) -- one shared, XDG-shaped tree instead of yet
+	# another bespoke isolated-app workaround.
+	local shared_data_dir="${FAU_APPS_DIR%/}/.data"
 	cat > "$wrapper" <<-EOF
 	#!/bin/sh
 	export HOME="$app_dir"
@@ -221,6 +232,7 @@ app_wrapper_write() {
 	export XDG_CACHE_HOME="$app_dir/cache"
 	export XDG_DATA_HOME="$app_dir/data"
 	export XDG_STATE_HOME="$app_dir/logs"
+	export XDG_DATA_DIRS="$shared_data_dir:/usr/local/share:/usr/share"
 	export LD_LIBRARY_PATH="$app_libdir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 	export PATH="$app_dir/usr/bin:$app_dir/bin\${PATH:+:\$PATH}"
 	${perl5lib:+export PERL5LIB="$perl5lib\${PERL5LIB:+:\$PERL5LIB}"}
@@ -233,4 +245,29 @@ app_wrapper_write() {
 	exec "$app_dir/$relbin" "\$@"
 	EOF
 	chmod 755 "$wrapper"
+}
+
+# Merges an app's own .desktop entries into the shared XDG_DATA_DIRS tree
+# (FAU_APPS_DIR/.data/applications) so launchers like rofi can actually find
+# them -- same reasoning and same shared-collection pattern as
+# app_wrapper_write's own PATH merge into FAU_APPS_BIN_DIR. Confirmed on a
+# real rofi run: kitty's own kitty.desktop merges fine into its own
+# isolated $app_dir/usr/share/applications/, but rofi's -show drun only
+# ever scans XDG_DATA_DIRS/XDG_DATA_HOME, so it saw nothing without this.
+# Exec= lines reference the app's own bundled binary name/path, which
+# doesn't exist outside $app_dir -- rewritten to the actual PATH-visible
+# wrapper app_wrapper_write itself already generates, so launching from
+# rofi executes the same isolated app a shell's `kitty` would.
+app_desktop_merge() {
+	local app_dir=$1
+	local src_dir="$app_dir/usr/share/applications"
+	[ -d "$src_dir" ] || return 0
+	local dest_dir="${FAU_APPS_DIR%/}/.data/applications"
+	mkdir -p "$dest_dir"
+	local f base
+	for f in "$src_dir"/*.desktop; do
+		[ -f "$f" ] || continue
+		base=$(basename "$f")
+		sed -E "s|^Exec=([^ ]*/)?([^ ]+)|Exec=$FAU_APPS_BIN_DIR/\\2|" "$f" > "$dest_dir/$base"
+	done
 }

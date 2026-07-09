@@ -719,15 +719,37 @@ isolation.
     init succeeded (the three fixes above), `mango` stopped crashing but
     the interactive graphical QEMU session it ran in still hung completely
     — no display update, no response to input, not even VT-switch
-    (`Ctrl+Alt+F2`) getting through. Root cause not yet found; what's
-    confirmed so far is that it's a real hang, not a crash (the process
-    stays alive in `ps`), and that it survives past both the Xwayland and
-    libinput errors above (both non-fatal, logged and continued past) with
-    nothing further printed to `mango.log` afterward — so whatever it's
-    stuck on happens after libinput's error and produces no further log
-    output at all. Reproducing it needs a real VT (a serial-only session
-    never seizes a seat the same way), so the normal `bwrap` methodology
-    doesn't apply here directly.
+    (`Ctrl+Alt+F2`) getting through. Root cause found and fixed —
+    `floraseat` (`tools/floraseat/floraseat.c`) opened every device fd
+    (DRM, evdev, hidraw) without `O_NONBLOCK`, so libinput's device-add
+    sync did a plain `read()` that genuinely blocked forever on whatever
+    device it enumerated first. See docs/ARCHITECTURE.md for the full
+    diagnosis (`/proc/<pid>/stack`, `/proc/bus/input/devices`) and fix.
+  - **`rofi -show drun` listed no apps at all.** Same isolation gap as
+    everything above, one layer further out: each isolated app's own
+    `usr/share/applications/*.desktop` (if it ships one at all — `foot`'s
+    real alpm package ships none, confirmed via `pacman -Ql foot`; `kitty`
+    does) merges into that app's own `$app_dir` fine, but `XDG_DATA_HOME`
+    is set to that same private `$app_dir/data` per app (by design, for
+    isolation) — no app can ever see *another* app's `.desktop` entries,
+    so a launcher has nothing to scan regardless of its own config. Fixed
+    via `app_desktop_merge` (`lib/common.sh`), called right after
+    `app_wrapper_write` from both `fau-install` and
+    `app_install_one_alpm` (`lib/alpm.sh`): copies an app's own
+    `.desktop` files into a new shared, XDG-shaped tree
+    (`FAU_APPS_DIR/.data/applications`, mirroring the existing
+    `FAU_APPS_BIN_DIR`/`.bin` convention exactly), rewriting each
+    `Exec=` line's command token to the real `FAU_APPS_BIN_DIR` wrapper
+    (verified against both `Exec=kitty` and `Exec=/usr/bin/kitty --flag
+    %U`-style lines — trailing arguments preserved, leading path
+    stripped) so launching from `rofi` actually runs the same isolated
+    binary a shell's own `kitty` would. Every app's own wrapper now also
+    exports `XDG_DATA_DIRS` including that shared tree unconditionally
+    (not just apps that happen to ship their own `.desktop` file) — a
+    launcher like `rofi` needs it on *its own* wrapper to find everyone
+    else's entries, not just its own. `fau remove` mirrors the merge in
+    reverse, deleting the same basenames from the shared tree before the
+    app's own directory (the merge's source list) is gone.
 
 ## The alpm (Arch/Artix repo) fallback — `lib/alpm.sh` — no `pacman` binary, ever
 

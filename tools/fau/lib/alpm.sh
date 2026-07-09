@@ -632,6 +632,7 @@ app_install_one_alpm() {
 	for relbin in $target_files; do
 		app_wrapper_write "$name" "$app_dir" "$relbin"
 	done
+	app_desktop_merge "$app_dir"
 
 	# Without a recorded bin=, `fau remove` can't find this app's wrapper scripts -- see fau.md.
 	{
