@@ -50,7 +50,16 @@ recipe_build() {
 		--enable DRM_BOCHS \
 		--module DRM_AMDGPU \
 		--module DRM_NOUVEAU \
-		--enable BTRFS_FS
+		--enable BTRFS_FS \
+		--disable PCMCIA \
+		--module SND_HDA_INTEL
+	# PCMCIA: dead laptop card bus, nothing built after the mid-2000s has one --
+	# checked the actual generated .config for real prunable bloat rather than
+	# guessed, most of defconfig's other legacy protocol/hardware options were
+	# already off. SND_HDA_INTEL: unlike DRM_BOCHS/DRM_SIMPLEDRM above, audio
+	# isn't needed before userspace is up, so it doesn't need to be built in --
+	# eudev's real --enable-kmod (not the DRM case's deliberate no-autoload)
+	# loads it via modalias the same as any other PCI device driver module.
 	make -C "$src" ARCH=x86_64 olddefconfig >/dev/null
 
 	log "linux-lts: building (this is the longest single step, -j$jobs)"

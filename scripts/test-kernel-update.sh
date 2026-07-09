@@ -32,7 +32,16 @@ log "creating scratch disk image ($DISK_SIZE) at $DISK_IMG"
 rm -f "$DISK_IMG"
 qemu-img create -f raw "$DISK_IMG" "$DISK_SIZE" >/dev/null
 
-NET_ARGS=(-netdev user,id=net0 -device virtio-net-pci,netdev=net0)
+
+# ipv6=off: cdn.kernel.org resolves an IPv6 address (Fastly) alongside its
+# IPv4 one -- slirp's usermode networking doesn't proxy IPv6 by default, and
+# a guest that tries the AAAA record first (confirmed: `getent ahosts` lists
+# it before the A record) can fail instead of falling back cleanly. Real
+# hardware/production installs have a real NIC and don't hit this; it's a
+# test-harness-only quirk, not a FloraOS bug -- two back-to-back runs failed
+# at the exact same fetch (cdn.kernel.org, right after 90 other successful
+# HTTP fetches over the same connection) before this was found.
+NET_ARGS=(-netdev user,id=net0,ipv6=off -device virtio-net-pci,netdev=net0)
 SMP_ARGS=(-smp 10)
 
 login_and_wait_shell() {
@@ -175,6 +184,11 @@ if login_and_wait_shell; then
 	if qemu_run_ok "fau bootstrap-build linux-lts" 18000; then
 		log "fau bootstrap-build linux-lts reported success"
 	else
+		# Three prior runs all failed at the exact same fetch (the kernel
+		# tarball, right after ~90 successful alpm fetches) with just
+		# "failed" -- not enough to diagnose from. Get the real curl error
+		# and disk state directly instead of guessing again.
+		qemu_run 'df -h /var/cache/fau; curl -v --max-time 20 -o /dev/null https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.38.tar.xz' 30 || true
 		fail "fau bootstrap-build linux-lts did not report success"
 	fi
 
