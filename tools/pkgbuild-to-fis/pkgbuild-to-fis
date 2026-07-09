@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# aur-to-fis -- scaffolds a DRAFT .fis recipe from a real AUR package, for a
-# human to review and finish, never to be used unreviewed. See aur-to-fis.md
-# for why this can only ever be a draft generator, not a real converter, and
-# for when/how recipe_build() below can come out fully written instead of a
-# stub.
+# pkgbuild-to-fis -- scaffolds a DRAFT .fis recipe from a real PKGBUILD (an
+# AUR package by name, or any PKGBUILD by local file/URL), for a human to
+# review and finish, never to be used unreviewed. See pkgbuild-to-fis.md for
+# why this can only ever be a draft generator, not a real converter, and for
+# when/how recipe_build() below can come out fully written instead of a stub.
+#
+# Renamed from aur-to-fis: the AUR RPC lookup was never the interesting part
+# of this tool -- everything downstream (checksum verification, dependency
+# resolution, recipe_build translation) works from plain PKGBUILD text, AUR
+# or not. --file/--url make that real: any PKGBUILD, not just one already on
+# AUR (a private one, or one from Arch's own official-repo tree), can be
+# scaffolded the same way. See docs/TODO.md's entry this closes.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -12,53 +19,133 @@ FAU_LIB_DIR="$SELF_DIR/../fau/lib"
 # needs root to write /var/cache/fau -- wrong default for a maintainer running
 # this by hand on their own dev machine. Override before sourcing it, but
 # only if the caller hasn't already set FAU_ROOT themselves.
-export FAU_ROOT="${FAU_ROOT:-$HOME/.cache/aur-to-fis}"
+export FAU_ROOT="${FAU_ROOT:-$HOME/.cache/pkgbuild-to-fis}"
 # shellcheck source=../fau/lib/common.sh
 source "$FAU_LIB_DIR/common.sh"
 # shellcheck source=../fau/lib/alpm.sh
 source "$FAU_LIB_DIR/alpm.sh"
 
-warn() { echo "aur-to-fis: warning: $*" >&2; }
+warn() { echo "pkgbuild-to-fis: warning: $*" >&2; }
 
-[ $# -eq 1 ] || die "usage: aur-to-fis <aur-pkgname>  (writes the draft .fis to stdout, notes/warnings to stderr)"
-pkgname_arg=$1
+usage="usage: pkgbuild-to-fis <aur-pkgname>          (fetch by name from AUR)
+       pkgbuild-to-fis --file <path>          (read a local PKGBUILD directly)
+       pkgbuild-to-fis --url <url>            (fetch a PKGBUILD from any URL)
+Writes the draft .fis to stdout, notes/warnings to stderr."
 
-# FloraOS only ever targets x86_64 -- see aur-to-fis.md.
+mode="aur"; pkgname_arg=""; pkgbuild_file=""; pkgbuild_url=""
+case "${1:-}" in
+	--file) [ $# -eq 2 ] || die "$usage"; mode="file"; pkgbuild_file=$2 ;;
+	--url) [ $# -eq 2 ] || die "$usage"; mode="url"; pkgbuild_url=$2 ;;
+	""|--*) die "$usage" ;;
+	*) [ $# -eq 1 ] || die "$usage"; pkgname_arg=$1 ;;
+esac
+
+# FloraOS only ever targets x86_64 -- see pkgbuild-to-fis.md.
 FLORAOS_ARCH="x86_64"
 
-# --- AUR RPC v5: package metadata (JSON, read-only) -------------------------
-
-json_unescape() { sed -E 's/\\u003e/>/g; s/\\u003c/</g; s/\\u0026/\&/g; s/\\\//\//g'; }
-
-json_str() {
-	# json_str <json> <key> -- first "key":"value" match, unescaped.
-	printf '%s' "$1" | grep -oP "\"$2\":\"[^\"]*\"" | head -n1 \
-		| sed -E "s/^\"$2\":\"//; s/\"\$//" | json_unescape
+# strip_trailing_comment <line> -- truncates at the first '#' that isn't
+# inside a '...'/"..." string (tracks quote state char-by-char; a '#' is
+# only ever a comment starter outside both). Used for a line like
+# `depends=('foo'  # why)`, not just a whole-line comment.
+strip_trailing_comment() {
+	local s=$1 i=0 c n=${#1} in_squote=0 in_dquote=0
+	while [ "$i" -lt "$n" ]; do
+		c=${s:$i:1}
+		if [ "$in_squote" -eq 1 ]; then
+			[ "$c" = "'" ] && in_squote=0
+		elif [ "$in_dquote" -eq 1 ]; then
+			if [ "$c" = '\' ]; then i=$((i + 1))
+			elif [ "$c" = '"' ]; then in_dquote=0
+			fi
+		else
+			case "$c" in
+				"'") in_squote=1 ;;
+				'"') in_dquote=1 ;;
+				'#')
+					local kept="${s:0:$i}"
+					printf '%s' "${kept%"${kept##*[![:space:]]}"}"
+					return 0
+					;;
+			esac
+		fi
+		i=$((i + 1))
+	done
+	printf '%s' "$s"
 }
 
-json_arr() {
-	# json_arr <json> <key> -- each "a","b" element of a "key":[...] array, one per line.
-	printf '%s' "$1" | grep -oP "\"$2\":\[[^]]*\]" | head -n1 \
-		| grep -oP '"[^"]*"' | tail -n +2 | sed -E 's/^"//; s/"$//' | json_unescape
+# Strips comments from a PKGBUILD before anything else sees it -- neither
+# the field extraction below nor the "for reference" copy echoed into the
+# draft should carry the original author's comments, whole-line or
+# trailing. A heredoc body is left untouched: a line starting with (or
+# containing) # inside one is literal DATA (e.g. a shebang in a script
+# being installed via `install -Dm755 /dev/stdin ... <<'EOF'`), never a
+# real shell comment, regardless of whether the delimiter itself was quoted.
+strip_pkgbuild_comments() {
+	local text=$1
+	local line in_heredoc="" heredoc_delim=""
+	local -a out=()
+	while IFS= read -r line; do
+		if [ -n "$in_heredoc" ]; then
+			out+=("$line")
+			[ "$line" = "$heredoc_delim" ] && in_heredoc=""
+			continue
+		fi
+		if [[ "$line" =~ \<\<-?[[:space:]]*[\'\"]?([A-Za-z_][A-Za-z0-9_]*)[\'\"]?[[:space:]]*$ ]]; then
+			heredoc_delim=${BASH_REMATCH[1]}
+			in_heredoc=1
+			out+=("$line")
+			continue
+		fi
+		[[ "$line" =~ ^[[:space:]]*# ]] && continue
+		out+=("$(strip_trailing_comment "$line")")
+	done <<< "$text"
+	printf '%s\n' "${out[@]}"
 }
-
-log "fetching AUR metadata for $pkgname_arg..."
-aur_json=$(curl -sL --fail "https://aur.archlinux.org/rpc/v5/info?arg[]=$pkgname_arg") \
-	|| die "fetching AUR RPC info for '$pkgname_arg' failed (network?)"
-[ "$(printf '%s' "$aur_json" | grep -oP '"resultcount":\K[0-9]+')" != "0" ] \
-	|| die "'$pkgname_arg' isn't an AUR package (AUR RPC returned 0 results) -- check the exact name at https://aur.archlinux.org/packages/$pkgname_arg"
-
-aur_name=$(json_str "$aur_json" Name)
-aur_desc=$(json_str "$aur_json" Description)
-aur_url=$(json_str "$aur_json" URL)
-mapfile -t aur_depends < <(json_arr "$aur_json" Depends)
-mapfile -t aur_makedepends < <(json_arr "$aur_json" MakeDepends)
 
 # --- The real PKGBUILD, as plain text -- NEVER sourced/executed ------------
 
-log "fetching PKGBUILD for $aur_name (read-only, not executed)..."
-pkgbuild=$(curl -sL --fail "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$aur_name") \
-	|| die "fetching the PKGBUILD for '$aur_name' failed"
+case "$mode" in
+	file)
+		[ -r "$pkgbuild_file" ] || die "can't read PKGBUILD file: $pkgbuild_file"
+		log "reading $pkgbuild_file (read-only, not executed)..."
+		pkgbuild=$(cat "$pkgbuild_file")
+		;;
+	url)
+		log "fetching PKGBUILD from $pkgbuild_url (read-only, not executed)..."
+		pkgbuild=$(curl -sL --fail "$pkgbuild_url") || die "fetching $pkgbuild_url failed"
+		;;
+	aur)
+		# --- AUR RPC v5: package metadata (JSON, read-only) -----------------
+		json_unescape() { sed -E 's/\\u003e/>/g; s/\\u003c/</g; s/\\u0026/\&/g; s/\\\//\//g'; }
+		json_str() {
+			# json_str <json> <key> -- first "key":"value" match, unescaped.
+			printf '%s' "$1" | grep -oP "\"$2\":\"[^\"]*\"" | head -n1 \
+				| sed -E "s/^\"$2\":\"//; s/\"\$//" | json_unescape
+		}
+		json_arr() {
+			# json_arr <json> <key> -- each "a","b" element of a "key":[...] array, one per line.
+			printf '%s' "$1" | grep -oP "\"$2\":\[[^]]*\]" | head -n1 \
+				| grep -oP '"[^"]*"' | tail -n +2 | sed -E 's/^"//; s/"$//' | json_unescape
+		}
+
+		log "fetching AUR metadata for $pkgname_arg..."
+		aur_json=$(curl -sL --fail "https://aur.archlinux.org/rpc/v5/info?arg[]=$pkgname_arg") \
+			|| die "fetching AUR RPC info for '$pkgname_arg' failed (network?)"
+		[ "$(printf '%s' "$aur_json" | grep -oP '"resultcount":\K[0-9]+')" != "0" ] \
+			|| die "'$pkgname_arg' isn't an AUR package (AUR RPC returned 0 results) -- check the exact name at https://aur.archlinux.org/packages/$pkgname_arg, or use --file/--url for a PKGBUILD that isn't on AUR"
+
+		aur_name=$(json_str "$aur_json" Name)
+		aur_desc=$(json_str "$aur_json" Description)
+		aur_url=$(json_str "$aur_json" URL)
+		mapfile -t aur_depends < <(json_arr "$aur_json" Depends)
+		mapfile -t aur_makedepends < <(json_arr "$aur_json" MakeDepends)
+
+		log "fetching PKGBUILD for $aur_name (read-only, not executed)..."
+		pkgbuild=$(curl -sL --fail "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$aur_name") \
+			|| die "fetching the PKGBUILD for '$aur_name' failed"
+		;;
+esac
+pkgbuild=$(strip_pkgbuild_comments "$pkgbuild")
 
 # pkgbuild_scalar/pkgbuild_array: best-effort plain-text extraction of known
 # PKGBUILD field shapes -- a heuristic over real-world PKGBUILD conventions
@@ -93,6 +180,21 @@ pkgbuild_has_func() {
 	printf '%s\n' "$1" | grep -qE "^$2\\(\\)"
 }
 
+# --file/--url mode has no AUR RPC metadata to draw on -- every field AUR's
+# JSON would have given us (name, description, url, depends, makedepends) is
+# also just a top-level PKGBUILD field, extracted the same heuristic way as
+# everything else in this tool. aur_name/aur_desc/... are used by name
+# throughout the rest of the script either way -- this is the only branch
+# point needed, nothing downstream has to know which mode produced them.
+if [ "$mode" != "aur" ]; then
+	aur_name=$(pkgbuild_scalar "$pkgbuild" pkgname)
+	[ -n "$aur_name" ] || die "couldn't find a pkgname= in this PKGBUILD"
+	aur_desc=$(pkgbuild_scalar "$pkgbuild" pkgdesc)
+	aur_url=$(pkgbuild_scalar "$pkgbuild" url)
+	mapfile -t aur_depends < <(pkgbuild_array "$pkgbuild" depends)
+	mapfile -t aur_makedepends < <(pkgbuild_array "$pkgbuild" makedepends)
+fi
+
 # Rewrites $pkgdir/$srcdir (PKGBUILD vocabulary) to $app_dir/$src (.fis
 # vocabulary) -- used both for the shown reference text and for real
 # auto-translated recipe_build() output.
@@ -106,7 +208,7 @@ has_etc_install() {
 
 # True if build()/package() hands off to meson/cmake/ninja, whose OWN
 # install step can install files (config included) with no explicit
-# install command visible in the PKGBUILD text at all -- see aur-to-fis.md.
+# install command visible in the PKGBUILD text at all -- see pkgbuild-to-fis.md.
 uses_external_build_system() {
 	printf '%s\n' "$1" | grep -qE '\b(meson|cmake|ninja)\b'
 }
@@ -117,7 +219,7 @@ pkgname_var=$(pkgbuild_scalar "$pkgbuild" pkgname)
 underscore_pkgname=$(pkgbuild_scalar "$pkgbuild" _pkgname)
 
 # Arch-keyed source_x86_64=/sha256sums_x86_64= arrays are ADDED to the
-# generic ones by real makepkg, not a replacement -- see aur-to-fis.md.
+# generic ones by real makepkg, not a replacement -- see pkgbuild-to-fis.md.
 mapfile -t sources_generic < <(pkgbuild_array "$pkgbuild" source)
 mapfile -t sources_arch < <(pkgbuild_array "$pkgbuild" "source_${FLORAOS_ARCH}")
 mapfile -t sha256_generic < <(pkgbuild_array "$pkgbuild" sha256sums)
@@ -144,7 +246,7 @@ resolve_vars() {
 	for pair in "$@"; do
 		[ -n "$pair" ] || continue
 		name=${pair%%=*}; val=${pair#*=}
-		# ${name%suffix}: shortest-suffix removal (e.g. ${pkgname%-bin}) -- see aur-to-fis.md.
+		# ${name%suffix}: shortest-suffix removal (e.g. ${pkgname%-bin}) -- see pkgbuild-to-fis.md.
 		if [[ "$s" == *'${'"$name"'%'* ]]; then
 			local suffix stripped
 			while [[ "$s" =~ \$\{${name}%([^}]*)\} ]]; do
@@ -163,7 +265,7 @@ resolve_vars() {
 	printf '%s' "$s"
 }
 # Picks up every top-level scalar assignment generically (_subver=, url=,
-# ...), not just the handful named below -- see aur-to-fis.md.
+# ...), not just the handful named below -- see pkgbuild-to-fis.md.
 generic_scalar_bindings=()
 while IFS= read -r line; do
 	if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=\( ]]; then
@@ -185,7 +287,7 @@ classify_source_entry() {
 }
 
 # --- Pick the one real source= entry that's the package's actual payload ---
-# See aur-to-fis.md for why this prefers an arch-specific http(s) entry.
+# See pkgbuild-to-fis.md for why this prefers an arch-specific http(s) entry.
 
 src_url_resolved="" src_url_status="ok" picked_idx="" candidate="" local_sources=()
 if [ "${#sources[@]}" -eq 0 ]; then
@@ -235,7 +337,7 @@ if [ -n "$src_url_resolved" ]; then
 	if curl -sL --fail -o "$tarball_tmp" "$src_url_resolved" 2>/dev/null; then
 		computed_sha256=$(sha256sum "$tarball_tmp" | cut -d' ' -f1)
 		download_status="downloaded OK, sha256 computed directly from the bytes fetched"
-		# Flat (no wrapping dir) tarball detection -- see aur-to-fis.md.
+		# Flat (no wrapping dir) tarball detection -- see pkgbuild-to-fis.md.
 		case "$src_url_resolved" in
 			*.tar.gz|*.tar.xz|*.tar.bz2|*.tar.zst|*.tgz|*.tar)
 				if [ -n "$(tar -tvf "$tarball_tmp" 2>/dev/null | awk '$1 !~ /^d/ { n=NF; if ($n !~ /\//) print $n }' | head -n1)" ]; then
@@ -281,7 +383,7 @@ declared_sha256=""
 [ -n "$picked_idx" ] && [ "$picked_idx" -lt "${#declared_sha256s[@]}" ] && declared_sha256=${declared_sha256s[$picked_idx]}
 
 # --- Attempt a REAL recipe_build(), not just a stub -------------------------
-# See aur-to-fis.md for the whitelist this relies on and why a bare `cd` is
+# See pkgbuild-to-fis.md for the whitelist this relies on and why a bare `cd` is
 # deliberately excluded from it.
 
 join_continuations() {
@@ -296,7 +398,7 @@ join_continuations() {
 
 # Basenames of every source= entry that never resolved to an http(s) URL --
 # a reference to one of these anywhere in a function body means that
-# function depends on a file this tool never fetched. See aur-to-fis.md.
+# function depends on a file this tool never fetched. See pkgbuild-to-fis.md.
 local_source_basenames=()
 for s in "${local_sources[@]:-}"; do
 	[ -n "$s" ] || continue
@@ -323,7 +425,9 @@ command_line_is_safe() {
 		|| [[ "$trimmed" =~ ^ln[[:space:]]+-s ]] \
 		|| [[ "$trimmed" =~ ^rm[[:space:]]+-[rf]+[[:space:]] ]] \
 		|| [[ "$trimmed" =~ ^find[[:space:]] ]] \
-		|| [[ "$trimmed" =~ ^sed[[:space:]]+-i[[:space:]] ]]; then
+		|| [[ "$trimmed" =~ ^sed[[:space:]]+-i[[:space:]] ]] \
+		|| [[ "$trimmed" =~ ^cp[[:space:]] ]] \
+		|| [[ "$trimmed" =~ ^chmod[[:space:]] ]]; then
 		[[ "$trimmed" == *'$app_dir'* ]] && return 0
 		return 1
 	fi
@@ -388,8 +492,14 @@ rm -f "$tarball_tmp"
 # --- Emit the draft ----------------------------------------------------------
 
 {
+	source_note=""
+	case "$mode" in
+		aur) source_note="https://aur.archlinux.org/packages/$aur_name" ;;
+		file) source_note="$pkgbuild_file" ;;
+		url) source_note="$pkgbuild_url" ;;
+	esac
 	echo "# $aur_name: $aur_desc"
-	echo "# DRAFT generated by tools/aur-to-fis from https://aur.archlinux.org/packages/$aur_name -- REVIEW EVERY LINE BEFORE USE."
+	echo "# DRAFT generated by tools/pkgbuild-to-fis from $source_note -- REVIEW EVERY LINE BEFORE USE."
 	echo "# Nothing from the real PKGBUILD was executed to produce this file -- only fetched as plain text and pattern-matched."
 	[ -n "$dynamic_version" ] && echo "# WARNING: PKGBUILD defines pkgver() -- version is computed dynamically upstream; the pkgver below is only whatever HEAD happened to be when this draft was generated, re-check it."
 	echo "#"
@@ -469,7 +579,7 @@ rm -f "$tarball_tmp"
 		echo "recipe_build() {"
 		echo "	local src=\$1 app_dir=\$2 sandbox_dir=\$3"
 		echo "	# Auto-translated from PKGBUILD's own prepare()/build()/package() above -- REVIEW"
-		echo "	# BEFORE TRUSTING, same as everything else in this draft. See aur-to-fis.md."
+		echo "	# BEFORE TRUSTING, same as everything else in this draft. See pkgbuild-to-fis.md."
 		if [ -n "$tarball_is_flat" ]; then
 			echo "	local _tarball; _tarball=\$(build_fetch_source \"\$PKG_SRC_URL\" \"\$PKG_SRC_SHA256\")"
 			echo "	src=\$(mktemp -d)"

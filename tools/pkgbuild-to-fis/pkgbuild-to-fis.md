@@ -1,11 +1,48 @@
-# aur-to-fis — implementation notes
+# pkgbuild-to-fis — implementation notes
 
-Design rationale mined from `aur-to-fis`'s own comments. Maintainer-side
+Design rationale mined from `pkgbuild-to-fis`'s own comments. Maintainer-side
 tool only — never shipped in the ISO, never run on a live FloraOS system
 (unlike everything under `tools/fau/`). See
 [../fau/fau.md](../fau/fau.md) for the recipe format this scaffolds, and
 [github.com/Qsenja/fau-recipes](https://github.com/Qsenja/fau-recipes) for
 where a finished recipe actually goes.
+
+## Renamed from aur-to-fis: not just an AUR tool
+
+The AUR RPC lookup was never the interesting part of this tool — every real
+piece of work (checksum verification against actual downloaded bytes,
+dependency resolution against fau's own alpm lookup, `recipe_build`
+translation) works from plain PKGBUILD text, whether or not that PKGBUILD
+happens to live on AUR. `--file <path>` reads a local PKGBUILD directly;
+`--url <url>` fetches one from anywhere over HTTPS — a private PKGBUILD, one
+from Arch's own official-repo tree, or a draft not yet pushed to AUR at all
+now scaffold exactly the same way `<aur-pkgname>` always did. Neither mode
+has AUR's RPC metadata (name/description/url/depends/makedepends) to draw
+on, so those are extracted from the PKGBUILD's own top-level fields instead
+(`pkgname=`/`pkgdesc=`/`url=`/`depends=(...)`/`makedepends=(...)`) — the
+same `pkgbuild_scalar`/`pkgbuild_array` heuristic this tool already uses for
+everything else, not a second code path.
+
+The auto-translation whitelist (see below) also gained `cp` and `chmod` —
+both common in real `-bin` packages' `package()` bodies and no more
+dangerous than `install`, which was already allowed.
+
+## Comments are stripped before anything else sees the PKGBUILD
+
+`strip_pkgbuild_comments` runs on the fetched text before field extraction
+or the "for reference" copy echoed into the draft — the original author's
+comments (whole-line or trailing, e.g. `depends=('foo' 'bar')  # why`)
+never make it into a generated `.fis`. A `#` inside a quoted string
+(`url="https://example.com/page#section"`) is left alone —
+`strip_trailing_comment` tracks single/double-quote state char-by-char and
+only treats an unquoted `#` as a comment starter. A heredoc body (`install
+-Dm755 /dev/stdin "$app_dir/..." <<'EOF' ... EOF`) is passed through
+completely untouched regardless of what's inside it: a `#`-starting line in
+there is literal DATA (often a real shebang), never a shell comment, and
+stripping it would corrupt whatever gets installed. Verified this doesn't
+regress anything: re-ran against `mangowm`, `dwm`, and `downgrade` and
+confirmed `PKG_SRC_URL`/`PKG_SRC_SHA256` still come out byte-identical to
+before this change.
 
 ## Why this can only ever be a draft generator
 
