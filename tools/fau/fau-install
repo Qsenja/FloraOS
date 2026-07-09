@@ -164,15 +164,27 @@ cmd_remove() {
 
 cmd_update() {
 	apps_state_init
-	local -a names=()
+	state_init
+	local -a app_names=() sys_names=()
 	if [ $# -ge 1 ]; then
-		names=("$@")
+		local n
+		for n in "$@"; do
+			if [ -n "$(json_get_version "$FAU_APPS_JSON" "$n")" ]; then
+				app_names+=("$n")
+			elif [ -n "$(system_get_version "$n")" ]; then
+				sys_names+=("$n")
+			else
+				log "$n is not installed (as an app or a system package), skipping"
+			fi
+		done
 	else
-		while IFS= read -r n; do names+=("$n"); done < <(json_list_names "$FAU_APPS_JSON")
+		while IFS= read -r n; do app_names+=("$n"); done < <(json_list_names "$FAU_APPS_JSON")
+		while IFS= read -r n; do sys_names+=("$n"); done < <(system_list_names)
 	fi
-	[ "${#names[@]}" -gt 0 ] || { log "no apps installed, nothing to update"; return 0; }
+	[ "${#app_names[@]}" -gt 0 ] || [ "${#sys_names[@]}" -gt 0 ] \
+		|| { log "nothing installed, nothing to update"; return 0; }
 
-	# Real network refresh, once, up front -- not per-app -- see
+	# Real network refresh, once, up front -- not per-app/package -- see
 	# alpm_refresh_dbs (lib/alpm.sh) for why a cached/local-shortcut db can
 	# never be trusted to answer "is there a newer version" correctly. The
 	# recipes repo gets the same treatment, same reasoning: a recipe-built
@@ -187,7 +199,7 @@ cmd_update() {
 	recipes_sync || true
 
 	local name checked=0 updated=0
-	for name in "${names[@]}"; do
+	for name in "${app_names[@]}"; do
 		local installed; installed=$(json_get_version "$FAU_APPS_JSON" "$name")
 		if [ -z "$installed" ]; then
 			log "$name is not installed, skipping"
@@ -254,7 +266,57 @@ cmd_update() {
 
 		log "$name: not found in the local repo, the configured mirrors, or as a build recipe -- skipping"
 	done
-	log "checked $checked app(s), updated $updated"
+
+	# System packages: only ones bootstrapped via the alpm fallback
+	# (libgcc, fontconfig, dbus, ... -- see build-rootfs.sh) are eligible
+	# here. MANDATORY_ORDER/EXTRA_PACKAGES packages have no newer version
+	# to fetch at runtime at all -- FAU_REPO_DIR doesn't even exist on a
+	# live system, only config/versions.conf plus a full ISO rebuild
+	# produces one -- so re-fetching them via alpm would silently replace
+	# FloraOS's own from-source build with Arch's binary, exactly the bug
+	# fau.md documents as already found and fixed once. source-built-
+	# packages (written by build-rootfs.sh) is how that set is told apart
+	# from the rest of system.json. See fau.md.
+	local -A source_built=()
+	local source_built_list="${FAU_ROOT%/}/etc/fau/source-built-packages"
+	if [ -f "$source_built_list" ]; then
+		local sn
+		while IFS= read -r sn; do [ -n "$sn" ] && source_built[$sn]=1; done < "$source_built_list"
+	fi
+
+	local sys_checked=0 sys_updated=0 sys_pinned=0
+	for name in "${sys_names[@]}"; do
+		local installed; installed=$(system_get_version "$name")
+		if [ -z "$installed" ]; then
+			log "$name is not an installed system package, skipping"
+			continue
+		fi
+		if [ -n "${source_built[$name]:-}" ]; then
+			sys_pinned=$((sys_pinned + 1))
+			log "$name $installed is pinned from source -- rebuild the ISO (config/versions.conf) to update it"
+			continue
+		fi
+		sys_checked=$((sys_checked + 1))
+
+		if [ -n "$have_alpm" ]; then
+			local resolved
+			resolved=$(alpm_resolve "$name" 2>/dev/null) || resolved=""
+			if [ -n "$resolved" ]; then
+				local latest; latest=$(printf '%s' "$resolved" | tail -n1 | cut -d"$ALPM_FS" -f3)
+				if [ -n "$latest" ] && [ "$(alpm_vercmp "$latest" "$installed")" -gt 0 ]; then
+					install_one_alpm "$name"
+					sys_updated=$((sys_updated + 1))
+				else
+					log "$name $installed is up to date"
+				fi
+				continue
+			fi
+		fi
+
+		log "$name: not found on the configured mirrors, skipping"
+	done
+
+	log "checked $checked app(s), updated $updated; checked $sys_checked system package(s) ($sys_pinned pinned from source), updated $sys_updated"
 }
 
 cmd_list() {

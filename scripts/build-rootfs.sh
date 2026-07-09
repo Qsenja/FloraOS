@@ -135,6 +135,15 @@ main() {
 
 	FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap "${BUILD_ORDER[@]}"
 
+	# Read by `fau update` (tools/fau/fau-install) to tell a from-source
+	# MANDATORY_ORDER/EXTRA_PACKAGES package apart from one bootstrapped via
+	# the alpm fallback below (libgcc, fontconfig, dbus, ...) -- the former
+	# has no newer version to fetch at runtime at all (only a rebuild with
+	# a bumped config/versions.conf pin produces one), the latter does. See
+	# tools/fau/fau.md.
+	mkdir -p "$ROOTFS_DIR/etc/fau"
+	printf '%s\n' "${BUILD_ORDER[@]}" > "$ROOTFS_DIR/etc/fau/source-built-packages"
+
 	log "=== staging the kernel image for florainstall (tools/florainstall) ==="
 	# build-iso.sh excludes ./boot from the live image, so florainstall needs
 	# its own copy of the kernel elsewhere to install onto a real disk.

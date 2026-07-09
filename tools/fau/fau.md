@@ -185,6 +185,40 @@ local repo, not resolvable via alpm, no recipe either — is reported and
 skipped, same as an individual rebuild failure: nothing here aborts the
 rest of a multi-package `update` run.
 
+## `fau update` also sweeps base system packages, not just apps
+
+`cmd_update` used to only ever touch `FAU_APPS_JSON`. Extended to also walk
+`FAU_SYSTEM_JSON` (every base package, whether typed explicitly or swept by
+default when no names are given), but **not** with the same logic apps get
+— a naive "check alpm, reinstall if newer" pass over every system package
+would silently replace FloraOS's own from-source `glibc`/`bash`/
+`coreutils`/... with Arch's prebuilt binary the moment Arch ships a
+"newer" version, exactly the bug this file already documents as found and
+fixed once (see the "FloraOS's own compiled glibc got silently overwritten
+by Arch's binary" entry above) — just reached through a new code path
+instead of the old one.
+
+The real distinction isn't visible from `system.json` alone (it only ever
+records `name`/`version`, no provenance), and `repo_lookup_file` can't help
+either: `FAU_REPO_DIR` doesn't exist at all on a live booted system (it's
+build-host-only, gitignored, never shipped into the ISO), so it returns
+empty for every package regardless of how it actually got there.
+`build-rootfs.sh` now writes `etc/fau/source-built-packages` (one name per
+line, exactly `${BUILD_ORDER[@]}`, i.e. `MANDATORY_ORDER` +
+`EXTRA_PACKAGES`) right after the main bootstrap call and before any
+alpm-fallback bootstrap (`libgcc`, `ttf-dejavu`, `fontconfig`, `dbus`) —
+`cmd_update` reads that file and skips anything listed in it, reporting
+"pinned from source, rebuild the ISO to update" instead. Everything else in
+`system.json` (the alpm-fallback packages above, or anything a user later
+runs `fau bootstrap <name>` for themselves) gets the same alpm-resolve/
+`alpm_vercmp`/`install_one_alpm` treatment apps already get.
+
+Verified against the real rootfs this project builds: all 30
+`MANDATORY_ORDER` packages correctly reported as pinned, `libgcc`/
+`ttf-dejavu`/`fontconfig`/`dbus` correctly checked against the mirrors and
+reported up to date, both for the default no-args sweep and for explicit
+`fau update <name>` calls naming a mix of both kinds.
+
 ## `build <name>[=<version>]` — installing a specific version, not just the recipe's pinned default
 
 `PKG_SRC_URL`/`PKG_SRC_SHA256`/`PKG_VERSION` are one fixed triple per
