@@ -11,7 +11,7 @@ SEAT_LOG="/var/log/floraseat.log"
 
 seat_current_vt() {
 	[ -r "$SEAT_ACTIVE_VT_FILE" ] \
-		|| die "can't read $SEAT_ACTIVE_VT_FILE -- is this a real console session (not serial-only)?"
+		|| die "can't read $SEAT_ACTIVE_VT_FILE, is this a real console session (not serial-only)?"
 	local active; active=$(cat "$SEAT_ACTIVE_VT_FILE")
 	printf '%s\n' "${active#tty}"
 }
@@ -21,10 +21,10 @@ cmd_seat_status() {
 	local vt; vt=$(seat_current_vt)
 	echo "active VT: $vt"
 	if [ -r "$SEAT_LOG" ]; then
-		echo "-- last floraseat activity ($SEAT_LOG) --"
+		echo "last floraseat activity ($SEAT_LOG):"
 		tail -n 5 "$SEAT_LOG"
 	else
-		echo "(no $SEAT_LOG yet -- floraseat hasn't logged anything)"
+		echo "(no $SEAT_LOG yet, floraseat hasn't logged anything)"
 	fi
 }
 
@@ -34,10 +34,10 @@ cmd_seat_switch() {
 		''|*[!0-9]*) die "vt-number must be a positive integer, got: $1" ;;
 	esac
 	[ "$1" -ge 1 ] || die "vt-number must be >= 1, got: $1"
-	command -v chvt >/dev/null 2>&1 || die "chvt not found (kbd package) -- can't switch VTs"
+	command -v chvt >/dev/null 2>&1 || die "chvt not found (kbd package), can't switch VTs"
 	local from; from=$(seat_current_vt) || from="?"
-	chvt "$1" || die "chvt $1 failed (need root, and vt$1 must actually exist -- see 'fau seat-status')"
-	log "switched from vt$from to vt$1 -- floraseat disables/enables sessions automatically (see $SEAT_LOG)"
+	chvt "$1" || die "chvt $1 failed (need root, and vt$1 must actually exist, see 'fau seat-status')"
+	log "switched from vt$from to vt$1, floraseat disables/enables sessions automatically (see $SEAT_LOG)"
 }
 
 cmd=${1:-}; [ $# -ge 1 ] && shift
