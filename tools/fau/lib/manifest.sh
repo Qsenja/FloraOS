@@ -23,19 +23,26 @@ json_list_names() {
 		| sed -E 's/^"([^"]+)".*/\1/' || true
 }
 
+# name<TAB>version for every entry in one grep+sed pass -- used internally by
+# json_set/json_unset instead of json_list_names plus one json_get_version
+# (its own grep+sed pair) per name. See fau.md.
+json_pairs() {
+	grep -o '"[^"]*"[[:space:]]*:[[:space:]]*{[[:space:]]*"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null \
+		| sed -E 's/^"([^"]*)"[[:space:]]*:[[:space:]]*\{[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1\t\2/'
+}
+
 json_set() {
 	local file=$1 name=$2 version=$3
 	local tmp; tmp=$(mktemp)
 	{
 		echo '{"packages":{'
-		local first=1
-		for n in $(json_list_names "$file"); do
+		local first=1 n v
+		while IFS=$'\t' read -r n v; do
 			[ "$n" = "$name" ] && continue
-			local v; v=$(json_get_version "$file" "$n")
 			[ $first -eq 1 ] || echo ','
 			first=0
 			printf '"%s":{"version":"%s"}' "$(json_escape "$n")" "$(json_escape "$v")"
-		done
+		done < <(json_pairs "$file")
 		[ $first -eq 1 ] || echo ','
 		printf '"%s":{"version":"%s"}' "$(json_escape "$name")" "$(json_escape "$version")"
 		echo
@@ -49,14 +56,13 @@ json_unset() {
 	local tmp; tmp=$(mktemp)
 	{
 		echo '{"packages":{'
-		local first=1
-		for n in $(json_list_names "$file"); do
+		local first=1 n v
+		while IFS=$'\t' read -r n v; do
 			[ "$n" = "$name" ] && continue
-			local v; v=$(json_get_version "$file" "$n")
 			[ $first -eq 1 ] || echo ','
 			first=0
 			printf '"%s":{"version":"%s"}' "$(json_escape "$n")" "$(json_escape "$v")"
-		done
+		done < <(json_pairs "$file")
 		echo
 		echo '}}'
 	} > "$tmp"

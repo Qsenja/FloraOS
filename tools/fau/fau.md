@@ -681,6 +681,19 @@ Flat schema only: `{"packages":{"name":{"version":"x"}}}`, hand-rolled
 grep/sed parsing (`json_get_version`, `json_set`, ...) — fine at this scale,
 revisit if the schema ever grows past one level.
 
+`json_set`/`json_unset` used to rebuild the file by calling `json_list_names`
+(one grep+sed pass) and then `json_get_version` (another grep+sed pair) once
+per *existing* name — O(n) forks to re-register n-1 untouched entries every
+single call, so registering a full base system's worth of packages was
+O(n^2) forking overall. `json_pairs` parses `name<TAB>version` for every
+entry in one grep+sed pass instead, used internally by both; measured
+building a 30-package registry from scratch (`build-rootfs.sh`'s own
+`MANDATORY_ORDER` is close to this size): 0.949s -> 0.420s. Output verified
+byte-identical against the original across a 30-entry build-up plus removals
+and an overwrite, not just eyeballed. `json_get_version`/`json_list_names`
+themselves are untouched — their many single-lookup call sites elsewhere
+(`fau-install`, `fau-export`, `fau-bootstrap`) were never the O(n^2) part.
+
 **A real bug found in `fau-bootstrap`'s `cmd_bootstrap_apply`**: it used to
 read only the package names out of the manifest via a hand-rolled pass and
 silently drop the version each one was pinned to, so `bootstrap-apply` never
