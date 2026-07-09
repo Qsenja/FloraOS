@@ -1,23 +1,9 @@
 #!/usr/bin/env bash
 # aur-to-fis -- scaffolds a DRAFT .fis recipe from a real AUR package, for a
 # human to review and finish, never to be used unreviewed. See aur-to-fis.md
-# for why this can only ever be a draft generator, not a real converter:
-# PKGBUILD is arbitrary, unvetted, AUR-submitted bash, so this NEVER sources
-# or executes one -- only fetches it as plain text (AUR's RPC API + cgit raw
-# file endpoint, both read-only HTTP) and best-effort greps/parses known
-# field shapes out of it.
-#
-# recipe_build() below CAN come out fully written (no die() stub) when the
-# whole of prepare()/build()/package() is composed of a narrow whitelist of
-# safe, unambiguous file operations (install/mkdir/ln/rm/find-delete/sed,
-# plus a quoted heredoc install) with every $pkgdir/$srcdir/$pkgname/...
-# reference already resolved to a literal value -- still never executing or
-# bash-parsing anything, just recognizing fixed command shapes the same way
-# pkgbuild_scalar/pkgbuild_array already recognize fixed field shapes. Any
-# line outside that whitelist aborts translation for the WHOLE function (a
-# partial, silently-incomplete translation would be worse than an honest
-# stub) and falls back to the original comment+die() behavior, scoped to
-# exactly the function/line that blocked it.
+# for why this can only ever be a draft generator, not a real converter, and
+# for when/how recipe_build() below can come out fully written instead of a
+# stub.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -37,9 +23,7 @@ warn() { echo "aur-to-fis: warning: $*" >&2; }
 [ $# -eq 1 ] || die "usage: aur-to-fis <aur-pkgname>  (writes the draft .fis to stdout, notes/warnings to stderr)"
 pkgname_arg=$1
 
-# FloraOS only ever targets x86_64 (every recipe/build script in this
-# project assumes it) -- used below both for picking the right arch-keyed
-# source/sha256sums array and for resolving a literal ${CARCH} reference.
+# FloraOS only ever targets x86_64 -- see aur-to-fis.md.
 FLORAOS_ARCH="x86_64"
 
 # --- AUR RPC v5: package metadata (JSON, read-only) -------------------------
@@ -88,12 +72,7 @@ pkgbuild_scalar() {
 }
 pkgbuild_array() {
 	local key=$2
-	# Elements don't have to be quoted -- real PKGBUILDs mix both freely
-	# (dwm's own source=() is `dwm.desktop <newline> https://...tar.gz
-	# <newline> config.h)`, no quotes anywhere) -- so after isolating the
-	# key=( ... ) block and stripping its own opening/closing parens, tokenize
-	# on EITHER a quoted string OR a bare whitespace-delimited run, not just
-	# quoted strings.
+	# Elements aren't always quoted -- tokenize on either a quoted string or a bare run.
 	printf '%s\n' "$1" | awk -v key="$key" '
 		$0 ~ "^" key "=\\(" { inarr=1 }
 		inarr { print }
@@ -114,40 +93,20 @@ pkgbuild_has_func() {
 	printf '%s\n' "$1" | grep -qE "^$2\\(\\)"
 }
 
-# translate_pkgpaths: rewrites $pkgdir/$srcdir references (real PKGBUILD
-# vocabulary) to $app_dir/$src (a .fis recipe_build's own vocabulary) in the
-# build()/package() reference text shown in the draft -- cosmetic (this text
-# is a comment, never executed), but makes the shown reference read directly
-# in terms of the isolated-app paths a human needs to translate it INTO,
-# instead of leaving that substitution as one more manual step every single
-# time. $pkgdir and $app_dir are the same concept (package staging root);
-# $srcdir and $src are the same concept (extracted source dir). Reused
-# as-is (not cosmetic anymore) when emitting a real auto-translated
-# recipe_build() below -- the substitution is identical either way.
+# Rewrites $pkgdir/$srcdir (PKGBUILD vocabulary) to $app_dir/$src (.fis
+# vocabulary) -- used both for the shown reference text and for real
+# auto-translated recipe_build() output.
 translate_pkgpaths() {
 	sed -E 's/\$\{pkgdir\}/$app_dir/g; s/\$pkgdir\b/$app_dir/g; s/\$\{srcdir\}/$src/g; s/\$srcdir\b/$src/g'
 }
 
-# has_etc_install: true if build()/package() installs anything under etc/ --
-# a config file, going by real-world PKGBUILD convention. Not precise (a
-# plain string check, not a path parser -- same "heuristic, not a parser"
-# tradeoff as pkgbuild_scalar/pkgbuild_array), but reliable enough to trigger
-# a warning that's cheap to read and skip if it doesn't apply.
 has_etc_install() {
 	printf '%s\n' "$1" | grep -qE '(pkgdir\}?/etc/|"/etc/|[[:space:]]/etc/)'
 }
 
-# uses_external_build_system: true if build()/package() hands off to
-# meson/cmake, which install their OWN declared files (including configs)
-# with NO explicit install command ever appearing in the PKGBUILD text at
-# all -- mango's own real AUR PKGBUILD is exactly this: package() is just
-# `DESTDIR="$pkgdir" ninja -C build install`, and its /etc/mango/config.conf
-# install is declared entirely inside meson.build's own install_data(),
-# invisible to has_etc_install's PKGBUILD-text-only scan. Found for real
-# testing this tool against mangowm itself: has_etc_install correctly found
-# nothing (there IS nothing to find at the PKGBUILD level), which would
-# have silently looked like "no config install, nothing to worry about"
-# without this separate, broader check.
+# True if build()/package() hands off to meson/cmake/ninja, whose OWN
+# install step can install files (config included) with no explicit
+# install command visible in the PKGBUILD text at all -- see aur-to-fis.md.
 uses_external_build_system() {
 	printf '%s\n' "$1" | grep -qE '\b(meson|cmake|ninja)\b'
 }
@@ -157,18 +116,8 @@ pkgrel=$(pkgbuild_scalar "$pkgbuild" pkgrel)
 pkgname_var=$(pkgbuild_scalar "$pkgbuild" pkgname)
 underscore_pkgname=$(pkgbuild_scalar "$pkgbuild" _pkgname)
 
-# Arch-keyed source=/sha256sums= arrays (source_x86_64=, sha256sums_x86_64=)
-# are ADDED to the generic ones by real makepkg, not a replacement for them
-# -- concatenated here in the same order (generic first, then arch-specific)
-# so positional sha256sums-to-source correspondence within each section
-# still lines up. Missing before this fix: a `-bin` package with NO generic
-# source= at all (only per-arch downloads, e.g. opencode-bin's real
-# PKGBUILD) left `sources` empty and crashed this script later with
-# "picked_idx: unbound variable" -- confirmed directly, not a hypothetical --
-# and a package with BOTH (e.g. opencode-desktop-bin: a generic LICENSE
-# download plus the real per-arch .deb) picked the generic LICENSE as if it
-# were the package's actual payload, since nothing here ever looked at the
-# arch-specific arrays at all.
+# Arch-keyed source_x86_64=/sha256sums_x86_64= arrays are ADDED to the
+# generic ones by real makepkg, not a replacement -- see aur-to-fis.md.
 mapfile -t sources_generic < <(pkgbuild_array "$pkgbuild" source)
 mapfile -t sources_arch < <(pkgbuild_array "$pkgbuild" "source_${FLORAOS_ARCH}")
 mapfile -t sha256_generic < <(pkgbuild_array "$pkgbuild" sha256sums)
@@ -180,17 +129,6 @@ generic_source_count=${#sources_generic[@]}
 dynamic_version=""
 grep -qE '^pkgver\(\)' <<< "$pkgbuild" && dynamic_version=1
 
-# Real lesson from a real recipe (fau-recipes/recipes/mangowm.fis): a
-# package's own build()/package() installing a config file under etc/ does
-# NOT mean an isolated app will actually find it there at runtime. mango's
-# own binary checks $HOME/.config/mango/config.conf FIRST and only falls
-# back to the compiled-in /etc/mango/config.conf if that's missing --
-# app_wrapper_write sets HOME to the app's own isolated dir, so the SYSTEM
-# fallback path (which nothing ever isolates) silently never gets found,
-# while the primary lookup was just never populated. Found on a real `mango`
-# run ("Failed to open config file: /etc/mango/config.conf" despite the file
-# existing right there under the app's own etc/), not by inspection -- flag
-# it here so every future recipe doesn't have to hit the same thing once.
 etc_install_build=""; etc_install_package=""
 has_etc_install "$(pkgbuild_func_body "$pkgbuild" build)" && etc_install_build=1
 has_etc_install "$(pkgbuild_func_body "$pkgbuild" package)" && etc_install_package=1
@@ -206,19 +144,7 @@ resolve_vars() {
 	for pair in "$@"; do
 		[ -n "$pair" ] || continue
 		name=${pair%%=*}; val=${pair#*=}
-		# No `[ -n "$val" ] || continue` here on purpose: a binding being
-		# present at all means the PKGBUILD really did declare that name,
-		# even if its value is the empty string (opencode-bin's own real
-		# `_subver=` is exactly this -- a point-release suffix left empty by
-		# default). Skipping empty values here used to mean "${_subver}"
-		# in a source URL was reported as an unresolved candidate even
-		# though it correctly resolves to nothing.
-		# ${name%suffix} -- shortest-suffix removal, e.g. vesktop-bin's own
-		# real `${pkgname%-bin}` (pkgname=vesktop-bin -> "vesktop"). Computed
-		# here as plain string manipulation over a value THIS script already
-		# resolved -- never executing PKGBUILD text -- and only a literal
-		# (non-glob) suffix is handled, which covers every real-world case
-		# seen so far; not a general glob-pattern implementation.
+		# ${name%suffix}: shortest-suffix removal (e.g. ${pkgname%-bin}) -- see aur-to-fis.md.
 		if [[ "$s" == *'${'"$name"'%'* ]]; then
 			local suffix stripped
 			while [[ "$s" =~ \$\{${name}%([^}]*)\} ]]; do
@@ -228,14 +154,7 @@ resolve_vars() {
 				s=${s/\$\{${name}%${suffix}\}/$stripped}
 			done
 		fi
-		# $val is used as a sed REPLACEMENT string below, where /, &, and \
-		# are all special -- a value containing any of them (a plain URL in
-		# url=, or one of the generic_scalar_bindings values below, unlike
-		# the handful of short identifiers this originally only had to
-		# handle) previously broke the sed script outright ("sed: unknown
-		# option to 's'"), confirmed directly against opencode-bin's own
-		# real url= field. Escaped here, once, right before building the
-		# sed script.
+		# val is a sed replacement string below -- escape /, &, \ first.
 		local val_escaped=${val//\\/\\\\}
 		val_escaped=${val_escaped//\//\\/}
 		val_escaped=${val_escaped//&/\\&}
@@ -243,21 +162,8 @@ resolve_vars() {
 	done
 	printf '%s' "$s"
 }
-# Every OTHER top-level scalar assignment (_subver=, _electronversion=40,
-# url=, ...) gets picked up too, generically -- not just the handful of
-# named ones above. Missing before this fix: opencode-bin's own real
-# PKGBUILD has a real `_subver=` (empty by default, meant to be overridden
-# for a point-release suffix) referenced inside its source_x86_64= URL --
-# left unresolved, the picked URL still literally contained "${_subver}"
-# and was accepted anyway, since nothing re-checked for a leftover
-# unresolved interpolation once the arch-specific pass (below) matched
-# `http*`. Same top-level, column-1 `key=value` heuristic as
-# pkgbuild_scalar/pkgbuild_array elsewhere in this file -- deliberately
-# skips anything shaped like an array assignment (`key=(`), and function
-# bodies are conventionally indented so a bare `^identifier=` won't match
-# one by accident (same tolerance for the rare sloppy PKGBUILD as
-# everywhere else here: a stray extra binding is harmless, it's only ever
-# used for text substitution).
+# Picks up every top-level scalar assignment generically (_subver=, url=,
+# ...), not just the handful named below -- see aur-to-fis.md.
 generic_scalar_bindings=()
 while IFS= read -r line; do
 	if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=\( ]]; then
@@ -270,12 +176,6 @@ while IFS= read -r line; do
 done <<< "$pkgbuild"
 VAR_BINDINGS=("${generic_scalar_bindings[@]}" "pkgname=${pkgname_var:-$aur_name}" "_pkgname=$underscore_pkgname" "pkgver=$pkgver" "pkgrel=$pkgrel" "CARCH=$FLORAOS_ARCH")
 
-# classify_source_entry: shared by both picking passes below so "still has
-# an unresolved ${...}/$(...)/backtick" is checked identically in each --
-# an earlier version of the arch-specific pass only checked for `http*`,
-# which meant a URL with a leftover unresolved variable (see the
-# generic_scalar_bindings comment above) still got accepted as "resolved"
-# just because it happened to start with "https://".
 classify_source_entry() {
 	case "$1" in
 		*'${'*|*'$('*|*'`'*) echo unresolved ;;
@@ -285,25 +185,12 @@ classify_source_entry() {
 }
 
 # --- Pick the one real source= entry that's the package's actual payload ---
+# See aur-to-fis.md for why this prefers an arch-specific http(s) entry.
 
 src_url_resolved="" src_url_status="ok" picked_idx="" candidate="" local_sources=()
 if [ "${#sources[@]}" -eq 0 ]; then
 	src_url_status="no source=/source_${FLORAOS_ARCH}= array found"
 else
-	# A local file (a .desktop entry, a config.h override, a patch, or (for a
-	# -bin package) a launcher template checked into the AUR git repo itself
-	# -- dwm.fis's own real source= is exactly the first three, in that
-	# order) is common alongside the one real download, and not necessarily
-	# first -- scan for the first entry that resolves to an actual http(s)
-	# URL instead of assuming index 0.
-	#
-	# First pass: prefer an arch-specific (x86_64) http(s) entry if one
-	# exists -- real-world -bin PKGBUILDs put the ACTUAL payload there and
-	# any generic source= entries tend to be incidental extras (opencode-
-	# desktop-bin's generic source= is a bare LICENSE download; picking that
-	# over the real per-arch .deb would checksum the wrong file entirely).
-	# Falls through to a full scan (matching the original, single-array
-	# behavior) only if no arch-specific http(s) entry exists at all.
 	idx=0
 	for s in "${sources[@]}"; do
 		if [ "$idx" -ge "$generic_source_count" ]; then
@@ -348,26 +235,7 @@ if [ -n "$src_url_resolved" ]; then
 	if curl -sL --fail -o "$tarball_tmp" "$src_url_resolved" 2>/dev/null; then
 		computed_sha256=$(sha256sum "$tarball_tmp" | cut -d' ' -f1)
 		download_status="downloaded OK, sha256 computed directly from the bytes fetched"
-		# fau-build's own build_extract_source (tools/fau/lib/build.sh)
-		# always runs `tar -xf ... --strip-components=1`, assuming a
-		# wrapping "repo-tag/" directory (true for a GitHub-archive-style
-		# tarball). A release asset that's genuinely flat (every member at
-		# the top level, no common leading directory -- confirmed for real
-		# against opencode's own release asset) gets silently stripped down
-		# to NOTHING instead: exit 0, zero files extracted, no warning at
-		# all. Checked here by actually listing the downloaded tarball's
-		# own members (only if it looks like a tar archive at all -- a
-		# .deb/.rpm/.AppImage isn't one, and .deb already gets its own
-		# build_extract_source support, see below), not assumed.
-		#
-		# Must skip DIRECTORY entries when looking for a "no slash" name --
-		# an archive's own wrapping directory is itself listed as one entry
-		# (e.g. plain "dwm-6.8", no trailing slash in this particular tar's
-		# listing) and naively counting any slash-free name as "flat" flagged
-		# dwm's own real, correctly-wrapped tarball as flat too (confirmed
-		# directly: false positive). Only a slash-free REGULAR file/symlink
-		# entry (permission field not starting with 'd') is the real
-		# "--strip-components=1 would eat this whole entry" signal.
+		# Flat (no wrapping dir) tarball detection -- see aur-to-fis.md.
 		case "$src_url_resolved" in
 			*.tar.gz|*.tar.xz|*.tar.bz2|*.tar.zst|*.tgz|*.tar)
 				if [ -n "$(tar -tvf "$tarball_tmp" 2>/dev/null | awk '$1 !~ /^d/ { n=NF; if ($n !~ /\//) print $n }' | head -n1)" ]; then
@@ -408,39 +276,14 @@ classify_deps makedepends_resolved makedepends_unresolved "${aur_makedepends[@]}
 join_csv() { local IFS=,; echo "$*"; }
 
 # sha256sums[] is positional, matched to source[] by index -- show the entry
-# for whichever index was actually picked above, not always index 0 (which
-# would be the .desktop/patch/etc.'s own checksum, not the tarball's, for a
-# PKGBUILD shaped like dwm's).
+# for whichever index was actually picked above, not always index 0.
 declared_sha256=""
 [ -n "$picked_idx" ] && [ "$picked_idx" -lt "${#declared_sha256s[@]}" ] && declared_sha256=${declared_sha256s[$picked_idx]}
 
 # --- Attempt a REAL recipe_build(), not just a stub -------------------------
-#
-# Recognizes a narrow, explicitly-safe whitelist of literal file-operation
-# commands inside prepare()/build()/package() and re-emits them verbatim
-# (after the same $pkgdir/$srcdir->$app_dir/$src substitution shown in the
-# reference comment) as real, runnable recipe_build() lines. Still NEVER
-# executes or bash-parses the PKGBUILD -- every recognized line is matched
-# by a fixed shape, exactly the same category of operation
-# pkgbuild_scalar/pkgbuild_array already do for top-level fields. The
-# instant a line doesn't match, or still has an unresolved ${...}/$(...)/
-# backtick in it after substitution, translation aborts for the WHOLE
-# function -- a partial, silently-incomplete recipe_build() would be worse
-# than the honest stub this falls back to.
-#
-# A bare `cd` is deliberately NOT in the whitelist, even though it's
-# common (dwm/mangowm's own real PKGBUILDs both `cd "$srcdir/$pkgname-
-# $pkgver"` before doing anything else): fau's own build_extract_source
-# already strips exactly one leading path component, so $src is ALREADY
-# what the PKGBUILD calls "$srcdir/$pkgname-$pkgver" -- but telling that
-# apart from a genuine, still-real subdirectory (e.g. a monorepo tarball)
-# would need actually inspecting the tarball's real layout per-subpath,
-# not just pattern-matching text. Safer to bail (fall back to the manual
-# stub, same as today) than guess. None of the three -bin packages this
-# was built against (opencode-bin, opencode-desktop-bin, vesktop-bin)
-# `cd` anywhere in package() at all -- makepkg's own default cwd for
-# every function is $srcdir, matched here with an explicit `cd "$src"`
-# instead of assuming.
+# See aur-to-fis.md for the whitelist this relies on and why a bare `cd` is
+# deliberately excluded from it.
+
 join_continuations() {
 	awk '
 		{
@@ -451,15 +294,9 @@ join_continuations() {
 	'
 }
 
-# local_source_basenames: basenames of every source= entry that never
-# resolved to an http(s) URL (a .desktop entry, a patch, or -- the real
-# gotcha this guards against -- a -bin package's own launcher-script
-# template checked into the AUR git repo itself, e.g. vesktop-bin's
-# "${pkgname%-bin}.sh"). This tool only ever fetches the ONE picked http(s)
-# source; it never clones the AUR package's own git tree, so a reference to
-# one of these basenames anywhere in a function body means that function
-# depends on a file we do NOT have and CANNOT safely fabricate -- treated
-# as unsafe to translate, same as any other unrecognized line.
+# Basenames of every source= entry that never resolved to an http(s) URL --
+# a reference to one of these anywhere in a function body means that
+# function depends on a file this tool never fetched. See aur-to-fis.md.
 local_source_basenames=()
 for s in "${local_sources[@]:-}"; do
 	[ -n "$s" ] || continue
@@ -472,9 +309,6 @@ command_line_is_safe() {
 	trimmed="${line#"${line%%[![:space:]]*}"}"
 	[ -n "$trimmed" ] || return 0
 
-	# Never accept a line with anything left unresolved, or any piping,
-	# chaining, substitution, or redirection into another command -- only a
-	# single, plain, fully-substituted command is ever in scope here.
 	case "$trimmed" in
 		*'${'*|*'$('*|*'`'*|*'|'*|*'&&'*|*'||'*|*';'*|*'<('*) return 1 ;;
 	esac
@@ -490,9 +324,6 @@ command_line_is_safe() {
 		|| [[ "$trimmed" =~ ^rm[[:space:]]+-[rf]+[[:space:]] ]] \
 		|| [[ "$trimmed" =~ ^find[[:space:]] ]] \
 		|| [[ "$trimmed" =~ ^sed[[:space:]]+-i[[:space:]] ]]; then
-		# Every one of these must be scoped to $app_dir somewhere in its
-		# arguments -- the one thing standing between "safe file op inside
-		# the isolated app dir" and "arbitrary rm -rf of something else".
 		[[ "$trimmed" == *'$app_dir'* ]] && return 0
 		return 1
 	fi
@@ -518,11 +349,7 @@ try_translate_body() {
 		if [[ -z "${line//[[:space:]]/}" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
 			out+=("$line"); continue
 		fi
-		# A quoted-heredoc install (install ... /dev/stdin "<dest>" <<'DELIM'
-		# or <<"DELIM") is byte-for-byte literal by construction -- no
-		# variable expansion happens inside a quoted heredoc body, so its
-		# content is safe to carry over verbatim without running it through
-		# command_line_is_safe line by line (it's DATA, not commands).
+		# A quoted heredoc (<<'DELIM' or <<"DELIM") is literal DATA, never re-parsed as commands.
 		if [[ "$line" =~ ^(.*)\<\<[[:space:]]*[\'\"]([A-Za-z_][A-Za-z0-9_]*)[\'\"][[:space:]]*$ ]]; then
 			local cmd_part=${BASH_REMATCH[1]}
 			command_line_is_safe "$cmd_part" || return 1
@@ -641,15 +468,8 @@ rm -f "$tarball_tmp"
 	if [ -n "$auto_recipe_body" ]; then
 		echo "recipe_build() {"
 		echo "	local src=\$1 app_dir=\$2 sandbox_dir=\$3"
-		echo "	# Auto-translated from PKGBUILD's own prepare()/build()/package() above -- every line"
-		echo "	# matched a known-safe, unambiguous file-operation shape (install/mkdir/ln/rm/find/sed"
-		echo "	# or a quoted heredoc), never executed to produce this. REVIEW BEFORE TRUSTING, same"
-		echo "	# as everything else in this draft -- this whitelist is deliberately narrow, not proof"
-		echo "	# of correctness, just proof there was nothing IT could recognize as dangerous or"
-		echo "	# ambiguous. cd into \$src first: matches makepkg's own default cwd for every function"
-		echo "	# when nothing explicitly cd's elsewhere (a bare 'cd' itself is never auto-translated,"
-		echo "	# see this script's own comment on why -- so this only ever fires for a PKGBUILD that"
-		echo "	# never explicitly cd's in the first place)."
+		echo "	# Auto-translated from PKGBUILD's own prepare()/build()/package() above -- REVIEW"
+		echo "	# BEFORE TRUSTING, same as everything else in this draft. See aur-to-fis.md."
 		if [ -n "$tarball_is_flat" ]; then
 			echo "	local _tarball; _tarball=\$(build_fetch_source \"\$PKG_SRC_URL\" \"\$PKG_SRC_SHA256\")"
 			echo "	src=\$(mktemp -d)"
