@@ -13,6 +13,8 @@ source "$SELF_DIR/lib/repo.sh"
 source "$SELF_DIR/lib/alpm.sh"
 # shellcheck source=lib/recipes.sh
 source "$SELF_DIR/lib/recipes.sh"
+# shellcheck source=lib/selfupdate.sh
+source "$SELF_DIR/lib/selfupdate.sh"
 
 app_install_one() {
 	local arg=$1 chain=${2:-}
@@ -165,6 +167,16 @@ cmd_remove() {
 cmd_update() {
 	apps_state_init
 	state_init
+
+	# Unconditional, once per invocation, before any checking/updating --
+	# see fau.md. fau backup itself refuses a non-block-device root (the
+	# live RAM image) with its own clear message; that's an expected,
+	# non-fatal outcome here, not a fau-update failure, so its exit status
+	# is never allowed to abort the update itself.
+	local backup_rc=0
+	"$SELF_DIR/fau-backup" backup "pre-update-$(date -u +%Y%m%dT%H%M%SZ)" || backup_rc=$?
+	[ "$backup_rc" -eq 0 ] || log "continuing without a pre-update backup (see above)"
+
 	local -a app_names=() sys_names=()
 	if [ $# -ge 1 ]; then
 		local n
@@ -267,22 +279,24 @@ cmd_update() {
 		log "$name: not found in the local repo, the configured mirrors, or as a build recipe -- skipping"
 	done
 
-	# System packages: only ones bootstrapped via the alpm fallback
-	# (libgcc, fontconfig, dbus, ... -- see build-rootfs.sh) are eligible
-	# here. MANDATORY_ORDER/EXTRA_PACKAGES packages have no newer version
-	# to fetch at runtime at all -- FAU_REPO_DIR doesn't even exist on a
-	# live system, only config/versions.conf plus a full ISO rebuild
-	# produces one -- so re-fetching them via alpm would silently replace
-	# FloraOS's own from-source build with Arch's binary, exactly the bug
-	# fau.md documents as already found and fixed once. source-built-
-	# packages (written by build-rootfs.sh) is how that set is told apart
-	# from the rest of system.json. See fau.md.
+	# System packages: MANDATORY_ORDER/EXTRA_PACKAGES packages (tracked in
+	# source-built-packages, written by build-rootfs.sh) get no newer
+	# version from the alpm fallback -- re-fetching them that way would
+	# silently replace FloraOS's own from-source build with Arch's binary,
+	# exactly the bug fau.md documents as already found and fixed once.
+	# They're still updatable in place if a *system recipe* now exists for
+	# them (fau-recipes' system/ namespace, built on this machine via `fau
+	# bootstrap-build`, never via alpm) -- checked below before falling
+	# back to "rebuild the ISO." Everything else in system.json (libgcc,
+	# fontconfig, dbus, ... -- see build-rootfs.sh) is alpm-fallback
+	# eligible as before. See fau.md.
 	local -A source_built=()
 	local source_built_list="${FAU_ROOT%/}/etc/fau/source-built-packages"
 	if [ -f "$source_built_list" ]; then
 		local sn
 		while IFS= read -r sn; do [ -n "$sn" ] && source_built[$sn]=1; done < "$source_built_list"
 	fi
+	system_recipes_sync || true
 
 	local sys_checked=0 sys_updated=0 sys_pinned=0
 	for name in "${sys_names[@]}"; do
@@ -292,6 +306,25 @@ cmd_update() {
 			continue
 		fi
 		if [ -n "${source_built[$name]:-}" ]; then
+			local sysrecipe; sysrecipe=$(system_recipe_lookup "$name") || sysrecipe=""
+			if [ -n "$sysrecipe" ]; then
+				local sysrecipe_version
+				sysrecipe_version=$(source "$sysrecipe"; echo "${PKG_VERSION:-}") || sysrecipe_version=""
+				if [ -n "$sysrecipe_version" ] && [ "$(alpm_vercmp "$sysrecipe_version" "$installed")" -gt 0 ]; then
+					log "$name: system recipe pinned to $sysrecipe_version (installed: $installed) -- rebuilding from source"
+					if "$SELF_DIR/fau-bootstrap" bootstrap-build "$name"; then
+						sys_checked=$((sys_checked + 1))
+						sys_updated=$((sys_updated + 1))
+					else
+						log "$name: rebuild failed, skipping"
+						sys_pinned=$((sys_pinned + 1))
+					fi
+					continue
+				fi
+				log "$name $installed is up to date (system recipe still pinned to $sysrecipe_version)"
+				sys_checked=$((sys_checked + 1))
+				continue
+			fi
 			sys_pinned=$((sys_pinned + 1))
 			log "$name $installed is pinned from source -- rebuild the ISO (config/versions.conf) to update it"
 			continue
@@ -317,6 +350,21 @@ cmd_update() {
 	done
 
 	log "checked $checked app(s), updated $updated; checked $sys_checked system package(s) ($sys_pinned pinned from source), updated $sys_updated"
+
+	# FloraOS's own files (fau's dispatcher/subtools/lib, the 5 C tools,
+	# floragrub-cfg) -- per-file, keyed on each one's own git blob sha, not
+	# bundled into one version/one rebuild. Safe to run at any point here:
+	# a changed tools/fau/fau-install would replace *this very file*, but
+	# via a staged atomic `mv`, which only affects the name-to-inode
+	# mapping -- this already-running process keeps its own open copy of
+	# the old file until it exits. See fau.md.
+	if floraos_selfupdate_sweep; then
+		if [ "$FLORAOS_SELFUPDATE_CHANGED" -gt 0 ]; then
+			log "fau itself: $FLORAOS_SELFUPDATE_CHANGED file(s) updated from $FAU_SELFUPDATE_REPO"
+		else
+			log "fau itself: up to date ($FAU_SELFUPDATE_REPO)"
+		fi
+	fi
 }
 
 cmd_list() {

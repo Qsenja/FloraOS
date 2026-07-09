@@ -29,6 +29,9 @@ tools/fau/lib/common.sh   die/log/env-var defaults/json_escape/pkginfo_field
 tools/fau/lib/manifest.sh system.json/apps.json read-write, dep_parse/version_satisfies
 tools/fau/lib/repo.sh     the local .fau.tar.zst repo (repo_json/repo_index/...)
 tools/fau/lib/alpm.sh     the whole Arch/Artix fallback + dependency resolution engine
+tools/fau/lib/build.sh    fau-build/bootstrap-build's own source fetch + sandbox helpers
+tools/fau/lib/recipes.sh  fetches .fis recipes from fau-recipes (app + system namespaces)
+tools/fau/lib/selfupdate.sh   per-file granular update for fau's own tree (see below)
 ```
 
 Every `fau-<name>` tool is a real, independently-runnable program — `fau-backup
@@ -218,6 +221,154 @@ Verified against the real rootfs this project builds: all 30
 `ttf-dejavu`/`fontconfig`/`dbus` correctly checked against the mirrors and
 reported up to date, both for the default no-args sweep and for explicit
 `fau update <name>` calls naming a mix of both kinds.
+
+### Rolling updates for real: `fau bootstrap-build` + system recipes
+
+"Pinned from source, rebuild the ISO" doesn't have to be the end of the
+story for a `source-built-packages` entry. `fau build` already has a
+working disposable-sandbox mechanism (fetch a compiler + build-only deps
+on demand, build one package from source, discard the sandbox) — reused
+here instead of inventing a prebuilt-binary repo, since the only thing
+that then needs publishing is a recipe (a small text file with a pinned
+version/URL/sha256), not a built binary. Every live machine does its own
+compiling, on demand, exactly like `fau build mangowm` already does today
+— this fits "not Arch/Artix-based, everything from pinned source" far
+better than shipping binaries would have.
+
+- **`fau-recipes/system/<name>.fis`** + **`fau-recipes/system-recipes.db`**:
+  same `.fis` shape `fau build` already parses, same fetch/fallback
+  mechanics, kept in a separate namespace from the app recipes
+  (`recipes.db`/`recipes/`) so `fau build-list` doesn't get cluttered with
+  base-system entries no isolated-app user asked for.
+  `tools/fau/lib/recipes.sh`'s `recipe_lookup`/`recipes_sync` were
+  generalized into `_recipe_lookup`/`_recipes_sync` (parametrized over
+  repo/branch/remote-dir/db-name/subdir/shipped-dir) precisely so this
+  second namespace (`system_recipe_lookup`/`system_recipes_sync`) could
+  reuse the exact same fetch-fresh/fall-back-to-last-known-good logic
+  without touching the original app-recipe behavior at all — verified: the
+  existing `recipe_lookup mangowm` path still resolves identically after
+  the refactor.
+- **`fau bootstrap-build <name>[=<version>]`** (`tools/fau/fau-bootstrap`):
+  mirrors `fau-build`'s `cmd_build` almost exactly (same
+  `build_fetch_source`/`build_extract_source`/`alpm_sandbox_fetch`, same
+  sandbox `mktemp -d` + `trap ... EXIT` pattern — deliberately not `local`,
+  same reason as `fau-build`'s own `sandbox_dir`) with one real difference:
+  the merge tail is `rsync -aK --checksum <built-files>/ "$FAU_ROOT/"` +
+  `record_files` + `system_set`, matching `install_one_alpm`/`install_one`,
+  not `cp -a` into an isolated app dir. `PKG_DEPENDS` here means "must
+  already be part of the running system" (checked via `system_get_version`,
+  `die()`s if missing) rather than something to merge in — a system
+  package shares the real `FAU_ROOT` with everything else already
+  installed. `strip_unreachable_docs` runs on the build output before
+  merging, same as every other merge point (a real gap found while testing
+  this: the first `zstd` rebuild shipped 5 man pages right back in before
+  this line was added).
+- **`cmd_update`'s "pinned from source" branch**: now checks
+  `system_recipe_lookup` before giving up. A system recipe with a newer
+  `PKG_VERSION` triggers `fau bootstrap-build <name>` (same `alpm_vercmp`
+  comparison the app-recipe tier already uses); no recipe yet still falls
+  back to "rebuild the ISO," unchanged.
+
+Verified end to end, including over a real QEMU-equivalent (`FAU_ROOT`
+pointed at a real copy of this project's own built rootfs, not a fresh
+empty one — so `glibc` and every other real `PKG_DEPENDS` check actually
+has something to check against): `fau bootstrap-build zstd` rebuilds from
+real upstream source, merges, and the resulting `zstd` binary correctly
+decompresses a real `.fau.tar.zst` archive (load-bearing: this is the
+compressor `fau`'s own package format itself uses). `gzip`/`hostname`/
+`tar`/`libmd` (the first five system recipes, translated from
+`scripts/recipes/*.sh`) each verified functionally too (round-trip
+compress/decompress, binary+symlinks in place, archive create/list,
+shared library present) — see fau-recipes' own `system/*.fis` files.
+`fau update zstd` against a deliberately downgraded installed version
+correctly detects, rebuilds, and reports up to date on a second run; a
+package the alpm fallback would otherwise touch (`bash`) still correctly
+falls through to "rebuild the ISO," confirming the new tier doesn't
+accidentally widen what's alpm-fallback-eligible.
+
+Not yet converted: 18 more `MANDATORY_ORDER` packages need only the same
+mechanical `.fis` translation the first five got; `glibc`/`linux-lts`/
+`eudev`/`curl`/`sysvinit`/`openrc` have real blockers. See
+[docs/TODO.md](../../docs/TODO.md) for the specific reason each one isn't
+convertible yet.
+
+### FloraOS's own files: per-file granular update, not one lump
+
+`fau`'s own dispatcher/subtools/`lib/*.sh`, the 5 compiled C tools
+(`fauelf`, `floralogin`, `florauser`, `florainstall`, `floraseat`), and
+`floragrub-cfg` needed a genuinely different mechanism from either apps or
+system packages: `tools/fau/` alone is ~16 independent files, and neither
+a monolithic "fau self-update" nor a hand-authored `.fis` recipe per file
+is right — hand-bumping ~22 separate version numbers every time one file
+changes is exactly the upkeep burden this feature should avoid adding.
+
+Instead (`tools/fau/lib/selfupdate.sh`), each tracked file is tracked
+individually by **git's own blob sha**, which already exists, is already
+accurate, and needs no manifest hand-authored anywhere:
+
+- **`floraos_tree_listing`**: one GitHub Trees API request
+  (`git/trees/main?recursive=1`) returns `path`+blob-`sha` for every file
+  in the repo at once. The response is pretty-printed JSON — confirmed
+  against a real response, not assumed — with `path`/`mode`/`type`/`sha`
+  each on their own line, so a stateful path-then-type-then-sha `awk` pass
+  (the same "hand-rolled, no `jq`" convention `lib/manifest.sh`'s
+  `json_get_version` already uses) is enough; `type=="tree"` (a directory
+  entry, which the recursive listing also includes) is filtered out,
+  leaving only `type=="blob"` (real files).
+- **`etc/fau/installed-manifest`** (`path<TAB>blob-sha`, one line per
+  tracked file): `build-rootfs.sh` writes the baseline at ISO-build time
+  using `git hash-object` locally (confirmed byte-identical to what the
+  Trees API reports for the same content — git blob shas are just
+  `sha1("blob <size>\0<content>")`, computed identically either way, no
+  network needed at build time), reading the tracked-path list from
+  `_floraos_tracked_paths` itself (sourced, not duplicated) so build time
+  and runtime never disagree about which files are tracked.
+- **`floraos_selfupdate_sweep`**: fetches the tree listing once, diffs
+  every tracked path's blob sha against `installed-manifest`, and only
+  fetches+swaps the ones that actually changed. A bash file is staged to a
+  temp path then atomically `mv`'d into place; a `.c` source is recompiled
+  first (`gcc -x c` — the fetched file is a plain `mktemp` path with no
+  `.c` suffix, and gcc/`ld` only infer "this is C source" from the
+  extension otherwise, confirmed by hitting exactly this failure first:
+  `ld` treating raw C source text as an unrecognized object/linker
+  script). `gcc` itself is only fetched into a throwaway sandbox
+  (`alpm_sandbox_fetch`, same mechanism as `fau build`/`bootstrap-build`)
+  if at least one changed path is a `.c` file that run — a sweep that only
+  touches bash files never pays for it. A cosmetic `system.json` entry
+  (`fau`, a date stamp) exists for `fau list`/fastfetch's package count;
+  the real per-file state lives in `installed-manifest`, never encoded
+  into `system.json`'s one-version-string-per-package shape.
+- Safe to run at any point relative to the rest of `cmd_update` (it runs
+  last): a changed `tools/fau/fau-install` would replace *the very file
+  currently executing `cmd_update`*, but only via a staged atomic `mv`,
+  which just repoints the path to a new inode — the already-running
+  process keeps reading its own already-open copy of the old file until it
+  exits, standard Unix rename semantics, not something that needed new
+  protection.
+
+Verified end to end against this project's own real rootfs, including
+through the actual `fau` binary (not just the sourced function): a no-op
+run (manifest matching the real current remote tree) touches zero files;
+staging one stale bash-file entry (`fau-seat`) causes exactly that one
+file to be fetched and swapped, confirmed via `md5sum` that every other
+tracked file's content is byte-identical before and after; staging one
+stale `.c` entry (`floraseat.c`) causes a real recompile (confirmed:
+resulting binary is valid ELF, actually executes) while every other file
+including the *other* compiled tool (`fauelf`) stays untouched.
+
+### Auto-backup before any `fau update`
+
+`cmd_update` now runs `fau backup "pre-update-<timestamp>"` unconditionally,
+once, before any checking/updating happens — not just before a
+system-package rebuild. `fau backup` itself already refuses a non-block-
+device root (the live RAM image) with its own clear message; that refusal
+is expected and non-fatal here, so its exit status is never allowed to
+abort the update itself (`|| backup_rc=$?`, same pattern
+`recipes_sync || true` already uses elsewhere in this file). Verified: on
+a non-block-device test root, the backup attempt fails with `fau backup`'s
+own message, `cmd_update` logs "continuing without a pre-update backup,"
+and every subsequent check/update in that same run still completes
+correctly.
 
 ## `build <name>[=<version>]` — installing a specific version, not just the recipe's pinned default
 

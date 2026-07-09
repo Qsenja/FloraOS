@@ -17,6 +17,10 @@ FAU_RECIPES_DIR="${FAU_RECIPES_DIR:-/usr/lib/fau/recipes}"
 FAU_RECIPES_REMOTE_DIR="${FAU_RECIPES_REMOTE_DIR:-${FAU_CACHE_DIR}/recipes-remote}"
 FAU_RECIPES_REPO="${FAU_RECIPES_REPO-https://github.com/Qsenja/fau-recipes}"
 FAU_RECIPES_BRANCH="${FAU_RECIPES_BRANCH:-main}"
+# Same repo as above, separate index/subdir (system-recipes.db/system/) --
+# used by `fau bootstrap-build` for base-system packages. No ISO-shipped
+# fallback dir; this is purely a live-update feature. See fau.md.
+FAU_SYSTEM_RECIPES_REMOTE_DIR="${FAU_SYSTEM_RECIPES_REMOTE_DIR:-${FAU_CACHE_DIR}/system-recipes-remote}"
 
 # See ../fauelf/fauelf.md -- rewrites absolute DT_NEEDED entries for isolated app installs.
 FAU_ELF_PATCH="${FAU_ELF_PATCH:-fauelf}"

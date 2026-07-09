@@ -11,6 +11,10 @@ source "$SELF_DIR/lib/manifest.sh"
 source "$SELF_DIR/lib/repo.sh"
 # shellcheck source=lib/alpm.sh
 source "$SELF_DIR/lib/alpm.sh"
+# shellcheck source=lib/build.sh
+source "$SELF_DIR/lib/build.sh"
+# shellcheck source=lib/recipes.sh
+source "$SELF_DIR/lib/recipes.sh"
 
 install_one() {
 	local name=$1 want_version=${2:-} chain=${3:-}
@@ -84,6 +88,115 @@ cmd_bootstrap() {
 		[ "$total" -eq 1 ] || log "=== [$i/$total] requested package: $name ==="
 		install_one "$name"
 	done
+}
+
+# Builds a base-system package from source, on this live system, from a
+# system recipe (fau-recipes' system/ namespace) -- the system-side
+# counterpart to `fau build`, merging into FAU_ROOT + system.json instead
+# of an isolated app dir. See fau.md.
+cmd_bootstrap_build() {
+	[ $# -eq 1 ] || die "usage: fau bootstrap-build <name>[=<version>]"
+	local arg=$1 name version_req=""
+	case "$arg" in
+		*=*) name=${arg%%=*}; version_req=${arg#*=} ;;
+		*) name=$arg ;;
+	esac
+
+	system_recipes_sync || true
+	local recipe; recipe=$(system_recipe_lookup "$name") \
+		|| die "no system recipe for '$name' (looked in $FAU_SYSTEM_RECIPES_REMOTE_DIR) -- see 'fau bootstrap-build-list'"
+
+	local PKG_SRC_URL="" PKG_SRC_SHA256="" PKG_VERSION="" PKG_DESCRIPTION=""
+	local PKG_DEPENDS="" PKG_BUILD_DEPS=""
+	# shellcheck source=/dev/null
+	source "$recipe"
+	[ -n "$PKG_SRC_URL" ] && [ -n "$PKG_SRC_SHA256" ] && [ -n "$PKG_VERSION" ] \
+		|| die "$recipe: PKG_SRC_URL/PKG_SRC_SHA256/PKG_VERSION must all be set"
+	declare -F recipe_build >/dev/null || die "$recipe: doesn't define recipe_build"
+
+	# A version other than the recipe's own pinned default needs the recipe's
+	# opt-in cooperation, same contract as `fau build name=version`. See fau.md.
+	if [ -n "$version_req" ] && [ "$version_req" != "$PKG_VERSION" ]; then
+		declare -F recipe_source_for_version >/dev/null \
+			|| die "$recipe: doesn't support installing a specific version (no recipe_source_for_version defined) -- only $PKG_VERSION is available"
+		local src_info; src_info=$(recipe_source_for_version "$version_req") \
+			|| die "$recipe: recipe_source_for_version failed for version $version_req"
+		PKG_SRC_URL=$(printf '%s\n' "$src_info" | sed -n '1p')
+		PKG_SRC_SHA256=$(printf '%s\n' "$src_info" | sed -n '2p')
+		[ -n "$PKG_SRC_URL" ] || die "$recipe: recipe_source_for_version didn't return a URL for version $version_req"
+		PKG_VERSION=$version_req
+	fi
+
+	state_init
+	local existing; existing=$(system_get_version "$name")
+
+	# PKG_DEPENDS here means "must already be part of the running system" --
+	# unlike fau-build's app-dir case, a system package shares the real
+	# FAU_ROOT with everything else already installed, nothing to merge in.
+	if [ -n "${PKG_DEPENDS:-}" ]; then
+		for dep in $(printf '%s' "$PKG_DEPENDS" | tr ',' ' '); do
+			dep=$(echo "$dep" | xargs)
+			[ -z "$dep" ] && continue
+			local dep_name dep_op dep_ver
+			IFS=$'\t' read -r dep_name dep_op dep_ver <<< "$(dep_parse "$dep")"
+			local dep_installed; dep_installed=$(system_get_version "$dep_name")
+			[ -n "$dep_installed" ] || die "$name needs $dep_name, but it isn't installed on this system"
+			[ -z "$dep_op" ] || version_satisfies "$dep_installed" "$dep_op" "$dep_ver" \
+				|| die "$name needs $dep_name $dep_op$dep_ver, but $dep_installed is installed"
+		done
+	fi
+
+	local -a build_depends=()
+	for dep in $(printf '%s' "${PKG_BUILD_DEPS:-}" | tr ',' ' '); do
+		dep=$(echo "$dep" | xargs)
+		[ -n "$dep" ] && build_depends+=("$dep")
+	done
+
+	# Deliberately NOT `local` -- the EXIT trap can fire after this function
+	# returns (see fau-build/fau.md for the real bug this fixes).
+	sandbox_dir=$(mktemp -d)
+	trap 'rm -rf "$sandbox_dir"' EXIT
+
+	if [ "${#build_depends[@]}" -gt 0 ]; then
+		log "$name: fetching ${#build_depends[@]} build-only dependenc(y/ies) into a throwaway sandbox"
+		alpm_sandbox_fetch "$sandbox_dir" "${build_depends[@]}"
+	fi
+
+	log "$name: fetching source ($PKG_SRC_URL)"
+	local tarball; tarball=$(build_fetch_source "$PKG_SRC_URL" "$PKG_SRC_SHA256")
+
+	local src; src=$(
+		PATH="$sandbox_dir/usr/bin:$PATH" \
+		LD_LIBRARY_PATH="$sandbox_dir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+		PKG_CONFIG_PATH="$sandbox_dir/usr/lib/pkgconfig:$sandbox_dir/usr/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+		build_extract_source "$name" "$tarball"
+	)
+
+	local files; files=$(mktemp -d)
+	log "$name: building $PKG_VERSION (sandbox: $sandbox_dir)"
+	PATH="$sandbox_dir/usr/bin:$PATH" \
+		LD_LIBRARY_PATH="$sandbox_dir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+		PKG_CONFIG_PATH="$sandbox_dir/usr/lib/pkgconfig:$sandbox_dir/usr/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+		recipe_build "$src" "$files" "$sandbox_dir"
+
+	strip_unreachable_docs "$files"
+	mkdir -p "$FAU_ROOT"
+	record_files "$name" "$files"
+	rsync -aK --checksum "$files/" "$FAU_ROOT/"
+	rm -rf "$files"
+
+	system_set "$name" "$PKG_VERSION"
+	if [ -n "$existing" ]; then
+		log "rebuilt $name $existing -> $PKG_VERSION from source, merged into $FAU_ROOT"
+	else
+		log "built and installed $name $PKG_VERSION into $FAU_ROOT"
+	fi
+}
+
+cmd_bootstrap_build_list() {
+	[ $# -eq 0 ] || die "bootstrap-build-list takes no arguments"
+	system_recipes_sync || true
+	system_recipe_list_names
 }
 
 remove_one_file() {
@@ -164,5 +277,7 @@ case "$cmd" in
 	bootstrap-list) cmd_bootstrap_list "$@" ;;
 	bootstrap-export) cmd_bootstrap_export "$@" ;;
 	bootstrap-apply) cmd_bootstrap_apply "$@" ;;
+	bootstrap-build) cmd_bootstrap_build "$@" ;;
+	bootstrap-build-list) cmd_bootstrap_build_list "$@" ;;
 	*) die "fau-bootstrap: unknown command: $cmd" ;;
 esac

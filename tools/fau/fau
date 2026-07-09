@@ -168,6 +168,14 @@ bootstrap-list            list installed system packages and versions
 bootstrap-export [file]   write system.json to file (default: stdout)
 bootstrap-apply [file]    install the exact system package set recorded in file
                             (default: system.json in the current directory)
+bootstrap-build <pkg>[=<version>]   rebuild a base-system package from source,
+                            on this live system, from a system recipe --
+                            the FAU_ROOT counterpart to 'fau build'. Used by
+                            'fau update' when a newer system recipe exists
+                            for an installed base package; also callable
+                            directly.
+bootstrap-build-list       list every system recipe available (synced
+                            fau-recipes system/ namespace)
 EOF
 			;;
 		all)
@@ -203,7 +211,7 @@ dispatch() {
 			exec "$SELF_DIR/fau-seat" "$cmd" "$@" ;;
 		user-add|user-passwd|user-rename|user-groupadd|user-addtogroup)
 			exec "$SELF_DIR/fau-user" "$cmd" "$@" ;;
-		bootstrap|bootstrap-remove|bootstrap-list|bootstrap-export|bootstrap-apply)
+		bootstrap|bootstrap-remove|bootstrap-list|bootstrap-export|bootstrap-apply|bootstrap-build|bootstrap-build-list)
 			exec "$SELF_DIR/fau-bootstrap" "$cmd" "$@" ;;
 		*)
 			die "unknown command: $cmd (see --help)"

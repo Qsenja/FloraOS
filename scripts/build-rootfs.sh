@@ -55,7 +55,7 @@ pinned_kernel=$(version_field linux-lts 1)
 [ "${KERNEL_VERSION:-$pinned_kernel}" = "$pinned_kernel" ] || die \
 	"floraos.conf requests kernel $KERNEL_VERSION but config/versions.conf pins linux-lts at $pinned_kernel -- update versions.conf (URL + sha256) to change kernel version"
 
-for cmd in curl tar zstd make gcc sha256sum rsync fakeroot autoreconf gperf; do require_cmd "$cmd"; done
+for cmd in curl tar zstd make gcc sha256sum rsync fakeroot autoreconf gperf git; do require_cmd "$cmd"; done
 
 # already_built <name> -- true if this exact pinned version is already packaged.
 already_built() {
@@ -143,6 +143,24 @@ main() {
 	# tools/fau/fau.md.
 	mkdir -p "$ROOTFS_DIR/etc/fau"
 	printf '%s\n' "${BUILD_ORDER[@]}" > "$ROOTFS_DIR/etc/fau/source-built-packages"
+
+	# Baseline for `fau update`'s per-file granular update
+	# (tools/fau/lib/selfupdate.sh) -- git's own blob sha for the exact
+	# tree this ISO was built from, computed locally with `git
+	# hash-object` (confirmed byte-identical to what GitHub's Trees API
+	# reports for the same content later -- no network needed at build
+	# time). _floraos_tracked_paths is sourced from lib/selfupdate.sh
+	# itself so this list has exactly one home, not a second copy here.
+	: > "$ROOTFS_DIR/etc/fau/installed-manifest"
+	while IFS= read -r trackedpath; do
+		[ -f "$FLORA_ROOT/$trackedpath" ] || continue
+		printf '%s\t%s\n' "$trackedpath" "$(git -C "$FLORA_ROOT" hash-object "$trackedpath")" \
+			>> "$ROOTFS_DIR/etc/fau/installed-manifest"
+	done < <(
+		export FAU_ROOT=/
+		source "$FAU_TOOLS_DIR/lib/selfupdate.sh"
+		_floraos_tracked_paths
+	)
 
 	log "=== staging the kernel image for florainstall (tools/florainstall) ==="
 	# build-iso.sh excludes ./boot from the live image, so florainstall needs

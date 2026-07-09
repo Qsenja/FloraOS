@@ -57,5 +57,54 @@ file is only for things that could reasonably be finished later.
   layout exists, call `loadkeys`, and persist the choice into whatever
   config OpenRC's `keymaps` init.d service reads. Not implemented yet.
 
+- **`fau update`'s rolling base-system rebuild doesn't cover all 30
+  `MANDATORY_ORDER` packages yet** — only `zstd`/`gzip`/`hostname`/`tar`/
+  `libmd` have real `fau-recipes/system/*.fis` recipes so far (see
+  `tools/fau/fau.md`). The rest fall into two groups:
+  - **Straightforward, just not authored yet**: `ncurses`, `bash`,
+    `coreutils`, `util-linux`, `e2fsprogs`, `iproute2`, `dhcpcd`, `attr`,
+    `acl`, `grep`, `sed`, `gawk`, `findutils`, `procps-ng`, `kbd`,
+    `libxcrypt`, `mbedtls`, `kmod` — each has no cross-package build-time
+    file dependency beyond `PKG_DEPENDS` (confirmed by reading every
+    `scripts/recipes/*.sh`), so converting one is the same mechanical
+    `scripts/recipes/<name>.sh` -> `fau-recipes/system/<name>.fis`
+    translation the Phase-1 five already went through.
+  - **Genuinely blocked, in order of how close each is**:
+    - **`openrc`**: depends on `glibc`'s installed version for a source
+      patch (`libeinfo.c`'s `strlcat` guard) — trivially convertible via
+      `system_get_version glibc` once `glibc` itself is, not before.
+    - **`eudev`**/**`curl`**: their build-host recipes reference
+      `$STAGE_DIR/kmod/files/...`/`$STAGE_DIR/mbedtls/files/...` (another
+      package's *staged build output*, a build-host-only concept that
+      doesn't exist on a live system). On a live rebuild the real
+      dependency is already installed at its normal system path
+      (`/usr/lib/pkgconfig/...`, `/usr/include`), so these likely
+      translate directly to pointing there instead — plausible, not yet
+      verified with a real build.
+    - **`sysvinit`**: its `sulogin` binary is deliberately rebuilt a
+      *second* time, inline in `build-rootfs.sh` itself (not even in
+      `scripts/recipes/sysvinit.sh`), against the fully-merged rootfs's
+      own `libxcrypt`. Needs folding into a proper recipe (or a documented
+      special case) before it can be `fau bootstrap-build`-able.
+    - **`glibc`**: needs a raw kernel headers directory
+      (`$LINUX_HEADERS_DIR`, produced only by `linux-lts`'s own
+      `headers_install` step, never merged into the real rootfs) that
+      doesn't exist as a standing artifact on a live system. Likely
+      fixable — a live system's own already-installed `/usr/include` was
+      itself populated by glibc's *first* build from those same headers,
+      so pointing a rebuild's `--with-headers` at the live `/usr/include`
+      directly may just work — but unverified, and this is the one
+      package every other rebuild in this list links against, so it needs
+      a real test before being trusted, not an assumption.
+    - **`linux-lts`** (the kernel): not attempted at all. No
+      multi-kernel-version GRUB fallback exists yet — `floragrub-cfg`
+      only branches per-snapshot *subvolume* (`fau backup`'s own
+      mechanism), never per kernel file/version, so a bad live kernel
+      rebuild has zero rollback story today. A real fix needs that
+      fallback mechanism (e.g. keeping the previous `vmlinuz-floraos`
+      around with its own GRUB entry until the new one's confirmed to
+      boot) built first, deliberately kept out of scope for now given how
+      much worse a bad kernel push is than a bad `zstd` push.
+
 See ARCHITECTURE.md for the full design-decision history (including
 everything above that's already DONE, and the reasoning behind each).
