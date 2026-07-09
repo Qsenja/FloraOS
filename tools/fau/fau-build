@@ -158,7 +158,20 @@ cmd_build() {
 	[ "$build_deps_status" -eq 0 ] || die "$name: fetching build-only dependencies failed (see log above)"
 	[ "$src_status" -eq 0 ] || die "$name: fetching source failed (see log above)"
 
-	local src; src=$(build_extract_source "$name" "$tarball")
+	# Exported around build_extract_source too, not just recipe_build below --
+	# a .deb source's data.tar.xz (see build_extract_source's own .deb
+	# branch) needs a real `xz`/`unxz` on PATH to decompress, which a recipe
+	# can only guarantee by declaring it in its own PKG_BUILD_DEPS, resolved
+	# into this same $sandbox_dir above. Harmless for every existing plain-
+	# tarball recipe (dwm/mangowm/opencode/vesktop): their own tar.gz/tar.xz
+	# needs nothing from $sandbox_dir to extract, gzip/zstd already being
+	# base-system tools.
+	local src; src=$(
+		PATH="$sandbox_dir/usr/bin:$PATH" \
+		LD_LIBRARY_PATH="$sandbox_dir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+		PKG_CONFIG_PATH="$sandbox_dir/usr/lib/pkgconfig:$sandbox_dir/usr/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+		build_extract_source "$name" "$tarball"
+	)
 
 	log "$name: building $PKG_VERSION (sandbox: $sandbox_dir)"
 	PATH="$sandbox_dir/usr/bin:$PATH" \

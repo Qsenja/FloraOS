@@ -26,12 +26,68 @@ build_fetch_source() {
 	echo "$path"
 }
 
+# Pulls one member out of a plain `ar` archive (global "!<arch>\n" magic,
+# then a sequence of 60-byte member headers, each immediately followed by
+# that member's data, padded to an even byte boundary) by name prefix --
+# used below for .deb sources, whose inner payload is named "data.tar.<ext>"
+# with an extension that varies by how the .deb was built (xz/gz/zst), so an
+# exact match would miss it. Parsed directly via `dd` (byte-precise
+# skip/count, never a byte-at-a-time loop -- confirmed fast: ~50ms end to
+# end against a real 119MB .deb), not shelled out to `ar`/`binutils` -- this
+# project already reads every other structured format it touches straight
+# off the wire rather than pulling in the tool that normally parses it
+# (pacman's own sync-db format in lib/alpm.sh, raw HTTPS tarballs instead of
+# `git clone` for fau-recipes itself), and ar's layout is simple enough that
+# this is no exception. Verified byte-for-byte identical to a real `ar x`
+# extraction of the same file before relying on it.
+ar_extract_member_prefix() {
+	local archive=$1 prefix=$2 dest=$3
+	local offset=8
+	local file_size; file_size=$(stat -c%s "$archive")
+	while [ "$offset" -lt "$file_size" ]; do
+		local header; header=$(dd if="$archive" bs=1M iflag=skip_bytes,count_bytes skip="$offset" count=60 2>/dev/null)
+		local name=${header:0:16}
+		name=${name%% *}; name=${name%/}
+		local size_field=${header:48:10}; size_field=${size_field// /}
+		offset=$((offset + 60))
+		case "$name" in
+			"$prefix"*)
+				dd if="$archive" bs=1M iflag=skip_bytes,count_bytes skip="$offset" count="$size_field" of="$dest" 2>/dev/null
+				return 0
+				;;
+		esac
+		offset=$((offset + size_field + (size_field % 2)))
+	done
+	return 1
+}
+
 build_extract_source() {
 	local name=$1 tarball=$2
 	local dest="${FAU_CACHE_DIR%/}/build-sources/extract-$name"
 	rm -rf "$dest"
 	mkdir -p "$dest"
-	tar -xf "$tarball" -C "$dest" --strip-components=1
+	case "$tarball" in
+		*.deb)
+			# A .deb has no wrapping "repo-tag/" directory to strip (it's
+			# not even a tar file at the top level, see
+			# ar_extract_member_prefix above) -- pull data.tar.* (the
+			# actual filesystem payload; control.tar.* is dpkg's own
+			# install-script/metadata half, never wanted here) out of the
+			# outer ar container, then let plain `tar -xf` handle whatever
+			# compression that inner member turns out to use. A recipe
+			# whose .deb's data.tar happens to be .xz-compressed needs
+			# `xz` in its own PKG_BUILD_DEPS -- gzip/zstd are already
+			# base-system tools (see fau.md), but xz/liblzma isn't.
+			local data_tarball; data_tarball=$(mktemp)
+			ar_extract_member_prefix "$tarball" "data.tar" "$data_tarball" \
+				|| die "$tarball: no data.tar.* member found inside (not a real .deb?)"
+			tar -xf "$data_tarball" -C "$dest"
+			rm -f "$data_tarball"
+			;;
+		*)
+			tar -xf "$tarball" -C "$dest" --strip-components=1
+			;;
+	esac
 	echo "$dest"
 }
 

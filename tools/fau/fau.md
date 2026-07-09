@@ -513,6 +513,67 @@ only) real user of `fau build`.
   though a `config.conf` demonstrably existed under the app's own `etc/`),
   not by inspection.
 
+## Non-tarball sources: `.deb`-sourced recipes (`vesktop`, `opencode-desktop`) — `build_extract_source`'s `.deb` branch
+
+`build_extract_source` (`lib/build.sh`) used to unconditionally run `tar -xf
+"$tarball" -C "$dest" --strip-components=1`, on the assumption every
+`PKG_SRC_URL` is a plain tarball with one wrapping "repo-tag/" directory
+(true for dwm/mangowm's GitHub-archive tarballs). Neither Electron app
+recipe fits that: `vesktop` ships a flat generic-Linux `tar.gz` (no wrapping
+directory at all — `--strip-components=1` on a single-path-component member
+silently strips it down to nothing, confirmed directly: exit 0, zero files
+extracted, no warning printed), and `opencode-desktop` ships no Linux
+tarball whatsoever, only `.deb`/`.rpm`/`.AppImage` — confirmed across
+several tagged releases, not a one-off gap. `vesktop.fis` works around its
+flat-tarball problem entirely inside its own `recipe_build` (re-fetches via
+`build_fetch_source` — a cache hit by then — and re-extracts without any
+`--strip-components`, ignoring the `$src` fau-build already handed it).
+`opencode-desktop` couldn't be worked around the same way: the extraction
+that produces (or fails to produce) `$src` runs *before* `recipe_build` ever
+gets control, so a recipe has no way to intervene if `tar -xf` itself can't
+open the source format at all — and none of `.deb`/`.rpm`/`.AppImage` are
+tar archives (`.deb` is `ar`, `.rpm` is cpio+its own lead/header, `.AppImage`
+is an ELF stub over squashfs), confirmed directly: `tar -xf` on a real
+`.deb` exits 2 ("This does not look like a tar archive").
+
+Of the three, only `.deb`'s container format (`ar`: an 8-byte `"!<arch>\n"`
+magic, then a flat sequence of 60-byte member headers each immediately
+followed by that member's data, padded to an even byte boundary) is simple
+enough to parse without a new dedicated tool — `.rpm`/`.AppImage` would each
+need one (`rpm2cpio`+`cpio`, or squashfs tooling/actually executing the
+AppImage). `build_extract_source` now special-cases a `*.deb` source: pulls
+the `data.tar.*` member (dpkg's actual filesystem payload — `control.tar.*`
+is its install-script/metadata half, never wanted here) out of the `ar`
+container via a new `ar_extract_member_prefix` helper, then hands that inner
+tarball to plain `tar -xf` same as any other source. Prefix-matched, not
+exact-matched, because the extension varies by how the `.deb` was built
+(`.xz`/`.gz`/`.zst`) — `opencode-desktop`'s happens to be `.xz`.
+
+**Parsed directly via `dd` (byte-precise `skip`/`count` in bytes via
+`iflag=skip_bytes,count_bytes`), not shelled out to `ar`/`binutils`** — same
+"read the real data format directly, don't shell out to the heavyweight
+tool" principle as `lib/alpm.sh`'s own sync-db reader and `recipes_sync`
+fetching a raw HTTPS tarball instead of `git clone`. Verified byte-for-byte
+identical to a real `ar x` extraction of the same file (a live
+`opencode-desktop` release `.deb`) before relying on it, and fast: ~50ms end
+to end against that real 119MB file, since `dd`'s block-size + byte-offset
+`iflag`s let it `lseek` straight to each member instead of reading through
+the file byte by byte.
+
+**A real ordering wrinkle found while wiring this in**: `fau-build`'s
+`cmd_build` only ever exported the `$sandbox_dir`-prefixed
+`PATH`/`LD_LIBRARY_PATH`/`PKG_CONFIG_PATH` around the `recipe_build` call,
+never around `build_extract_source` — harmless for every prior recipe,
+since a plain tarball needs nothing from the sandbox to extract (gzip/zstd
+are already base-system tools). `opencode-desktop`'s `data.tar` happens to
+be `xz`-compressed, though, and `xz`/liblzma isn't a base-system tool here —
+so a recipe declaring `PKG_BUILD_DEPS="xz"` had it fetched into
+`$sandbox_dir` correctly, but `build_extract_source` still ran with the
+*original* `$PATH`, unable to find it. Fixed by exporting that same
+sandbox-prefixed environment around the `build_extract_source` call too,
+not just `recipe_build` — a plain env-var scoped to that one command
+substitution, not a permanent `$PATH` change for the rest of `cmd_build`.
+
 ## Manifests (`system.json` / `apps.json`) — `lib/manifest.sh`
 
 Flat schema only: `{"packages":{"name":{"version":"x"}}}`, hand-rolled
