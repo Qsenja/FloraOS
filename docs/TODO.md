@@ -30,14 +30,33 @@ file is only for things that could reasonably be finished later.
   turned off in firmware setup to boot a FloraOS install. Fine today (no
   signed-boot requirement has shown up yet, same reasoning as the syslog
   daemon entry above); a real gap once that changes.
-- **Single-user mode (runlevel `S1`) doesn't actually do anything** —
-  `/etc/inittab`'s `l1:S1:wait:/usr/bin/openrc single` has no
-  `etc/runlevels/single/` services defined, so reaching it today invokes
-  neither an emergency shell nor a password prompt of any kind. `sulogin`
-  (see ARCHITECTURE.md/MANIFEST.md's sysvinit entry) now exists, correctly
-  linked and verified working end-to-end, specifically to be usable here —
-  it just isn't wired in yet. Found while restoring `sulogin`, not the
-  thing that restoration fixed.
+- **Single-user mode (runlevel `S1`) now wired up, one real bug still
+  open** — `etc/runlevels/single/emergency-shell` (new, in
+  `apply-skeleton.sh`) runs `sulogin` via a `start()` override; confirmed
+  working end-to-end when invoked directly (`/etc/init.d/emergency-shell
+  start` → real `sulogin` prompt → empty password → root maintenance
+  shell). Building it surfaced a real, previously-unknown bug affecting
+  *all four* of FloraOS's own custom services (`floraseat`, `dhcpcd`,
+  `udevd`, `emergency-shell`): they used the shebang
+  `#!/usr/bin/openrc-run`, but OpenRC's own dependency-cache generator
+  (`sh/gendepends.sh`) does a literal string match against
+  `#!/sbin/openrc-run` before sourcing a script for `depend()` info —
+  `/sbin` resolving to the same binary via symlink doesn't matter, the
+  comparison is textual. All four were silently absent from
+  `/run/openrc/deptree` on every boot, so none of their `depend()`
+  declarations (e.g. `floraseat`'s `need udevd`) were ever honored by
+  OpenRC's scheduler — confirmed by inspecting the live cache, not
+  guessed. Fixed by changing all four to the literal `#!/sbin/openrc-run`.
+  Remaining open item: manually running `openrc single` from an
+  already-booted multi-user shell (runlevel 3) showed inconsistent
+  behavior tearing down `dhcpcd`/network/local mounts on the way in
+  (sometimes finishing cleanly, sometimes taking much longer) before ever
+  reaching `emergency-shell`'s start phase — this exercises a harder
+  transition (3 → single) than the real intended path (booting straight
+  into single-user from GRUB, where multi-user services were never
+  started to begin with). Not yet tested via that real path; needs a
+  kernel-cmdline-driven single-user boot test before calling the
+  interactive-transition case solid.
 
 - **`fau setlang`/`fau setkeyboard`** — no locale/keymap switcher exists
   yet. `usr/share/locale` (91 languages' gettext catalogs) and

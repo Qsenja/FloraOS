@@ -11,6 +11,7 @@ BUILD_DATE=$(date -u +%Y%m%d 2>/dev/null || echo unknown)
 mkdir -p "$ROOTFS"/{root,home,proc,sys,dev,run,tmp,mnt}
 mkdir -p "$ROOTFS/etc/inittab.d"
 mkdir -p "$ROOTFS/etc/runlevels/default"
+mkdir -p "$ROOTFS/etc/runlevels/single"
 mkdir -p "$ROOTFS/var/log"
 chmod 1777 "$ROOTFS/tmp"
 
@@ -140,10 +141,20 @@ fs:2345:respawn:/usr/bin/floraseat >>/var/log/floraseat.log 2>&1
 s0:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin ttyS0 115200 vt100
 EOF
 
+# All four of this file's own custom services (dhcpcd, udevd, floraseat,
+# emergency-shell below) must use the literal shebang "#!/sbin/openrc-run",
+# not "#!/usr/bin/openrc-run" -- even though /sbin is symlinked to usr/bin
+# and both resolve to the same binary. OpenRC's own dependency-cache
+# generator (sh/gendepends.sh) does a plain string comparison against each
+# script's first line before sourcing it for depend() info; anything else
+# is silently skipped, no error. Found by chasing a real hang: emergency-
+# shell's own "need localmount" (below) was being completely ignored,
+# traced to it never appearing in /run/openrc/deptree at all.
+#
 # init.d script for dhcpcd -- manual rc-service only; not symlinked into
 # etc/runlevels/default/ (see the inittab comment above).
 cat > "$ROOTFS/etc/init.d/dhcpcd" <<'EOF'
-#!/usr/bin/openrc-run
+#!/sbin/openrc-run
 description="DHCP client"
 command=/usr/sbin/dhcpcd
 command_args="--quiet"
@@ -158,7 +169,7 @@ chmod 755 "$ROOTFS/etc/init.d/dhcpcd"
 
 # Same "manual rc-service only" reasoning as dhcpcd's script above.
 cat > "$ROOTFS/etc/init.d/udevd" <<'EOF'
-#!/usr/bin/openrc-run
+#!/sbin/openrc-run
 description="Device manager (eudev)"
 command=/usr/bin/udevd
 command_args="--daemon"
@@ -192,7 +203,7 @@ SUBSYSTEM=="input", ATTRS{name}=="Power Button", ENV{LIBINPUT_IGNORE_DEVICE}="1"
 EOF
 
 cat > "$ROOTFS/etc/init.d/floraseat" <<'EOF'
-#!/usr/bin/openrc-run
+#!/sbin/openrc-run
 description="Seat management daemon (floraseat, seatd-protocol-compatible)"
 command=/usr/bin/floraseat
 pidfile="/run/floraseat.pid"
@@ -203,6 +214,41 @@ depend() {
 }
 EOF
 chmod 755 "$ROOTFS/etc/init.d/floraseat"
+
+# Single-user/emergency mode (inittab's `l1:S1:wait:/usr/bin/openrc single`)
+# ran openrc against an empty etc/runlevels/single/ and did nothing at all --
+# no shell, no prompt, silently unusable. sulogin exists specifically for
+# this (see docs/MANIFEST.md's sysvinit entry) but was never wired in. Not a
+# command= service: sulogin is an interactive, blocking session, not a
+# daemon start-stop-daemon should background, so start() just runs it
+# directly and waits for it to exit (an admin returning to a normal
+# runlevel by hand afterwards, standard sysvinit single-user semantics).
+#
+# depend() need localmount is load-bearing, not decorative: openrc's own
+# runlevel-switch code (src/rc/rc.c) explicitly excludes the boot runlevel
+# (which owns localmount) when heading to "single", then tears down
+# anything not otherwise still "needed" -- confirmed by reading rc.c and by
+# a real hang, "openrc single" got stuck forever at "Unmounting
+# filesystems" because nothing told it root should stay mounted. Declaring
+# "need localmount" here makes openrc's reverse-dependency check
+# (do_stop_services' "needsme" pass) see that this about-to-start service
+# needs localmount, so it's skipped instead of stopped.
+cat > "$ROOTFS/etc/init.d/emergency-shell" <<'EOF'
+#!/sbin/openrc-run
+description="Single-user emergency shell (sulogin)"
+
+depend() {
+	need localmount
+}
+
+start() {
+	ebegin "Starting single-user shell"
+	/usr/bin/sulogin
+	eend 0
+}
+EOF
+chmod 755 "$ROOTFS/etc/init.d/emergency-shell"
+ln -sf /etc/init.d/emergency-shell "$ROOTFS/etc/runlevels/single/emergency-shell"
 
 # Dead weight removed: FloraOS relies entirely on dhcpcd, not these two
 # scripts' static ifconfig/route bringup -- see docs/ARCHITECTURE.md.
