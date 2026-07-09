@@ -11,20 +11,25 @@ recipe_build() {
 	mkdir -p "$BUILD_DIR/linux-headers"
 	make -C "$src" ARCH=x86_64 INSTALL_HDR_PATH="$BUILD_DIR/linux-headers" headers_install >/dev/null
 
-	# kbuild's own host tools (scripts/basic/fixdep, scripts/kconfig/conf,
-	# ...) compile against glibc's real <limits.h>, which transitively
-	# #includes <linux/limits.h> -- never an issue building the ISO on a
-	# real dev machine (already has its own linux-api-headers), but a live
+	# kbuild's own host tools (scripts/basic/fixdep, scripts/unifdef,
+	# scripts/kconfig/conf, objtool, ...) compile against glibc's real
+	# <limits.h>/<errno.h>/etc, which transitively #include their
+	# linux/*.h counterparts -- never an issue building the ISO on a real
+	# dev machine (already has its own linux-api-headers), but a live
 	# FloraOS system rebuilding its own kernel via `fau bootstrap-build`
 	# has no such fallback and fails outright without this. Same "dev
 	# host already has X" masking-bug class as dwm.fis and the first 5
 	# system recipes' missing PKG_BUILD_DEPS -- see fau.md. Reuses the
-	# headers just installed above for glibc; needed from the very first
-	# `make defconfig` onward, not just at the final build step.
-	export HOSTCFLAGS="-idirafter $BUILD_DIR/linux-headers/include"
+	# headers just installed above for glibc. Must be passed on every make
+	# command line, not just exported: the top-level Makefile sets its own
+	# HOSTCFLAGS with `:=`, which overrides an inherited environment
+	# variable but not a command-line override -- confirmed the hard way,
+	# an exported-only version got past defconfig fine but still failed
+	# later on scripts/unifdef during the main build.
+	local hostcflags="-idirafter $BUILD_DIR/linux-headers/include"
 
 	log "linux-lts: configuring (defconfig)"
-	make -C "$src" ARCH=x86_64 defconfig >/dev/null
+	make -C "$src" ARCH=x86_64 HOSTCFLAGS="$hostcflags" defconfig >/dev/null
 
 	# GUI-readiness config -- see docs/MANIFEST.md. BTRFS_FS must be =y (built-in), not
 	# a module, since florainstall boots the target disk directly with no initramfs.
@@ -72,10 +77,10 @@ recipe_build() {
 	# isn't needed before userspace is up, so it doesn't need to be built in --
 	# eudev's real --enable-kmod (not the DRM case's deliberate no-autoload)
 	# loads it via modalias the same as any other PCI device driver module.
-	make -C "$src" ARCH=x86_64 olddefconfig >/dev/null
+	make -C "$src" ARCH=x86_64 HOSTCFLAGS="$hostcflags" olddefconfig >/dev/null
 
 	log "linux-lts: building (this is the longest single step, -j$jobs)"
-	make -C "$src" ARCH=x86_64 -j"$jobs" bzImage modules >/dev/null
+	make -C "$src" ARCH=x86_64 HOSTCFLAGS="$hostcflags" -j"$jobs" bzImage modules >/dev/null
 
 	mkdir -p "$files/boot" "$files/lib/modules"
 	cp "$src/arch/x86/boot/bzImage" "$files/boot/vmlinuz-floraos"
