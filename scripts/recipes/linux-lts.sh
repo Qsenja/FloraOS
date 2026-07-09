@@ -11,6 +11,18 @@ recipe_build() {
 	mkdir -p "$BUILD_DIR/linux-headers"
 	make -C "$src" ARCH=x86_64 INSTALL_HDR_PATH="$BUILD_DIR/linux-headers" headers_install >/dev/null
 
+	# kbuild's own host tools (scripts/basic/fixdep, scripts/kconfig/conf,
+	# ...) compile against glibc's real <limits.h>, which transitively
+	# #includes <linux/limits.h> -- never an issue building the ISO on a
+	# real dev machine (already has its own linux-api-headers), but a live
+	# FloraOS system rebuilding its own kernel via `fau bootstrap-build`
+	# has no such fallback and fails outright without this. Same "dev
+	# host already has X" masking-bug class as dwm.fis and the first 5
+	# system recipes' missing PKG_BUILD_DEPS -- see fau.md. Reuses the
+	# headers just installed above for glibc; needed from the very first
+	# `make defconfig` onward, not just at the final build step.
+	export HOSTCFLAGS="-I$BUILD_DIR/linux-headers/include"
+
 	log "linux-lts: configuring (defconfig)"
 	make -C "$src" ARCH=x86_64 defconfig >/dev/null
 
