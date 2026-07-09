@@ -181,6 +181,18 @@ alpm_fetch_repo_db() {
 	if [ -n "$force" ] || [ ! -s "$dest" ]; then
 		if [ -z "$force" ] && [ -r "/var/lib/pacman/sync/$repo.db" ]; then
 			cp "/var/lib/pacman/sync/$repo.db" "$dest"
+		elif [ -n "$force" ]; then
+			# Quiet, no per-repo log line or progress bar: this is only ever
+			# alpm_refresh_dbs's own bulk multi-repo path (system+world+
+			# galaxy on Artix), whose caller (`fau update`) already prints
+			# one "refreshing package databanks..." line up front -- a
+			# second "fetching $repo.db..." plus its own progress bar per
+			# repo underneath that was pure noise (three near-identical
+			# blocks for what a user experiences as one single operation),
+			# not three separate ones the way `alpm_fetch_repo_db`'s other,
+			# real first-fetch caller genuinely benefits from seeing.
+			alpm_fetch "$repo" "$repo.db" "$dest.part" quiet
+			mv "$dest.part" "$dest"
 		else
 			log "fetching $repo.db..."
 			alpm_fetch "$repo" "$repo.db" "$dest.part"
