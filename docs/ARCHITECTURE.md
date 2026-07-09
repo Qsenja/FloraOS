@@ -417,6 +417,32 @@ moment for FloraOS's entire GUI effort -- from a black screen and a wall
 of misdirection (EGL vendor paths, GBM backend paths, Xwayland/libinput
 isolation gaps) down to one missing flag in one custom daemon.
 
+**No message bus of any kind ran anywhere on FloraOS**, found running
+`kitty` for real, after the fontconfig fix above got it past its earlier
+crash: `[glfw error]: Failed to connect to DBUS session bus. DBUS error:
+Unable to autolaunch a dbus-daemon without a $DISPLAY for X11`. That
+"autolaunch" fallback (what libdbus tries whenever
+`DBUS_SESSION_BUS_ADDRESS` isn't set) is genuinely an X11-only mechanism
+-- it stores/reads the bus address via an X11 root window property -- so
+it fails on the missing `$DISPLAY` even on a pure-Wayland session; the
+real problem underneath is simply that no bus was running to connect to
+in the first place. Fixed by installing `dbus` at the base-system level
+(`build-rootfs.sh`, same `bootstrap` mechanism as `fontconfig`/
+`ttf-dejavu` above -- a message bus is inherently a shared service, not
+a per-app library) and starting `dbus-daemon` at boot as another inittab
+`once` entry (`apply-skeleton.sh`, same pattern as `dhcpcd`/`udevd`) on
+a fixed address rather than the usual per-session dynamic one, since
+FloraOS only ever has one active session at a time. Started with
+`--address=unix:path=/run/dbus/session_bus_socket` explicitly, not
+`--session` alone: verified with `bwrap` that this needs no
+`/etc/dbus-1` config file at all (which `install_one_alpm`'s own
+`/etc`-strip would have dropped anyway, same as fontconfig) --
+`--address` overrides the one thing `session.conf` would otherwise
+supply, and a real client (`dbus-send`) connected and got a real reply
+with zero config present. `DBUS_SESSION_BUS_ADDRESS` set in
+`/etc/profile` alongside `LANG`/`PATH` so every login shell (and
+anything spawned from it) can find the same fixed socket.
+
 root's `/etc/shadow` entry ships with an intentionally empty password field
 (traditional Unix for "no password required"), documented in `/etc/issue` so
 a first-time user sees it before being asked for credentials -- appropriate

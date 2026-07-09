@@ -338,8 +338,30 @@ main() {
 			</alias>
 		</fontconfig>
 		FONTEOF
+
+		log "=== dbus: message bus, via fau's alpm fallback ==="
+		# Found running `kitty` for real: "[glfw error]: Failed to connect
+		# to DBUS session bus. DBUS error: Unable to autolaunch a
+		# dbus-daemon without a $DISPLAY for X11" -- FloraOS ran no message
+		# bus of any kind, and libdbus's own "autolaunch" fallback (used
+		# whenever DBUS_SESSION_BUS_ADDRESS isn't set) is genuinely an X11
+		# mechanism (stores/reads the bus address via an X11 root window
+		# property), hence failing specifically on the missing $DISPLAY even
+		# though this is a pure-Wayland session. Installed at the
+		# base-system level, same as fontconfig above -- one shared daemon,
+		# not per-app (dbus is inherently a shared service, not a library
+		# each app links). The actual daemon is started at boot (inittab,
+		# apply-skeleton.sh) with an explicit --address, not --session
+		# alone: verified with bwrap masking dbus's own /etc/dbus-1 config
+		# entirely (confirmed via install_one_alpm's own /etc-strip that it
+		# would be missing anyway) -- `dbus-daemon --session --fork
+		# --address=unix:path=...` starts and accepts real client
+		# connections (verified with dbus-send) with zero config file
+		# present at all, since --address explicitly overrides the one
+		# thing session.conf would otherwise supply.
+		FAU_REPO_DIR="$REPO_DIR" FAU_ROOT="$ROOTFS_DIR" "$FAU_BIN" bootstrap dbus
 	else
-		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- skipping libgcc/fastfetch/fonts"
+		log "no /etc/pacman.d/mirrorlist or /etc/pacman.conf on this build host -- skipping libgcc/fastfetch/fonts/dbus"
 	fi
 
 	log "=== generating en_US.UTF-8 locale ==="

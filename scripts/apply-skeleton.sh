@@ -62,6 +62,12 @@ export PATH=/usr/bin:$HOME/apps/.bin
 # refuse to start at all ("is not a UTF-8 locale, and failed to find a
 # fallback"). Confirmed on a real run, not guessed.
 export LANG=en_US.UTF-8
+# dbus-daemon started at boot (inittab) on a fixed address, not the usual
+# per-session dynamic one -- see ARCHITECTURE.md. Without this, apps that
+# need a session bus fall through to libdbus's own X11-only "autolaunch"
+# fallback and fail outright on a pure-Wayland session (confirmed on a
+# real `kitty` run, not guessed).
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/session_bus_socket
 command -v fastfetch >/dev/null 2>&1 && fastfetch --config "$HOME/apps/fastfetch/config/fastfetch/config.jsonc"
 EOF
 
@@ -119,6 +125,12 @@ l6:6:wait:/usr/bin/openrc reboot
 dh:2345:once:/etc/init.d/dhcpcd start >/dev/null 2>&1
 
 ud:2345:once:/usr/bin/udevd --daemon && /usr/bin/udevadm trigger --action=add --type=subsystems && /usr/bin/udevadm trigger --action=add --type=devices && /usr/bin/udevadm settle >/dev/null 2>&1
+
+# One shared bus for the whole (single-user) system, at a fixed address
+# rather than the usual per-session dynamic one -- see ARCHITECTURE.md.
+# --address explicitly overrides what /etc/dbus-1/session.conf would
+# otherwise supply, so this needs no config file at all (confirmed).
+db:2345:once:mkdir -p /run/dbus && /usr/bin/dbus-daemon --session --fork --address=unix:path=/run/dbus/session_bus_socket --nopidfile >/dev/null 2>&1
 
 # floraseat: respawn, not once -- it runs in the foreground (see ARCHITECTURE.md).
 fs:2345:respawn:/usr/bin/floraseat >>/var/log/floraseat.log 2>&1
