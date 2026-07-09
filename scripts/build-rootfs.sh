@@ -397,6 +397,11 @@ main() {
 		-f "$utf8_charmap" \
 		en_US.UTF-8
 	rm -f "$utf8_charmap"
+	# usr/share/i18n is localedef's own *source* data (every locale/charmap
+	# that exists) -- build-time only, never read again once en_US.UTF-8 is
+	# generated above. See fau.md's "fau setlang" section for where a live
+	# system gets this data if a different locale is ever needed later.
+	rm -rf "$ROOTFS_DIR/usr/share/i18n"
 
 	log "=== applying /etc skeleton ==="
 	"$SELF_DIR/apply-skeleton.sh" "$ROOTFS_DIR" "${HOSTNAME:-floraos}"

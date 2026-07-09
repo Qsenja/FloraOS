@@ -741,6 +741,49 @@ since export. It shells out to the sibling `fau-install` tool for that
 reinstall (same "call the tool, don't inline its logic" shape as elsewhere
 in this project) rather than sourcing `app_install_one` directly.
 
+## Dead-weight strip: `strip_unreachable_docs` (`lib/common.sh`)
+
+Every package merge point (`install_one_alpm`, `app_install_one_alpm`,
+`build_merge_depends`) already stripped `/etc`/`usr/include`; measuring a
+real full base-system build found `usr/share/man` (47M, 3546 files across
+20 languages), `usr/share/locale` (46M, 91 languages' `.mo` catalogs),
+`usr/share/info`, and `usr/share/doc` made up the biggest chunk of rootfs
+size that's provably never read at runtime:
+
+- **`man`/`info`**: no `man` or `info` reader binary exists anywhere in
+  `usr/bin` on this system — confirmed by grepping the built rootfs, not
+  assumed. Not "an unused feature," genuinely unreachable: nothing could
+  open these files even if asked to.
+- **`locale`**: `/etc/profile` (`apply-skeleton.sh`) hardcodes
+  `LANG=en_US.UTF-8` always — gettext only ever consults a `.mo` catalog
+  matching the current `LANG`, so the other 90 languages shipped are never
+  read. English itself has no catalog to begin with (untranslated strings
+  are the built-in default), so stripping all of them costs nothing today.
+  A locale switcher that re-fetches the needed language on demand (rather
+  than shipping all 91 by default) is proposed but not yet built — see
+  docs/TODO.md.
+- **`doc`**: each package's own README/NEWS/ChangeLog — reference-only,
+  never opened by a running program.
+
+`strip_unreachable_docs` (`lib/common.sh`) deletes all four from every
+`FAU_ROOT`/app-dir merge. `scripts/lib/common.sh`'s `package_stage` (a
+separate file — the build pipeline doesn't source `tools/fau/lib/`) strips
+the same four from every from-source `MANDATORY_ORDER` package before it's
+staged, since those merge into the base system via `fau-bootstrap`'s
+plain-rsync `install_one`, not the alpm path `strip_unreachable_docs`
+covers. `build-rootfs.sh` additionally deletes `usr/share/i18n` (17M) from
+`$ROOTFS_DIR` right after its own `localedef` call — that's localedef's
+*source* data (every locale/charmap that exists, from glibc's own
+from-source build), needed only to generate `en_US.UTF-8` once at build
+time, never read again afterward.
+
+Measured end-to-end on a full rebuild: rootfs 519M -> 392M, ISO 222M ->
+192M. Boot-tested (`scripts/test-iso.sh`) and `fastfetch` (which touches
+fontconfig/ttf-dejavu, an unrelated codepath) still renders correctly —
+this strip only ever touches `usr/share/{man,info,doc,locale}` and
+build-time-only `usr/share/i18n`, never fonts, icons, or anything else
+under `usr/share`.
+
 ## Repo (`repo_add`/`repo_index`) — `lib/repo.sh`
 
 - A repo directory holds **at most one archive per package name**.

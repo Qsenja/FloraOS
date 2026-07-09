@@ -80,6 +80,9 @@ package_stage() {
 	rm -rf "$pkg_dir"
 	mkdir -p "$pkg_dir"
 	cp -a "$files_dir" "$pkg_dir/files"
+	# Same dead-weight strip as tools/fau/lib/common.sh's strip_unreachable_docs -- see ARCHITECTURE.md.
+	rm -rf "$pkg_dir/files/usr/share/man" "$pkg_dir/files/usr/share/info" \
+		"$pkg_dir/files/usr/share/doc" "$pkg_dir/files/usr/share/locale"
 	cat > "$pkg_dir/pkginfo" <<-EOF
 	name=$name
 	version=$version

@@ -653,6 +653,7 @@ install_one_alpm() {
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
 		rm -rf "$extract_dir/etc" "$extract_dir/usr/include"
+		strip_unreachable_docs "$extract_dir"
 
 		[ "$i" -eq "$total" ] && version=${pkg_version[$i]}
 		[ "$i" -eq "$total" ] && record_files "$name" "$extract_dir"
@@ -739,6 +740,7 @@ app_install_one_alpm() {
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
 		rm -rf "$extract_dir/usr/include"
+		strip_unreachable_docs "$extract_dir"
 		# fauelf rewrites absolute DT_NEEDED entries to bare basenames -- see fau.md and ../fauelf/fauelf.md.
 		find "$extract_dir" -type f -print0 | xargs -0 -r "$FAU_ELF_PATCH" || die "fauelf failed patching files under $extract_dir"
 		# "$i" -eq "$total", not "${pkg_name[$i]}" = "$name" -- see fau.md's man/man-db alias bug.

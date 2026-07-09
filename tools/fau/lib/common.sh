@@ -43,6 +43,16 @@ tar_extract_or_die() {
 	rm -f "$tar_err"
 }
 
+# strip_unreachable_docs <extracted-package-dir> -- deletes man/info/doc/
+# locale from a package about to be merged. See fau.md's "Dead-weight
+# strip" section: no reader for man/info exists anywhere in FloraOS, doc/
+# is reference-only, and locale's .mo catalogs are only ever consulted for
+# a LANG this project doesn't set by default (see 'fau setlang').
+strip_unreachable_docs() {
+	local dir=$1
+	rm -rf "$dir/usr/share/man" "$dir/usr/share/info" "$dir/usr/share/doc" "$dir/usr/share/locale"
+}
+
 # offer_build <name> [version] -- if a fau-build recipe exists for <name>
 # (checked via recipe_lookup, lib/recipes.sh -- a fresh recipes_sync first,
 # so this sees a recipe pushed to FAU_RECIPES_REPO after this ISO was built,
