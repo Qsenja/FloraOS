@@ -1138,13 +1138,18 @@ an accepted, documented simplification, not a full rpmvercmp port.
   not 0) confirmed to be pre-existing algorithm behavior, not something
   either version changed.
 - **`app_wrapper_write`'s 8 separate `find $app_dir` traversals were
-  investigated and deliberately left alone.** Looked like an obvious
-  8x-redundant-walk target on paper, but measured against a synthetic
-  21,000-file tree (larger than any real FloraOS app — Electron bundles
-  pack most content into one `.asar`, not loose files) it's 0.2s total for
-  all 8. Not a real bottleneck at any scale this project operates at;
-  consolidating it would trade real correctness risk (subtle type/path-
-  matching differences across the 8 lookups) for an unmeasurable benefit.
+  consolidated into 1.** An earlier pass measured this against a synthetic
+  21,000-file tree and concluded it wasn't worth touching (0.2s total) —
+  that number only counted the tree walks themselves. Measured for real
+  against `fastfetch`'s actual installed app dir plus a real 23,000-file
+  rootfs standing in for a large Electron-scale app, the dominant cost
+  turned out to be the per-match `dirname` *subprocess fork* the `.so`/`.pm`
+  collectors run once per match (646 of them on that rootfs), not the
+  traversal — 0.451s down to 0.056s (~8x) once one `find` (emitting
+  `%y %p\0`, classified in a single bash loop, `dirname` done via `${x%/*}`
+  parameter expansion instead of a subshell per match) replaced both the
+  8 walks and the per-match forks. Wrapper output verified byte-identical
+  against the original on a real installed app dir, not just eyeballed.
 
 ## `fau backup` (`fau-backup`) — see [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md)'s
 fau-backup section for the full design (subvolume layout, the

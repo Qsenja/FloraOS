@@ -104,12 +104,73 @@ app_wrapper_write() {
 	local name=$1 app_dir=$2 relbin=$3
 	local cmd_name; cmd_name=$(basename "$relbin")
 	local wrapper="$FAU_APPS_BIN_DIR/$cmd_name"
+
+	# One traversal of $app_dir feeding every classification below, not one
+	# find per env var -- see fau.md. dirname is done via parameter
+	# expansion, not a subshell per match, since a large app dir can have
+	# hundreds of matches.
+	local nested_libdirs="" perl5lib="" xkb_config_root="" egl_vendor_dir="" \
+		gbm_backends_dir="" wlr_xwayland="" libinput_quirks_dir="" fontconfig_file=""
+	local -a libdir_list=() perldir_list=()
+	local ftype fpath entry d
+	shopt -s nocasematch
+	while IFS= read -r -d '' entry; do
+		ftype=${entry%% *}; fpath=${entry#* }
+		case "$fpath" in
+			*/rules/evdev)
+				if [ "$ftype" = f ] && [ -z "$xkb_config_root" ]; then
+					d=${fpath%/*}; [ "$d" = "$fpath" ] && d=.
+					xkb_config_root=${d%/*}
+					[ "$xkb_config_root" = "$d" ] && xkb_config_root=.
+				fi ;;
+			*/glvnd/egl_vendor.d)
+				if [ "$ftype" = d ] && [ -z "$egl_vendor_dir" ]; then
+					egl_vendor_dir=$fpath
+				fi ;;
+			*_gbm.so)
+				if [ "$ftype" = f ] && [ -z "$gbm_backends_dir" ]; then
+					gbm_backends_dir=${fpath%/*}; [ "$gbm_backends_dir" = "$fpath" ] && gbm_backends_dir=.
+				fi ;;
+			*/bin/Xwayland)
+				if [ "$ftype" = f ] && [ -z "$wlr_xwayland" ]; then
+					wlr_xwayland=$fpath
+				fi ;;
+			*/libinput/*.quirks)
+				if [ "$ftype" = f ] && [ -z "$libinput_quirks_dir" ]; then
+					libinput_quirks_dir=${fpath%/*}; [ "$libinput_quirks_dir" = "$fpath" ] && libinput_quirks_dir=.
+				fi ;;
+			*/etc/fonts/fonts.conf)
+				if [ "$ftype" = f ] && [ -z "$fontconfig_file" ]; then
+					fontconfig_file=$fpath
+				fi ;;
+		esac
+		case "$fpath" in
+			*.so*)
+				d=${fpath%/*}; [ "$d" = "$fpath" ] && d=.
+				libdir_list+=("$d") ;;
+		esac
+		case "$fpath" in
+			*.pm)
+				d=${fpath%/*}; [ "$d" = "$fpath" ] && d=.
+				perldir_list+=("$d") ;;
+		esac
+	done < <(find "$app_dir" \( \
+			-iname '*.so*' -o -iname '*.pm' -o \
+			-path '*/rules/evdev' -o -path '*/glvnd/egl_vendor.d' -o \
+			-name '*_gbm.so' -o -path '*/bin/Xwayland' -o \
+			-path '*/libinput/*.quirks' -o -path '*/etc/fonts/fonts.conf' \
+		\) -printf '%y %p\0' 2>/dev/null)
+	shopt -u nocasematch
 	# Nested lib dirs (e.g. perl's libperl.so) are found explicitly, not just usr/lib:lib -- see fau.md.
-	local nested_libdirs; nested_libdirs=$(find "$app_dir" -iname '*.so*' -exec dirname {} \; 2>/dev/null | sort -u | tr '\n' ':')
+	if [ "${#libdir_list[@]}" -gt 0 ]; then
+		nested_libdirs=$(printf '%s\n' "${libdir_list[@]}" | sort -u | tr '\n' ':')
+	fi
 	local app_libdir="$app_dir/usr/lib:$app_dir/lib:${nested_libdirs%:}"
 	app_libdir=${app_libdir%:}
 	# PERL5LIB covers perl's own compiled-in @INC, which LD_LIBRARY_PATH alone doesn't fix -- see fau.md.
-	local perl5lib; perl5lib=$(find "$app_dir" -iname '*.pm' -exec dirname {} \; 2>/dev/null | sort -u | tr '\n' ':')
+	if [ "${#perldir_list[@]}" -gt 0 ]; then
+		perl5lib=$(printf '%s\n' "${perldir_list[@]}" | sort -u | tr '\n' ':')
+	fi
 	perl5lib=${perl5lib%:}
 	# XKB_CONFIG_ROOT: libxkbcommon has its own compiled-in default XKB data
 	# root (a real absolute host path, e.g. /usr/share/xkeyboard-config-2 --
@@ -125,8 +186,6 @@ app_wrapper_write() {
 	# Found via the "rules/evdev" marker file -- present at
 	# <XKB_CONFIG_ROOT>/rules/evdev in every real xkeyboard-config install --
 	# so this only ever fires for an app that actually bundles the data.
-	local xkb_config_root; xkb_config_root=$(find "$app_dir" -type f -path '*/rules/evdev' 2>/dev/null | head -n1)
-	[ -n "$xkb_config_root" ] && xkb_config_root=$(dirname "$(dirname "$xkb_config_root")")
 	# __EGL_VENDOR_LIBRARY_DIRS: libglvnd's libEGL.so.1 dispatcher (mesa's
 	# EGL is loaded through it, not directly) only ever scans its own
 	# compiled-in vendor config dirs -- /etc/glvnd/egl_vendor.d and
@@ -146,7 +205,6 @@ app_wrapper_write() {
 	# explicitly documented as the override for the default search path.
 	# Found via the "glvnd/egl_vendor.d" marker directory -- only ever
 	# fires for an app that actually bundles mesa/libglvnd.
-	local egl_vendor_dir; egl_vendor_dir=$(find "$app_dir" -type d -path '*/glvnd/egl_vendor.d' 2>/dev/null | head -n1)
 	# GBM_BACKENDS_PATH: even with libEGL correctly finding mesa via the
 	# __EGL_VENDOR_LIBRARY_DIRS fix above, mesa's own libgbm.so has a THIRD,
 	# separate hardcoded search path of its own -- defaults to
@@ -166,8 +224,6 @@ app_wrapper_write() {
 	# without the override, and succeeds end-to-end (full EGL/GL context
 	# creation) once GBM_BACKENDS_PATH points at a copy of the backend .so,
 	# even with the real path still masked.
-	local gbm_backends_dir; gbm_backends_dir=$(find "$app_dir" -type f -name '*_gbm.so' 2>/dev/null | head -n1)
-	[ -n "$gbm_backends_dir" ] && gbm_backends_dir=$(dirname "$gbm_backends_dir")
 	# WLR_XWAYLAND: wlroots' own Xwayland integration checks a hardcoded
 	# absolute "/usr/bin/Xwayland" rather than searching PATH, even though
 	# PATH is already set to include $app_dir/usr/bin above -- xorg-xwayland
@@ -181,7 +237,6 @@ app_wrapper_write() {
 	# own documented override (see wlroots' docs/env_vars.md) -- exists
 	# specifically so a caller can swap in an alternate Xwayland without a
 	# global system change, which is exactly this situation.
-	local wlr_xwayland; wlr_xwayland=$(find "$app_dir" -type f -path '*/bin/Xwayland' 2>/dev/null | head -n1)
 	# LIBINPUT_QUIRKS_DIR: libinput's own device-quirks loader is hardcoded
 	# to /usr/share/libinput -- libinput (already in mango's PKG_DEPENDS)
 	# merges its real quirks files in at
@@ -196,8 +251,6 @@ app_wrapper_write() {
 	# "../libinput/src/quirks.c" and the "/usr/share/libinput" default,
 	# unambiguously the env var backing this exact lookup (same standard
 	# of evidence used for XKB_CONFIG_ROOT above).
-	local libinput_quirks_dir; libinput_quirks_dir=$(find "$app_dir" -type f -name '*.quirks' -path '*/libinput/*' 2>/dev/null | head -n1)
-	[ -n "$libinput_quirks_dir" ] && libinput_quirks_dir=$(dirname "$libinput_quirks_dir")
 	# FONTCONFIG_FILE: fontconfig's own default config path is hardcoded to
 	# /etc/fonts/fonts.conf -- any app that bundles fontconfig as a
 	# dependency (e.g. foot, kitty) merges its own copy in at
@@ -213,7 +266,6 @@ app_wrapper_write() {
 	# shared /usr/share/fonts works identically for every isolated app --
 	# see docs/ARCHITECTURE.md for where that directory's actual contents
 	# come from).
-	local fontconfig_file; fontconfig_file=$(find "$app_dir" -type f -path '*/etc/fonts/fonts.conf' 2>/dev/null | head -n1)
 	# XDG_DATA_DIRS: every isolated app's own XDG_DATA_HOME is its private
 	# $app_dir/data -- fine for that app's own state, but it means no app
 	# can ever see another app's .desktop entries, icons, etc. (each app is
