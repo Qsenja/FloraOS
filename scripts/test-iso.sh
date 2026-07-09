@@ -83,7 +83,7 @@ rm -f "$SERIAL_SOCK" "$INPUT_FIFO"
 kernel_ok=0
 shell_ok=0
 grep -q "Linux version ${KERNEL_VERSION:-}" "$BOOT_LOG" 2>/dev/null && kernel_ok=1
-grep -q "floraos-boot-ok" "$BOOT_LOG" 2>/dev/null && shell_ok=1
+grep -q "root@flora #" "$BOOT_LOG" 2>/dev/null && shell_ok=1
 
 log "kernel booted: $([ $kernel_ok -eq 1 ] && echo yes || echo no)"
 log "reached login shell: $([ $shell_ok -eq 1 ] && echo yes || echo no)"

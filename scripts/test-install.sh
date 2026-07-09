@@ -12,7 +12,7 @@ source "$SELF_DIR/lib/common.sh"
 ISO="${1:-$FLORA_ROOT/floraos.iso}"
 DISK_IMG="$WORK_DIR/test-install-disk.img"
 DISK_SIZE="${TEST_INSTALL_DISK_SIZE:-6G}"
-LOGIN_MARKER="floraos-boot-ok"
+LOGIN_MARKER="root@flora #"
 SNAP_NAME="testsnap"
 SNAP_TITLE="FloraOS (backup: $SNAP_NAME)"
 

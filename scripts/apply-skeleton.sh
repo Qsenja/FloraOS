@@ -55,7 +55,7 @@ devtmpfs        /dev            devtmpfs        defaults        0 0
 EOF
 
 cat > "$ROOTFS/etc/profile" <<'EOF'
-export PS1='floraos-boot-ok # '
+export PS1='\u@flora # '
 export PATH=/usr/bin:$HOME/apps/.bin
 # en_US.UTF-8 generated at build time (build-rootfs.sh) -- without a real
 # UTF-8 locale, programs fall back to bare POSIX "C" and some (e.g. foot)

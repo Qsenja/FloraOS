@@ -11,7 +11,7 @@ source "$SELF_DIR/lib/common.sh"
 ISO="${1:-$FLORA_ROOT/floraos.iso}"
 DISK_IMG="$WORK_DIR/test-install-uefi-disk.img"
 DISK_SIZE="${TEST_INSTALL_DISK_SIZE:-6G}"
-LOGIN_MARKER="floraos-boot-ok"
+LOGIN_MARKER="root@flora #"
 
 require_cmd qemu-system-x86_64
 require_cmd qemu-img
