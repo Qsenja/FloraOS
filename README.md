@@ -1,295 +1,110 @@
 # FloraOS
 
-A minimal, from-scratch Linux distribution. No systemd, no upstream binary
-repo dependency (not Arch/Artix-based) — every package is compiled from its
-pinned upstream source (see `config/versions.conf`). OpenRC + sysvinit for
-init, GNU userland (bash/coreutils/util-linux), and `fau`, FloraOS's own
-system manager (package install/remove today, growing into the rest of the
-running system — services, config, backups), written from scratch rather
-than forked from an existing one.
+A Linux distribution built from scratch, source up. No systemd, no Arch or
+Artix binaries anywhere in the base image: every package is compiled from
+pinned upstream source (`config/versions.conf`). OpenRC and sysvinit handle
+init. GNU userland underneath. And `fau`, FloraOS's own system manager,
+handles everything else: packages, backups, services, users, written from
+the ground up instead of forked from something that already exists.
 
-What makes FloraOS different: user-installed apps via `fau install` live
-entirely under `~/apps/<name>/` — binary, config, cache, logs, all in one
-self-contained directory, never scattered across `/usr`, `/etc`, `/var/log`.
-`fau remove firefox` deletes exactly that directory and nothing else. See
+## The idea
+
+Most distros scatter an installed app across `/usr`, `/etc`, `/var/log`, and
+hope you never actually need to remove one cleanly. FloraOS doesn't.
+`fau install firefox` puts everything under `~/apps/firefox/`: binary,
+config, cache, logs, one self-contained folder. `fau remove firefox` deletes
+that folder. Nothing else on the system is touched. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#app-isolation-per-app-directories-under-apps)
-for how and why, and its real limits.
+for how that actually works, and where its limits are.
 
-## Status: boots to a working shell, verified
+## Where it stands
 
-`./floraiso test` passes: the kernel starts, and a *real, credential-checked*
-login actually succeeds and reaches a shell (driven through QEMU's serial
-console — the test types the login itself, it doesn't just watch for a
-shell to appear on its own). Concretely, right now:
+`./floraiso test` boots a real kernel, checks a real credential over a
+serial console, and reaches a shell. Not a "should work," a driven,
+end to end QEMU run. From there:
 
-- **30 packages** in the base image, every one built from pinned upstream
-  source on this machine (see [docs/MANIFEST.md](docs/MANIFEST.md) for the
-  full list and a one-line reason for each) — kernel, glibc, sysvinit,
-  OpenRC, ncurses, bash, coreutils, util-linux, e2fsprogs, iproute2, dhcpcd,
-  plus grep/sed/gawk/findutils/tar/zstd/rsync/attr/acl/libmd (all of it
-  needed for `fau` itself to actually work *inside* the running OS, not just
-  during the build — see docs/ARCHITECTURE.md for how that gap got found), plus
-  procps-ng/hostname/kbd so OpenRC's sysctl/hostname/keymaps services
-  actually run instead of failing non-fatally, plus libxcrypt for password
-  verification, plus curl/mbedtls so `fau` can actually fetch anything after
-  boot (see below), plus eudev (device nodes/hotplug for libinput and any
-  Wayland compositor), plus fastfetch as a deliberate branding touch.
-- **GUI-readiness**: the system-level prerequisites for a Wayland WM/DE now
-  exist — eudev for device nodes, **floraseat**
-  ([tools/floraseat](tools/floraseat)), FloraOS's own from-scratch daemon
-  speaking the real seatd wire protocol (so precompiled wlroots/libseat
-  fetched via `fau install <wm>` talks to it unmodified, without this
-  project taking on meson/ninja just to build real seatd), a generic
-  simpledrm/sysfb KMS driver built into the kernel, and `floralogin` now
-  setting up `XDG_RUNTIME_DIR`. floraseat is VT-bound — real `chvt`/
-  Ctrl+Alt+Fn switching between concurrent graphical sessions on different
-  VTs, ported from real seatd's own VT-handling code (see
-  [tools/floraseat/floraseat.md](tools/floraseat/floraseat.md)). See
-  docs/ARCHITECTURE.md's GUI-readiness section for the full picture and
-  [docs/TODO.md](docs/TODO.md) for what's still explicitly not done (a real
-  GPU-accelerated driver) — the WM/DE itself stays purely opt-in via
-  `fau install`, same as any other app, a permanent design choice rather
-  than a gap.
-- **`fau` can install real Arch/Artix packages with zero `pacman` involved**,
-  including from inside an already-booted FloraOS system, not just at build
-  time. It used to shell out to the real `pacman -Sp` for dependency
-  resolution; now it reads the sync-db/mirrorlist formats itself and
-  resolves PROVIDES (virtual packages) and version constraints
-  (`glibc>=2.38-1`) natively — checked against real `pacman`/`vercmp` output
-  (exact match resolving a real ~130-package closure, and ~300 real package
-  version comparisons) before trusting it. Verified end-to-end in QEMU: a
-  real DHCP lease, a real HTTPS fetch, then `fau install tree` succeeding
-  from inside the booted OS with `pacman` genuinely absent.
-- **Real password-backed login**, PAM-free. util-linux's own login requires
-  PAM to build at all (no fallback exists upstream), so FloraOS ships
-  **floralogin**, a small from-scratch login (`tools/floralogin`) that
-  verifies `/etc/shadow` via crypt(3)/libxcrypt, run through a real `agetty`
-  instead of spawning bash directly — which also fixed console job control
-  as a side effect (agetty properly attaches the controlling tty; bash
-  spawned directly never did). Root's password is intentionally empty
-  (traditional Unix "no password required" — see `/etc/issue` at the login
-  prompt) since this is a live, RAM-resident image with no `passwd` command
-  yet to set a real one.
-- **`fau` runs inside the booted OS**, not just as a build-time tool —
-  verified directly with an unprivileged `unshare --user --map-root-user
-  --mount chroot` into the built rootfs (no sudo needed): `fau
-  bootstrap-list` correctly prints all 29 installed base packages, and
-  ordinary commands like `ls` work.
-- **ISO size: 192MB** (`floraos.iso`, hybrid BIOS+UEFI, boots and runs
-  entirely from RAM as a live image). Grew from an earlier 135MB, mostly
-  from fixing a real bug where FloraOS's own compiled glibc was being
-  silently overwritten by Arch's smaller, pre-stripped binary (see
-  docs/ARCHITECTURE.md) — that extra size is FloraOS's own unstripped build
-  correctly winning out, not new bloat — plus curl/mbedtls, added
-  deliberately so `fau` can fetch packages after boot, plus florainstall/
-  floragrub-cfg and the rest of the `fau backup` machinery since.
-- **fastfetch** runs at login with a custom ASCII logo and a package count
-  read from `fau`'s own list.
-- **Persistent disk install**: run `florainstall` (a TUI, ncurses-based)
-  from a root shell on the live image to partition a real disk, format it
-  (btrfs, an `@` subvolume), and copy the running system onto it — both
-  BIOS and UEFI, autodetected from how the live image itself was booted (no
-  Secure Boot yet, see docs/TODO.md). Boot-tested end-to-end for real in
-  QEMU/KVM, not just compiled (see `scripts/test-install.sh` for BIOS,
-  `scripts/test-install-uefi.sh` for UEFI).
-- **`fau backup`**: a full-root btrfs snapshot restorable by picking an
-  alternate entry at the GRUB menu, `fau backup-restore` to promote one to
-  be the permanent default. Real disk installs only. See "fau, the system
-  manager" below and docs/ARCHITECTURE.md's fau-backup section.
-- **`fau service-*`**: a thin front end over OpenRC (`rc-update`/
-  `rc-service`) — list/enable/disable/start/stop/restart, without
-  reimplementing service supervision itself. See below.
-- **`fau seat-*`**: same idea, this time over floraseat's VT-bound
-  switching — `seat-switch <n>` (a `chvt` wrapper) and `seat-status`
-  (current VT + floraseat's own log). See below.
-- **`fau user-*`**: same idea again, over `florauser` (`tools/florauser`)
-  — `user-add`/`user-passwd`/`user-rename`/`user-groupadd`/
-  `user-addtogroup`. `florauser rename <old> <new>` is new too: renames a
-  user across passwd/shadow/group (its own private group, every group's
-  member list) and its home directory. See below.
+- **fau resolves real Arch/Artix packages on its own.** No `pacman`
+  involved, not even to fetch one. It reads the sync-db and mirrorlist
+  formats directly, resolves virtual packages and version constraints, and
+  works the same whether it's building the ISO or running inside an
+  already-booted system that ships no `pacman` at all.
+- **A GUI stack is one `fau install` away.** eudev for device nodes, a
+  from-scratch seat daemon (`floraseat`) speaking the real seatd protocol,
+  a generic KMS driver built into the kernel. Nothing graphical ships by
+  default, but everything a Wayland compositor needs to talk to hardware
+  already does.
+- **Real login, no PAM.** util-linux's own `login` won't build without it.
+  `floralogin` is a small, from-scratch replacement that checks
+  `/etc/shadow` directly.
+- **Full-root btrfs snapshots.** `fau backup` before you break something,
+  `fau backup-restore` to pick a GRUB entry and go back.
+- **A disk installer that's actually been booted, not just compiled**:
+  BIOS and UEFI, tested end to end in QEMU/KVM.
+- **192MB**, hybrid BIOS and UEFI, boots and runs entirely from RAM.
 
-What's explicitly *not* done yet (the live, current list, kept in
-[docs/TODO.md](docs/TODO.md) — not a wishlist, only things that could
-reasonably be finished later; permanent design choices like "no WM/DE
-bundled" aren't TODOs and aren't listed there):
+The full package list and a one-line reason for every one of them lives in
+[docs/MANIFEST.md](docs/MANIFEST.md). The design history and every real bug
+a boot test caught along the way: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+What's deliberately not done yet: [docs/TODO.md](docs/TODO.md).
 
-- **No WM/DE bundled in the base image** (still opt-in via `fau install`,
-  same as any other app, a deliberate permanent choice) — but the
-  prerequisites now exist (eudev, floraseat, a built-in generic KMS driver;
-  see above and docs/ARCHITECTURE.md). `kitty` is still deliberately left
-  out of the default ISO — its dependency closure is ~773MB of
-  Python3/Mesa/X11/Wayland; `fau install kitty` works today if you want
-  the files.
-- **No real GPU-accelerated driver** — the kernel only ships a generic
-  firmware-framebuffer KMS driver, not i915/amdgpu/nouveau (add the one
-  your hardware needs once this actually blocks someone — see
-  docs/TODO.md).
-
-## Quick start
+## Try it
 
 ```
 ./floraiso build   # builds the rootfs (if needed) and the ISO
-./floraiso test    # boots the ISO in QEMU and checks it actually reaches a shell
+./floraiso test    # boots it in QEMU, checks it actually reaches a shell
 ```
 
-Logging in yourself (e.g. `qemu-system-x86_64 -cdrom floraos.iso`): login as
-`root` with an empty password (just press Enter) — see `/etc/issue` at the
-prompt. From there, run `florainstall` to install FloraOS onto a real disk
-(destructive — it partitions and formats whatever disk you point it at;
-`florainstall` will ask you to type the disk's name back to confirm before
-touching anything).
+Log in as `root` with an empty password (just press Enter). From there,
+`florainstall` puts FloraOS on a real disk. It's a one-shot operation with
+no undo, so it asks you to type the disk's name back before touching
+anything.
 
-Zero configuration needed for a default build. To change the hostname, add
-extra base packages, or rename the output ISO, edit `config/floraos.conf`
-(that's the only config file this project uses).
-
-## What each command does
-
-- `./floraiso rootfs` — builds only `work/rootfs`, the base root filesystem
-  (see [docs/MANIFEST.md](docs/MANIFEST.md) for the full package list and
-  the justification of every single one). Nothing here touches your real
-  system: everything downloads and builds under `work/` (gitignored).
-- `./floraiso build` — runs the rootfs build if needed, then packs the whole
-  rootfs as an initramfs and calls `grub-mkrescue` to produce a hybrid
-  BIOS+UEFI bootable `floraos.iso` (name configurable, currently 192MB).
-  FloraOS boots and runs entirely from RAM as a live image; run
-  `florainstall` from a shell on that image for a persistent disk install
-  (see above).
-- `./floraiso test` — boots that ISO in QEMU with a serial console, drives an
-  actual login (root, empty password) through it, and checks the boot log
-  for two markers: the kernel actually starting, and the login shell
-  actually being reached. Exits non-zero (and prints why) if either is
-  missing.
-- `scripts/test-install.sh` — a heavier, separate check: installs onto a
-  scratch disk image via `florainstall` (driven over the serial console,
-  same technique as above), then boots that disk through the whole
-  `fau backup`/`grub-reboot`/`fau backup-restore` cycle in QEMU/KVM. Takes
-  several minutes; not part of `floraiso test`.
+Nothing here needs configuration to build. To change the hostname, add
+packages, or rename the ISO, edit `config/floraos.conf`, the only config
+file this project has.
 
 ## Layout
 
 ```
-config/floraos.conf     # the one config file: hostname, extra packages, kernel version, ISO name
-config/versions.conf    # pinned source URL + sha256 for every base package
-docs/MANIFEST.md        # every package in the base rootfs, one-line reason each
-docs/FILESYSTEM_LAYOUT.md
-docs/ARCHITECTURE.md    # design decisions, why, and the full DONE/TODO history
-docs/TODO.md            # the current, live, open TODO list
-assets/                 # fastfetch logo + config shipped into the rootfs
-tools/fau/               # FloraOS's system manager: fau (dispatcher) + fau-* tools + lib/
-tools/floralogin/        # FloraOS's own PAM-free login (see docs/ARCHITECTURE.md)
-tools/floraseat/         # FloraOS's own seatd-protocol-compatible seat daemon
-tools/florauser/         # FloraOS's own useradd/passwd/groupadd/rename equivalent
-tools/fauelf/            # FloraOS's own absolute-DT_NEEDED fixup tool
-tools/florainstall/      # FloraOS's own TUI disk installer
-tools/floragrub-cfg/     # FloraOS's own /boot/grub/grub.cfg generator (florainstall + fau backup)
-scripts/                # rootfs + ISO build scripts and per-package build recipes
-scripts/test-install.sh # real QEMU/KVM boot test: florainstall (BIOS) + fau backup end-to-end
-scripts/test-install-uefi.sh # real QEMU/OVMF boot test: florainstall's UEFI/ESP path
-work/                   # build output (gitignored) -- sources, staged builds, rootfs, fau repo
+config/floraos.conf      the one config file: hostname, extra packages, kernel version, ISO name
+config/versions.conf     pinned source URL + sha256 for every base package
+docs/                    architecture, package manifest, filesystem layout, TODO
+assets/                  fastfetch logo + config
+tools/fau/               fau: the system manager (dispatcher + subtools + lib/)
+tools/floralogin/        PAM-free login
+tools/floraseat/         seatd-protocol-compatible seat daemon
+tools/florauser/         useradd/passwd/groupadd/rename
+tools/fauelf/            absolute-DT_NEEDED fixup for isolated apps
+tools/florainstall/      TUI disk installer
+tools/floragrub-cfg/     grub.cfg generator, shared by florainstall and fau backup
+scripts/                 rootfs and ISO build pipeline, one recipe per base package
+work/                    build output, gitignored, nothing here is committed
 ```
 
-Do not write documentation in the code itself — write it in the docs. Code
-comments stay minimal (a handful of short, load-bearing lines per file at
-most); design rationale, discovered bugs, and verification history belong
-in that file's own doc above, not next to the code.
+Every tool has its own `<name>.md` next to it: design rationale and the real
+bugs a boot test found, not a restatement of what the code already says.
 
-## fau, the system manager
+## fau
 
-Package install/remove and `fau backup`'s full-root snapshot/restore are
-what exist today; the intent is for fau to keep growing into managing the
-rest of the running system, not stay scoped to packages alone.
+Packages and backups are what exist today; fau is meant to keep growing
+into managing the rest of the running system, not stay scoped to packages
+alone.
 
 ```
-fau install <pkg>          # user app -> isolated under ~/apps/<pkg>/
-fau remove <pkg>           # deletes that app's directory and its PATH wrapper, nothing else
-fau list                   # list installed apps and versions
+fau install <pkg>       # -> isolated under ~/apps/<pkg>/
+fau remove <pkg>
+fau list
+fau backup <name>       # full-root snapshot, restorable from the GRUB menu
+fau backup-restore <name>
+fau service-list / service-enable / service-start / ...
+fau seat-status / seat-switch <vt>
+fau user-add / user-passwd / user-rename / ...
 ```
 
-`install` first checks FloraOS's own repo; until there's a curated catalog
-of FloraOS-native apps, anything not found there falls back to fetching
-straight from Arch/Artix's own repos — dependency-resolved (including
-virtual/PROVIDES packages and version constraints) and sha256-verified,
-merged into the same isolated app directory (no root, and nothing gets
-installed onto your real system). This fallback doesn't shell out to
-`pacman` at all (it reads the sync-db/mirrorlist formats itself), so it
-works both when building the ISO here *and* from inside an already-booted
-FloraOS system, which ships neither `pacman` nor its config — see
-docs/ARCHITECTURE.md for how that's verified. GUI apps will fetch fine but have
-nowhere to render without a display server (not built yet, see
-docs/ARCHITECTURE.md).
+`fau help [topic]` for the full command reference.
+[tools/fau/fau.md](tools/fau/fau.md) for how it's built and every real bug
+found getting it there.
 
-There's also a build-time-only counterpart —
-`bootstrap`/`bootstrap-remove`/`bootstrap-list`/`bootstrap-export`/`bootstrap-apply`
-— that merges straight into FAU_ROOT (`/usr`, `/etc`, ...) instead of an
-isolated app directory. It's how `scripts/build-rootfs.sh` constructs the
-base rootfs itself (kernel, glibc, coreutils, etc.); not something an end
-user needs after boot.
+## License
 
-```
-fau bootstrap-export system.json   # dump the exact base-system package set
-fau bootstrap-apply system.json    # reproduce that exact package set on another machine
-```
-
-`fau export`/`fau import` are the user-facing counterpart: `fau export` bundles
-a fresh `system.json` (base packages + installed apps + every config file
-found under each app's own `~/apps/<name>/config/`) together with the actual
-config file contents into one `.flora` archive — a tar+zstd archive (the same
-format as fau's own `.fau.tar.zst` packages) rather than a `.zip`, since
-FloraOS ships no zip/unzip and tar+zstd is already a base dependency. `fau
-import` reads that archive back, (re)installing any app it lists that isn't
-already present so there's somewhere for its config to land, then restores
-every listed config file into place under `~/apps/<name>/config/`:
-
-```
-fau export [file]     # -> system.flora by default
-fau import [file]     # <- system.flora by default
-```
-
-```
-fau backup <name>       # full-root btrfs snapshot, restorable from the GRUB boot menu
-fau backup-list         # list existing backups, newest first
-fau backup-remove <name>
-fau backup-restore <name>  # promote a backup to be the new / (reboot to actually boot into it)
-fau backup-repair <name>   # complete an interrupted backup-restore after a crash (see docs/TODO.md)
-```
-
-Real disk installs only (see `florainstall` above and docs/ARCHITECTURE.md's
-fau-backup section for the subvolume layout) — not available on the live ISO itself.
-
-```
-fau service-list                    # every OpenRC service: state + enabled runlevel(s)
-fau service-status <name>
-fau service-enable <name> [runlevel]   # default runlevel: default
-fau service-disable <name> [runlevel]
-fau service-start <name>
-fau service-stop <name>
-fau service-restart <name>
-```
-
-```
-fau seat-status              # active VT + floraseat's own recent log lines
-fau seat-switch <vt-number>  # switch the active VT (chvt) -- floraseat
-                              #   disables/enables sessions automatically,
-                              #   same as a physical Ctrl+Alt+Fn
-```
-
-```
-fau user-add <name> [group1,group2,...]
-fau user-passwd <name>
-fau user-rename <old-name> <new-name>   # passwd/shadow/group entries, group
-                                         #   memberships, and home dir all follow
-fau user-groupadd <name> [gid]
-fau user-addtogroup <user> <group>
-```
-
-A thin front end over OpenRC's own `rc-update`/`rc-service` — service
-supervision and dependency ordering stay OpenRC's job, fau just gives it a
-friendlier, fau-native interface. See
-[tools/fau/fau.md](tools/fau/fau.md) for the real bug a boot test caught
-here.
-
-Run `fau help [topic]` (topics: `install`, `repo`, `export`, `backup`,
-`service`, `seat`, `user`, `bootstrap`, or `all`) for the full command list, in detail —
-`fau help`/`fau --help` alone stays a short overview so it doesn't dump
-everything every time.
+MIT, see [LICENSE](LICENSE).
