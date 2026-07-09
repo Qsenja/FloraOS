@@ -1214,3 +1214,55 @@ silently doesn't fit.
     bootstrap`/`florauser` inside a live boot, is what actually caught the
     symlink bug above). See [tools/fau/fau.md](../tools/fau/fau.md)'s own
     "Architecture" section for the full file-by-file breakdown.
+- DONE: `alpm_fetch`'s mirror-failover (`tools/fau/lib/alpm.sh`) burned tens
+  of seconds retrying mirrors that were never going to work. Observed on a
+  real `fau install mangowm`: for a handful of packages (`libxfont2`,
+  `xorg-server-common`, `xorg-xwayland`, `python`), *nearly every* mirror in
+  Artix's full list 404'd in a row before one near the end finally
+  succeeded, while every other package resolved on the first or second try
+  -- consistent per-package failure across most of the list, not
+  random/scattered, pointing at mirror sync lag (fau resolved a version
+  newer than most mirrors had synced yet). Each failed attempt still paid a
+  real ~2s connection-setup cost (see this file's QEMU-networking note --
+  every mirror is a new host), so a handful of stale-everywhere packages
+  could dominate total install time on a slow link even though `fau`'s own
+  4-way parallel fetch itself wasn't the bottleneck.
+
+  Two options considered and rejected: capping/shortening the failover list
+  (risks turning "slow" into "install fails" outright, since the one
+  working mirror for a given package can be anywhere in the list, including
+  near the end); and pre-checking mirror freshness before choosing one
+  (needs a signal fau doesn't have -- a HEAD/version check per mirror per
+  package costs as much round-trip time as just trying them, undoing the
+  savings). Fixed instead by reordering, not filtering: `alpm_fetch` now
+  stable-sorts each fetch's candidate mirror list by that host's *recorded*
+  past-failure count (fewest first, ties broken by original mirrorlist
+  order) before trying them serially, same as before. Every mirror is still
+  tried, in the worst case, exactly as many as today -- this only changes
+  the order, so a chronically-laggy mirror still gets used when it's
+  genuinely the only one with a package. Failure counts persist to
+  `$FAU_CACHE_DIR/mirror-fail-counts` (inside `FAU_ROOT`, alongside the
+  existing alpm sync-db cache) and are written only on failure, never on
+  success, so the by-far-common case (first or second mirror works) pays
+  zero extra I/O. Written with no locking, deliberately -- concurrent writes
+  from `alpm_parallel_fetch`'s own 4-way job pool can lose an update, but
+  this is a soft ranking heuristic, not correctness-critical, and it
+  self-heals over the next real failure.
+
+  A real bug caught only by testing, not by inspection: the very first
+  failure ever recorded was silently dropped. `awk` given a nonexistent
+  input file exits before reaching its `END` block, so the first-ever call
+  (before `$FAU_CACHE_DIR/mirror-fail-counts` exists) produced an empty
+  temp file, and `mv` replaced nothing with nothing. Fixed by touching the
+  stats file into existence first. Verified end-to-end against 4 local
+  `python3 -m http.server` instances standing in for mirrors (3 returning
+  404, 1 serving the real file, mirrorlist order deliberately putting the
+  working one last) -- not against real Artix mirrors, which this sandbox
+  has no network access to. First fetch: all 3 dead mirrors tried and
+  logged as failed, in mirrorlist order, before the 4th succeeds, matching
+  today's behavior exactly. Second fetch (different filename, same 4
+  mirrors, stats now warm from the first): the working mirror sorts first
+  and the fetch succeeds on the very first attempt, with zero failed
+  attempts logged -- confirming the reorder actually eliminates the
+  repeated-failure cost for every fetch after the first one to hit a given
+  set of laggy mirrors, not just in theory.

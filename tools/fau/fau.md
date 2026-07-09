@@ -772,6 +772,33 @@ way also have no display server to draw on yet (see docs/ARCHITECTURE.md)
   network, while every other mirror worked fine — `alpm_fetch` now tries
   every configured mirror in order before giving up, matching what real
   `pacman` would do.
+- **A handful of specific packages burned tens of seconds retrying mirrors
+  that were never going to work**, on top of the fix above — a real `fau
+  install mangowm` showed `libxfont2`/`xorg-server-common`/
+  `xorg-xwayland`/`python` each 404ing on *nearly every* mirror in Artix's
+  full list, in the same consistent order, before one near the end finally
+  had the package (mirror sync lag: fau resolved a version newer than most
+  mirrors had caught up to yet), while every other package in the same
+  closure resolved on the first or second try. Each failed attempt still
+  paid a real ~2s connection-setup cost, so a few stale-everywhere packages
+  could dominate total install time. Fixed by having `alpm_fetch`
+  stable-sort each fetch's mirror list by that host's own recorded past-
+  failure count before trying it — every mirror is still eventually tried
+  (a chronically-laggy mirror can still be the only one with a given
+  package), this only changes the order, converging over repeated real
+  `fau` runs toward trying the reliable mirrors first. Counts persist to
+  `$FAU_CACHE_DIR/mirror-fail-counts`, written only on failure (zero extra
+  I/O on the common all-succeeds-immediately path), no locking (a lost
+  update under `alpm_parallel_fetch`'s own concurrent fetch jobs just means
+  one less data point for a soft ranking heuristic, not a correctness bug).
+  One real bug caught only by testing: the very first failure ever
+  recorded was silently dropped, because `awk` exits before its `END`
+  block when given a nonexistent input file — fixed by touching the stats
+  file into existence first, verified with 4 local `python3 -m
+  http.server` mirrors (3 dead, 1 live, live one placed last) showing the
+  second fetch against the same dead mirrors succeeds on the first attempt
+  once their failures are on record, with zero retries logged. See
+  ARCHITECTURE.md's own "Not yet scripted" section for the full writeup.
 - **FloraOS's own compiled glibc got silently overwritten by Arch's
   binary.** Resolving `fastfetch`'s (or any alpm package's) closure also
   resolves `glibc`/`filesystem`/`tzdata`/etc — packages FloraOS already

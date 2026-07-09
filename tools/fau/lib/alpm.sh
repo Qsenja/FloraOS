@@ -74,11 +74,82 @@ curl_fetch_with_bar() {
 	return "$rc"
 }
 
+alpm_mirror_stats_path() {
+	echo "${FAU_CACHE_DIR%/}/mirror-fail-counts"
+}
+
+alpm_mirror_host() {
+	printf '%s\n' "$1" | sed -E 's#^[a-zA-Z]+://([^/]+)/.*#\1#'
+}
+
+# Best-effort, no locking -- same reasoning as alpm_fetch_job's own cache
+# write (see fau.md): this is a soft ranking heuristic, not correctness-
+# critical, so a lost update from a concurrent fetch job (alpm_parallel_fetch
+# runs several of these at once) just means one less data point, not
+# corruption worth guarding against. Only called on failure, never on
+# success, so the by-far-common case (first or second mirror works) pays
+# zero extra I/O for this.
+alpm_mirror_record_failure() {
+	local url=$1 host; host=$(alpm_mirror_host "$url")
+	[ -n "$host" ] || return 0
+	local stats; stats=$(alpm_mirror_stats_path)
+	mkdir -p "$(dirname "$stats")"
+	# touch first -- awk errors out before its END block on a nonexistent
+	# input file, silently dropping the very first-ever recorded failure.
+	[ -f "$stats" ] || : > "$stats"
+	local tmp; tmp=$(mktemp)
+	awk -v h="$host" -v fs="$ALPM_FS" 'BEGIN { FS=fs; OFS=fs }
+		$1==h { $2=$2+1; found=1 }
+		{ print }
+		END { if (!found) print h, 1 }
+	' "$stats" 2>/dev/null > "$tmp"
+	mv "$tmp" "$stats"
+}
+
+# Stable-sorts candidate mirror URLs by historical failure count (fewest
+# first), preserving relative order among ties -- see fau.md for the
+# mirror-sync-lag problem this targets (a handful of mirrors chronically
+# behind on syncing new package versions, 404ing in a row on every fetch
+# that happens to need one, at a real per-attempt connection-setup cost).
+# Deliberately does NOT try to detect staleness up front (would need a
+# HEAD/version check per mirror per package -- as much round-trip cost as
+# just trying them) and does NOT drop mirrors from the list, no matter how
+# many past failures -- a chronically-laggy mirror is still occasionally
+# the only one with a given package, so skipping it outright risks turning
+# "slow" into "install fails". This only ever changes the order fau tries
+# them in, converging over repeated real runs toward trying the
+# reliable ones first.
+alpm_mirror_reorder() {
+	local urls=$1
+	local stats; stats=$(alpm_mirror_stats_path)
+	[ -s "$stats" ] || { printf '%s\n' "$urls"; return 0; }
+
+	local -A fail_count=()
+	local host count
+	while IFS="$ALPM_FS" read -r host count; do
+		[ -n "$host" ] && fail_count[$host]=$count
+	done < "$stats"
+
+	local url host_i idx=0
+	local tmp; tmp=$(mktemp)
+	while IFS= read -r url; do
+		idx=$((idx + 1))
+		host_i=$(alpm_mirror_host "$url")
+		printf '%s\t%s\t%s\n' "${fail_count[$host_i]:-0}" "$idx" "$url" >> "$tmp"
+	done <<< "$urls"
+	sort -t "$(printf '\t')" -k1,1n -k2,2n "$tmp" | cut -f3-
+	rm -f "$tmp"
+}
+
 alpm_fetch() {
 	# Tries every configured mirror in order before giving up -- see fau.md for the real dead-mirror bug this fixes.
+	# Order is the mirrorlist's own order, reshuffled by each host's recorded
+	# failure history (alpm_mirror_reorder) -- see fau.md for the mirror-sync-lag
+	# problem this targets. Every mirror is still tried, just in a smarter order.
 	local repo=$1 filename=$2 dest=$3 quiet=${4:-}
 	local urls; urls=$(alpm_mirror_urls "$repo" "$filename")
 	[ -n "$urls" ] || die "no Server= line found in the mirrorlist for $repo/$filename"
+	urls=$(alpm_mirror_reorder "$urls")
 	local url
 	while IFS= read -r url; do
 		if [ -n "$quiet" ]; then
@@ -86,6 +157,7 @@ alpm_fetch() {
 		else
 			curl_fetch_with_bar "$url" "$dest" && return 0
 		fi
+		alpm_mirror_record_failure "$url"
 		log "mirror failed, trying next one: $url"
 	done <<< "$urls"
 	die "failed to fetch $filename from every configured mirror for $repo"
