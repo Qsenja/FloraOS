@@ -66,7 +66,8 @@ int main(void) {
 		struct passwd *pw = getpwnam(username);
 		struct spwd *sp = pw ? getspnam(username) : NULL;
 		int ok = pw && sp && password_ok(sp, password);
-		memset(password, 0, sizeof(password));
+		/* explicit_bzero, not memset -- see floralogin.md. */
+		explicit_bzero(password, sizeof(password));
 
 		if (!ok) {
 			fprintf(stderr, "Login incorrect\n");

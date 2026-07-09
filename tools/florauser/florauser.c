@@ -251,22 +251,24 @@ static int cmd_passwd(const char *user) {
 	} else {
 		printf("Retype new password: ");
 		fflush(stdout);
-		if (read_line_noecho(pass2, sizeof pass2) != 0) { memset(pass1, 0, sizeof pass1); return 1; }
+		/* explicit_bzero, not memset, on every path clearing pass1/pass2 --
+		   see floralogin.md (the same fix, applied here too). */
+		if (read_line_noecho(pass2, sizeof pass2) != 0) { explicit_bzero(pass1, sizeof pass1); return 1; }
 		if (strcmp(pass1, pass2) != 0) {
 			fprintf(stderr, "florauser: passwords do not match\n");
-			memset(pass1, 0, sizeof pass1);
-			memset(pass2, 0, sizeof pass2);
+			explicit_bzero(pass1, sizeof pass1);
+			explicit_bzero(pass2, sizeof pass2);
 			return 1;
 		}
-		memset(pass2, 0, sizeof pass2);
+		explicit_bzero(pass2, sizeof pass2);
 
 		char *setting = crypt_gensalt(NULL, 0, NULL, 0);
-		if (!setting) { perror("florauser: crypt_gensalt"); memset(pass1, 0, sizeof pass1); return 1; }
+		if (!setting) { perror("florauser: crypt_gensalt"); explicit_bzero(pass1, sizeof pass1); return 1; }
 
 		struct crypt_data cdata;
 		memset(&cdata, 0, sizeof cdata);
 		char *crypted = crypt_r(pass1, setting, &cdata);
-		memset(pass1, 0, sizeof pass1);
+		explicit_bzero(pass1, sizeof pass1);
 		if (!crypted) { perror("florauser: crypt_r"); return 1; }
 		snprintf(hashbuf, sizeof hashbuf, "%s", crypted);
 		hash = hashbuf;

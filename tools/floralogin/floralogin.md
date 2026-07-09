@@ -36,6 +36,16 @@ one exists.
 A failed login sleeps 2 seconds before re-prompting, matching traditional
 `login(1)`.
 
+## Clearing the password buffer: `explicit_bzero`, not `memset`
+
+A plain `memset` immediately before a stack buffer is reused/overwritten
+(as `password` is, on the next loop iteration) is a case an optimizing
+compiler is explicitly permitted to eliminate entirely as dead code
+(CWE-14) — this project builds with `-O2`. `explicit_bzero` (glibc, added
+2.25) is specifically designed to never be optimized away regardless of
+what happens to the buffer afterward. `florauser.c`'s own password
+handling has the identical fix, for the identical reason.
+
 ## `XDG_RUNTIME_DIR`
 
 No session manager exists (no logind, no elogind) to set this up the usual
