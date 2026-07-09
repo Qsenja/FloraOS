@@ -740,9 +740,7 @@ app_install_one_alpm() {
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
 		rm -rf "$extract_dir/usr/include"
 		# fauelf rewrites absolute DT_NEEDED entries to bare basenames -- see fau.md and ../fauelf/fauelf.md.
-		while IFS= read -r -d '' f; do
-			"$FAU_ELF_PATCH" "$f" || die "fauelf failed patching $f"
-		done < <(find "$extract_dir" -type f -print0)
+		find "$extract_dir" -type f -print0 | xargs -0 -r "$FAU_ELF_PATCH" || die "fauelf failed patching files under $extract_dir"
 		# "$i" -eq "$total", not "${pkg_name[$i]}" = "$name" -- see fau.md's man/man-db alias bug.
 		if [ "$i" -eq "$total" ]; then
 			version=${pkg_version[$i]}
@@ -842,9 +840,7 @@ alpm_sandbox_fetch() {
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
 		# No usr/include strip here -- keeping headers is the entire reason this function exists.
-		while IFS= read -r -d '' f; do
-			"$FAU_ELF_PATCH" "$f" || die "fauelf failed patching $f"
-		done < <(find "$extract_dir" -type f -print0)
+		find "$extract_dir" -type f -print0 | xargs -0 -r "$FAU_ELF_PATCH" || die "fauelf failed patching files under $extract_dir"
 		# Rewrites absolute-interpreter shebangs (e.g. meson's own) to this
 		# sandbox's copy -- see fau.md. Cheap `read -N 2` magic-byte check
 		# first, not just `head -c 256 | head -n1` on every file: the vast

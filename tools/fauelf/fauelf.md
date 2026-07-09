@@ -33,16 +33,29 @@ else in the file moves.
 
 ## Usage contract
 
-`fauelf <file>` is meant to be run over *every* file in an extracted
-package's payload, most of which won't be ELF at all:
+`fauelf <file> [file ...]` is meant to be run over *every* file in an
+extracted package's payload, most of which won't be ELF at all:
 - Not a regular ELF64 file, or has no `PT_DYNAMIC` segment: silently does
-  nothing, exit 0.
+  nothing for that file, moves on to the next one.
 - Rewrites every absolute `DT_NEEDED` entry found, logs each rewrite to
-  stdout, exit 0.
+  stdout, moves on to the next file.
 - A file that *does* look like ELF64 with a dynamic section but is
   truncated/corrupt in a way that breaks the format's own internal
-  consistency: prints an error to stderr, exit 1.
+  consistency: prints an error to stderr and exits 1 immediately (not just
+  skipping that one file) — matches `fau`'s own "any real corruption aborts
+  the whole build" stance.
 
 `vaddr_to_offset` translates `DT_STRTAB`'s virtual address back to a file
 offset via the `PT_LOAD` segment that contains it — the standard way a
 real dynamic linker resolves this.
+
+## Multiple files per invocation
+
+`fau`'s own callers (`lib/alpm.sh`, `lib/build.sh`) run this over every
+file in an extracted package via `find ... -print0 | xargs -0 fauelf`, not
+one invocation per file — measured directly against a real 14,812-file
+rootfs tree: 7.2s for one-fork-per-file vs 0.055s batched (~130x), byte-
+identical output verified both ways. The one thing this requires that a
+single-shot process didn't: every early return in `process_file` must
+explicitly `close()`/`free()` whatever it already opened/allocated, since
+process exit no longer reclaims that between files.

@@ -1,4 +1,5 @@
-/* fauelf -- rewrites absolute-path DT_NEEDED entries in an ELF64 file to their bare basename, in place. See fauelf.md. */
+/* fauelf -- rewrites absolute-path DT_NEEDED entries in one or more ELF64
+   files to their bare basename, in place. See fauelf.md. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,8 +49,6 @@ typedef struct {
 
 static const char *g_path;
 
-static void skip(void) { exit(0); }
-
 static void die(const char *msg) {
 	fprintf(stderr, "fauelf: %s: %s\n", g_path, msg);
 	exit(1);
@@ -66,25 +65,30 @@ static uint64_t vaddr_to_offset(Elf64_Phdr_min *phdrs, int phnum, uint64_t vaddr
 	return 0; /* unreached */
 }
 
-int main(int argc, char **argv) {
-	if (argc != 2) {
-		fprintf(stderr, "usage: fauelf <file>\n");
-		return 1;
-	}
-	g_path = argv[1];
+/* Processes one file; returns without doing anything for a file this tool
+   has no business touching (not a regular file, not ELF64, no PT_DYNAMIC,
+   no DT_NEEDED, ...). Only a genuinely malformed ELF (a DT_NEEDED with no
+   DT_STRTAB, a truncated header/section, a failed write) calls die(),
+   which still aborts the whole run immediately -- same as before this
+   accepted more than one path per invocation. Every early return here
+   closes/frees whatever it already opened/allocated: unlike a one-shot
+   process where exit() reclaimed all of that for free, this runs in a
+   loop now, so a leak here would accumulate across every file. */
+static void process_file(const char *path) {
+	g_path = path;
 
 	struct stat st;
-	if (stat(g_path, &st) != 0 || !S_ISREG(st.st_mode)) skip();
-	if (st.st_size < (off_t)sizeof(Elf64_Ehdr_min)) skip();
+	if (stat(g_path, &st) != 0 || !S_ISREG(st.st_mode)) return;
+	if (st.st_size < (off_t)sizeof(Elf64_Ehdr_min)) return;
 
 	int fd = open(g_path, O_RDWR);
-	if (fd < 0) skip();
+	if (fd < 0) return;
 
 	Elf64_Ehdr_min eh;
-	if (pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh)) skip();
-	if (memcmp(eh.e_ident, "\x7f""ELF", 4) != 0) skip();
-	if (eh.e_ident[4] != 2) skip(); /* ELFCLASS64 only */
-	if (eh.e_phnum == 0) skip();
+	if (pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh)) { close(fd); return; }
+	if (memcmp(eh.e_ident, "\x7f""ELF", 4) != 0) { close(fd); return; }
+	if (eh.e_ident[4] != 2) { close(fd); return; } /* ELFCLASS64 only */
+	if (eh.e_phnum == 0) { close(fd); return; }
 
 	size_t ph_bytes = (size_t)eh.e_phnum * sizeof(Elf64_Phdr_min);
 	Elf64_Phdr_min *phdrs = malloc(ph_bytes);
@@ -97,7 +101,7 @@ int main(int argc, char **argv) {
 	for (i = 0; i < eh.e_phnum; i++) {
 		if (phdrs[i].p_type == PT_DYNAMIC) { dynseg = &phdrs[i]; break; }
 	}
-	if (!dynseg) { free(phdrs); skip(); }
+	if (!dynseg) { free(phdrs); close(fd); return; }
 
 	int ndyn = (int)(dynseg->p_filesz / sizeof(Elf64_Dyn_min));
 	Elf64_Dyn_min *dyns = malloc(dynseg->p_filesz);
@@ -112,19 +116,13 @@ int main(int argc, char **argv) {
 		if (dyns[i].d_tag == DT_NEEDED) have_needed = 1;
 	}
 	/* A dynamic section with zero DT_NEEDED entries has nothing for this tool
-	   to do, whether or not it happens to also carry a DT_STRTAB -- e.g. a
-	   Guile .go bytecode module's own minimal dynamic section, which can
-	   omit DT_STRTAB entirely when there's nothing needing a string-table
-	   lookup. Only a file that actually HAS a DT_NEEDED entry but no
-	   DT_STRTAB to resolve it against is genuinely inconsistent. Found for
-	   real via a Guile .go file inside `make`'s own alpm dependency closure
-	   (make links against guile on Arch/Artix) failing a real `fau build`,
-	   not by inspection. */
-	if (!have_needed) skip();
+	   to do, whether or not it happens to also carry a DT_STRTAB -- see
+	   fauelf.md (a Guile .go bytecode module is a real example). Only a file
+	   that actually HAS a DT_NEEDED entry but no DT_STRTAB is inconsistent. */
+	if (!have_needed) { free(dyns); free(phdrs); close(fd); return; }
 	if (!have_strtab) die("has a DT_NEEDED entry but no DT_STRTAB -- genuinely inconsistent dynamic section");
 	uint64_t strtab_off = vaddr_to_offset(phdrs, eh.e_phnum, strtab_vaddr);
 
-	int patched = 0;
 	for (i = 0; i < ndyn && dyns[i].d_tag != DT_NULL; i++) {
 		if (dyns[i].d_tag != DT_NEEDED) continue;
 
@@ -155,12 +153,19 @@ int main(int argc, char **argv) {
 		}
 
 		printf("fauelf: %s: NEEDED \"%s\" -> \"%s\"\n", g_path, buf, base);
-		patched++;
 	}
 
 	free(dyns);
 	free(phdrs);
 	close(fd);
-	(void)patched;
+}
+
+int main(int argc, char **argv) {
+	if (argc < 2) {
+		fprintf(stderr, "usage: fauelf <file> [file ...]\n");
+		return 1;
+	}
+	int i;
+	for (i = 1; i < argc; i++) process_file(argv[i]);
 	return 0;
 }

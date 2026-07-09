@@ -111,9 +111,7 @@ build_merge_depends() {
 		chmod -R u+rX "$extract_dir"
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
 		rm -rf "$extract_dir/usr/include"
-		while IFS= read -r -d '' f; do
-			"$FAU_ELF_PATCH" "$f" || die "fauelf failed patching $f"
-		done < <(find "$extract_dir" -type f -print0)
+		find "$extract_dir" -type f -print0 | xargs -0 -r "$FAU_ELF_PATCH" || die "fauelf failed patching files under $extract_dir"
 		cp -a "$extract_dir/." "$app_dir"
 		rm -rf "$extract_dir"
 	done
