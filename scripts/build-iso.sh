@@ -30,10 +30,10 @@ for cmd in grub-mkrescue xorriso cpio gzip; do require_cmd "$cmd"; done
 [ -f "$ROOTFS_DIR/boot/vmlinuz-floraos" ] || die "no kernel at $ROOTFS_DIR/boot/vmlinuz-floraos -- rootfs build looks incomplete"
 [ -x "$ROOTFS_DIR/sbin/init" ] || die "no /sbin/init in rootfs -- sysvinit didn't install correctly"
 
-log "packing rootfs as initramfs (this reads every file in the rootfs, takes a minute)"
+log "packing rootfs as initramfs (this reads every file in the rootfs)"
 rm -rf "$ISO_STAGE_DIR"
 mkdir -p "$ISO_STAGE_DIR/boot/grub"
-( cd "$ROOTFS_DIR" && find . -mindepth 1 -not -path './boot*' | cpio -o -H newc 2>/dev/null | gzip -9 ) \
+( cd "$ROOTFS_DIR" && find . -mindepth 1 -not -path './boot*' | cpio -o -H newc 2>/dev/null | gzip -6 ) \
 	> "$ISO_STAGE_DIR/boot/initramfs-floraos.img"
 
 cp "$ROOTFS_DIR/boot/vmlinuz-floraos" "$ISO_STAGE_DIR/boot/vmlinuz-floraos"

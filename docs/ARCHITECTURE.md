@@ -304,6 +304,12 @@ relative filename rather than the absolute build path, so
 `sha256sum -c floraos.iso.sha256` still works from a different clone or a
 standalone downloaded copy of the ISO, not just this exact build directory.
 
+The initramfs pack used `gzip -9`; measured directly against a real 519MiB
+built rootfs, that's 54s for a 183.2MiB image versus `gzip -6`'s 12.5s for
+184.2MiB -- ~4x faster for 0.5% larger, so `build-iso.sh` uses `-6`. `gzip -1`
+was also measured (3.6s, 200.0MiB) but the size cost there is no longer
+negligible.
+
 `build-iso.sh` used to only invoke `build-rootfs.sh` if `$ROOTFS_DIR` didn't
 already exist -- a real bug, found by actually building and booting the
 result: since `build_package`'s own `already_built` check already makes
