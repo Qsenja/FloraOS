@@ -417,6 +417,24 @@ Verified directly: sourcing `linux-lts.fis` with a faked non-block-device
 root correctly trips the check, while `rsync.fis` (no `PKG_NEEDS_DISK`)
 correctly doesn't.
 
+### `PKG_MANUAL_UPDATE` — skip slow rebuilds during a bare `fau update`
+
+A real kernel rebuild is by far the slowest thing `fau update` can trigger
+(a genuine multi-minute compile even parallelized, confirmed the hard way
+running it for real). Too slow to belong in an everyday, unattended
+update. `cmd_update` (`tools/fau/fau-install`) tracks whether specific
+package names were given on the command line (`explicit_names`) —  a bare
+`fau update` walks every installed package; `fau update linux-lts` targets
+just that one. A system recipe with `PKG_MANUAL_UPDATE="1"` only rebuilds
+in the second case: a bare `fau update` reports it as available and
+skipped ("update available but skipped (slow rebuild, run 'fau update
+<name>' to do it): ..."), naming it explicitly always rebuilds it
+regardless of the flag. `fau-recipes/system/linux-lts.fis` is the only
+recipe that sets it so far. Verified the parsing directly: sourcing
+`linux-lts.fis` reports `PKG_VERSION`/`PKG_MANUAL_UPDATE` correctly
+alongside each other, while a recipe without the flag (`mbedtls.fis`)
+correctly reports an empty `PKG_MANUAL_UPDATE`.
+
 ## `build <name>[=<version>]` — installing a specific version, not just the recipe's pinned default
 
 `PKG_SRC_URL`/`PKG_SRC_SHA256`/`PKG_VERSION` are one fixed triple per
