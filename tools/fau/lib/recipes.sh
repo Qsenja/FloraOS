@@ -38,7 +38,7 @@ _recipes_sync() {
 	log "fetching $label..."
 	if ! curl -sL --fail -o "$tmp" "$base/$db_name" 2>/dev/null; then
 		rm -f "$tmp"
-		log "warning: couldn't fetch the $label from $repo (offline?) -- using whatever's already cached/shipped"
+		log "warning: couldn't fetch the $label from $repo (offline?), using whatever's already cached/shipped"
 		return 1
 	fi
 	mkdir -p "$remote_dir"
@@ -63,9 +63,9 @@ _recipe_lookup() {
 		else
 			rm -f "$cached.part"
 			if [ -f "$cached" ]; then
-				log "warning: fetching $subdir/$name.fis from $repo failed -- using the last successfully fetched copy (offline?)"
+				log "warning: fetching $subdir/$name.fis from $repo failed (offline?), using the last successfully fetched copy"
 			else
-				log "warning: '$name' is in the recipes index but fetching $subdir/$name.fis from $repo failed -- falling back to the shipped copy if there is one"
+				log "warning: '$name' is in the recipes index but fetching $subdir/$name.fis from $repo failed, falling back to the shipped copy if there is one"
 			fi
 		fi
 		[ -f "$cached" ] && { echo "$cached"; return 0; }

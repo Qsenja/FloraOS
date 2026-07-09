@@ -282,13 +282,41 @@ compress/decompress, binary+symlinks in place, archive create/list,
 shared library present) — see fau-recipes' own `system/*.fis` files.
 `fau update zstd` against a deliberately downgraded installed version
 correctly detects, rebuilds, and reports up to date on a second run; a
-package the alpm fallback would otherwise touch (`bash`) still correctly
-falls through to "rebuild the ISO," confirming the new tier doesn't
-accidentally widen what's alpm-fallback-eligible.
+package with no system recipe yet (`glibc`) still correctly falls through
+to "rebuild the ISO," confirming the new tier doesn't accidentally widen
+what's alpm-fallback-eligible.
 
-Not yet converted: 18 more `MANDATORY_ORDER` packages need only the same
-mechanical `.fis` translation the first five got; `glibc`/`linux-lts`/
-`eudev`/`curl`/`sysvinit`/`openrc` have real blockers. See
+**A real bug caught by this same testing discipline, not assumed away**:
+the first five system recipes shipped with no `PKG_BUILD_DEPS` at all.
+Building on this project's own dev host "worked" purely because `gcc`/
+`make` already happen to be on that machine's `PATH` — exactly the
+"dev host already has X" masking bug class `dwm.fis` documents elsewhere
+in this file. A real FloraOS system ships neither. Caught by re-testing
+with `gcc`/`make` shadowed by scripts that print a clear error and exit
+127 if invoked, placed early in `PATH`: the original five failed exactly
+that way, confirming the gap was real, not hypothetical. Fixed by adding
+`PKG_BUILD_DEPS="gcc,make"` to all five, re-verified the same way (now
+succeeds, since `alpm_sandbox_fetch`'s copy in the sandbox is found first
+in `PATH`, ahead of the blocked host copies).
+
+18 more `MANDATORY_ORDER` packages have since been converted the same
+way, `PKG_BUILD_DEPS` included from the start: `ncurses`, `bash`,
+`coreutils`, `util-linux`, `e2fsprogs`, `iproute2`, `dhcpcd`, `attr`,
+`acl`, `grep`, `sed`, `gawk`, `findutils`, `procps-ng`, `kbd`,
+`libxcrypt`, `mbedtls`, `kmod` — 23 system recipes total. Spot-verified
+(not all 23, but the structurally distinct ones): `procps-ng` (the one
+recipe needing the full autotools chain, `autoreconf -fi`, not just
+`gcc,make` — `PKG_BUILD_DEPS="gcc,make,autoconf,automake,libtool,
+pkgconf,m4"`) rebuilds and its `ps`/`free` both work; `e2fsprogs` (the
+one out-of-tree build, using a throwaway `mktemp -d` in place of the
+original recipe's build-host-only `$BUILD_DIR/e2fsprogs-build`) rebuilds
+and `mkfs.ext4` works; `mbedtls` (the one recipe that only builds a
+`lib` target, never `install`, copying headers/`.so` files by hand)
+rebuilds and a real `curl` HTTPS request against the freshly-built
+libraries succeeds.
+
+Only 6 `MANDATORY_ORDER` packages remain genuinely blocked:
+`glibc`/`linux-lts`/`eudev`/`curl`/`sysvinit`/`openrc`. See
 [docs/TODO.md](../../docs/TODO.md) for the specific reason each one isn't
 convertible yet.
 
@@ -968,6 +996,44 @@ fontconfig/ttf-dejavu, an unrelated codepath) still renders correctly —
 this strip only ever touches `usr/share/{man,info,doc,locale}` and
 build-time-only `usr/share/i18n`, never fonts, icons, or anything else
 under `usr/share`.
+
+## `strip_unusable_tmpfiles` (`lib/common.sh`): audit.conf's tmpfiles.d rules OpenRC can't satisfy
+
+Found on a real boot: `tmpfiles.setup` (OpenRC's own init.d service, running
+`/libexec/rc/sh/tmpfiles.sh`) logged `cp: cannot stat '': No such file or
+directory` plus failed `chown`/`chgrp` on `/etc/audit/audit-stop.rules`,
+`/etc/audit/auditd.conf`, `/etc/libaudit.conf`, every single boot. Traced
+to `usr/lib/tmpfiles.d/audit.conf` (shipped by the `audit` package, dragged
+in as a transitive dependency of `dbus`/`pam` — FloraOS never runs
+`auditd`, no runlevel entry exists for it) and OpenRC's own `_C()`
+tmpfiles handler (`libexec/rc/sh/tmpfiles.sh`):
+
+```
+_C() {
+	# recursively copy a file or directory
+	local path=$1 mode=$2 uid=$3 gid=$4 age=$5 arg=$6
+	if [ ! -e "$path" ]; then
+		dryrun_or_real cp -r "$arg" "$path"
+```
+
+`audit.conf`'s own `C` lines all use the standard systemd-tmpfiles
+shorthand for "no explicit source, copy from the factory-default path"
+(`C /etc/audit/audit-stop.rules - - - - -`) — every field including the
+source is `-`. Real systemd `tmpfiles-setup` special-cases an empty source
+to mean `/usr/share/factory/<path>`; this OpenRC reimplementation doesn't
+implement that fallback at all, so `$arg` reaches `cp -r` as a literal
+empty string, always failing, regardless of whether `/usr/share/factory`
+exists. Not fixable by providing the missing factory-default files —
+OpenRC's own script never looks there in the first place.
+
+Since nothing in FloraOS actually consumes this config (no `auditd`
+running), the fix mirrors the existing "Arch's `filesystem` package
+applies unwanted distro tuning" precedent above: delete the one specific
+noise-generating file rather than work around a tmpfiles.d fallback
+mechanism that would only ever matter if `audit` were actually a service
+this project ran. `strip_unusable_tmpfiles` runs alongside
+`strip_unreachable_docs` at every merge point (`install_one_alpm`,
+`app_install_one_alpm`, `build_merge_depends`, `cmd_bootstrap_build`).
 
 ## Repo (`repo_add`/`repo_index`) — `lib/repo.sh`
 

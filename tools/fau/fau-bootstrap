@@ -104,7 +104,7 @@ cmd_bootstrap_build() {
 
 	system_recipes_sync || true
 	local recipe; recipe=$(system_recipe_lookup "$name") \
-		|| die "no system recipe for '$name' (looked in $FAU_SYSTEM_RECIPES_REMOTE_DIR) -- see 'fau bootstrap-build-list'"
+		|| die "no system recipe for '$name' (looked in $FAU_SYSTEM_RECIPES_REMOTE_DIR), see 'fau bootstrap-build-list'"
 
 	local PKG_SRC_URL="" PKG_SRC_SHA256="" PKG_VERSION="" PKG_DESCRIPTION=""
 	local PKG_DEPENDS="" PKG_BUILD_DEPS=""
@@ -118,7 +118,7 @@ cmd_bootstrap_build() {
 	# opt-in cooperation, same contract as `fau build name=version`. See fau.md.
 	if [ -n "$version_req" ] && [ "$version_req" != "$PKG_VERSION" ]; then
 		declare -F recipe_source_for_version >/dev/null \
-			|| die "$recipe: doesn't support installing a specific version (no recipe_source_for_version defined) -- only $PKG_VERSION is available"
+			|| die "$recipe: doesn't support installing a specific version (no recipe_source_for_version defined), only $PKG_VERSION is available"
 		local src_info; src_info=$(recipe_source_for_version "$version_req") \
 			|| die "$recipe: recipe_source_for_version failed for version $version_req"
 		PKG_SRC_URL=$(printf '%s\n' "$src_info" | sed -n '1p')
@@ -180,6 +180,7 @@ cmd_bootstrap_build() {
 		recipe_build "$src" "$files" "$sandbox_dir"
 
 	strip_unreachable_docs "$files"
+	strip_unusable_tmpfiles "$files"
 	mkdir -p "$FAU_ROOT"
 	record_files "$name" "$files"
 	rsync -aK --checksum "$files/" "$FAU_ROOT/"

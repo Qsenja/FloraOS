@@ -58,18 +58,18 @@ file is only for things that could reasonably be finished later.
   config OpenRC's `keymaps` init.d service reads. Not implemented yet.
 
 - **`fau update`'s rolling base-system rebuild doesn't cover all 30
-  `MANDATORY_ORDER` packages yet** — only `zstd`/`gzip`/`hostname`/`tar`/
-  `libmd` have real `fau-recipes/system/*.fis` recipes so far (see
-  `tools/fau/fau.md`). The rest fall into two groups:
-  - **Straightforward, just not authored yet**: `ncurses`, `bash`,
-    `coreutils`, `util-linux`, `e2fsprogs`, `iproute2`, `dhcpcd`, `attr`,
-    `acl`, `grep`, `sed`, `gawk`, `findutils`, `procps-ng`, `kbd`,
-    `libxcrypt`, `mbedtls`, `kmod` — each has no cross-package build-time
-    file dependency beyond `PKG_DEPENDS` (confirmed by reading every
-    `scripts/recipes/*.sh`), so converting one is the same mechanical
-    `scripts/recipes/<name>.sh` -> `fau-recipes/system/<name>.fis`
-    translation the Phase-1 five already went through.
-  - **Genuinely blocked, in order of how close each is**:
+  `MANDATORY_ORDER` packages yet** — 23 now have real
+  `fau-recipes/system/*.fis` recipes (`zstd`, `gzip`, `hostname`, `tar`,
+  `libmd`, then `ncurses`, `bash`, `coreutils`, `util-linux`,
+  `e2fsprogs`, `iproute2`, `dhcpcd`, `attr`, `acl`, `grep`, `sed`,
+  `gawk`, `findutils`, `procps-ng`, `kbd`, `libxcrypt`, `mbedtls`,
+  `kmod`; see `tools/fau/fau.md`). All 23 declare a real
+  `PKG_BUILD_DEPS` (at minimum `gcc,make`; `procps-ng` additionally
+  needs the full autotools chain for its own `autoreconf -fi` step) —
+  an earlier version of the first five shipped without this and would
+  have failed outright on a real FloraOS system (no compiler installed
+  by default), caught by testing with `gcc`/`make` deliberately blocked
+  from `PATH` rather than assumed. 6 remain genuinely blocked:
     - **`openrc`**: depends on `glibc`'s installed version for a source
       patch (`libeinfo.c`'s `strlcat` guard) — trivially convertible via
       `system_get_version glibc` once `glibc` itself is, not before.

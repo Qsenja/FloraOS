@@ -112,6 +112,7 @@ build_merge_depends() {
 		rm -f "$extract_dir/.PKGINFO" "$extract_dir/.BUILDINFO" "$extract_dir/.MTREE" "$extract_dir/.INSTALL"
 		rm -rf "$extract_dir/usr/include"
 		strip_unreachable_docs "$extract_dir"
+		strip_unusable_tmpfiles "$extract_dir"
 		find "$extract_dir" -type f -print0 | xargs -0 -r "$FAU_ELF_PATCH" || die "fauelf failed patching files under $extract_dir"
 		cp -a "$extract_dir/." "$app_dir"
 		rm -rf "$extract_dir"

@@ -61,7 +61,7 @@ app_install_one() {
 	if [ -n "$version_req" ]; then
 		local repo_version; repo_version=$(repo_lookup_version "$name")
 		[ "$repo_version" = "$version_req" ] \
-			|| die "$name=$version_req: the local repo only has $repo_version -- a local-repo install can't be pinned to an arbitrary version"
+			|| die "$name=$version_req: the local repo only has $repo_version, can't pin a local-repo install to an arbitrary version"
 	fi
 
 	local existing; existing=$(json_get_version "$FAU_APPS_JSON" "$name")
@@ -78,7 +78,7 @@ app_install_one() {
 			if [ -z "$dep_installed" ]; then
 				app_install_one "$dep_name" "$chain:$name"
 			elif ! version_satisfies "$dep_installed" "$dep_op" "$dep_ver"; then
-				log "note: $dep_name $dep_installed is installed but $name needs $dep_name $dep_op$dep_ver -- reinstalling from the repo"
+				log "note: $dep_name $dep_installed is installed but $name needs $dep_name $dep_op$dep_ver, reinstalling from the repo"
 				app_install_one "$dep_name" "$chain:$name"
 				dep_installed=$(json_get_version "$FAU_APPS_JSON" "$dep_name")
 				version_satisfies "$dep_installed" "$dep_op" "$dep_ver" || \
@@ -186,7 +186,7 @@ cmd_update() {
 			elif [ -n "$(system_get_version "$n")" ]; then
 				sys_names+=("$n")
 			else
-				log "$n is not installed (as an app or a system package), skipping"
+				log "$n: not installed, skipping"
 			fi
 		done
 	else
@@ -196,12 +196,9 @@ cmd_update() {
 	[ "${#app_names[@]}" -gt 0 ] || [ "${#sys_names[@]}" -gt 0 ] \
 		|| { log "nothing installed, nothing to update"; return 0; }
 
-	# Real network refresh, once, up front -- not per-app/package -- see
-	# alpm_refresh_dbs (lib/alpm.sh) for why a cached/local-shortcut db can
-	# never be trusted to answer "is there a newer version" correctly. The
-	# recipes repo gets the same treatment, same reasoning: a recipe-built
-	# app's own "newer available" check below needs today's PKG_VERSION
-	# pin, not whatever was last synced (possibly never, on a fresh install).
+	# Real network refresh, once, up front, not per-app/package: a
+	# cached/local-shortcut db can't be trusted to answer "is there a
+	# newer version" correctly (see alpm_refresh_dbs, lib/alpm.sh).
 	local have_alpm=""
 	if alpm_fallback_available; then
 		log "refreshing package databanks from the configured mirrors..."
@@ -210,11 +207,15 @@ cmd_update() {
 	fi
 	recipes_sync || true
 
+	# up_to_date/pinned_names are printed as one summary line each below,
+	# not one line per package: with 20-30 base packages typically pinned
+	# from source, a line each was most of this command's own output.
 	local name checked=0 updated=0
+	local -a up_to_date=()
 	for name in "${app_names[@]}"; do
 		local installed; installed=$(json_get_version "$FAU_APPS_JSON" "$name")
 		if [ -z "$installed" ]; then
-			log "$name is not installed, skipping"
+			log "$name: not installed, skipping"
 			continue
 		fi
 		checked=$((checked + 1))
@@ -226,7 +227,7 @@ cmd_update() {
 				app_install_one "$name"
 				updated=$((updated + 1))
 			else
-				log "$name $installed is up to date"
+				up_to_date+=("$name")
 			fi
 			continue
 		fi
@@ -240,56 +241,55 @@ cmd_update() {
 					app_install_one_alpm "$name"
 					updated=$((updated + 1))
 				else
-					log "$name $installed is up to date"
+					up_to_date+=("$name")
 				fi
 				continue
 			fi
 		fi
 
-		# Not in the local repo, and either alpm has nothing by this name or
-		# no mirrorlist/repo-list is configured at all -- the only other
-		# source fau ever installs from is a `fau build` recipe (mangowm and
-		# anything else AUR-only). A recipe's own PKG_VERSION is a static
-		# pin an actual person bumps by hand, not something to resolve
-		# against a live index -- "newer available" here just means "the
-		# recipe shipped on this system is now pinned ahead of what's
-		# installed", so rebuild against that pin instead of only pointing
-		# the user at the command themselves. See fau.md.
+		# Not in the local repo, and either alpm has nothing by this name
+		# or no mirrorlist/repo-list is configured: the only other source
+		# fau installs from is a `fau build` recipe (mangowm and anything
+		# else AUR-only). A recipe's own PKG_VERSION is a static pin
+		# bumped by hand, not resolved against a live index: "newer
+		# available" means the recipe shipped here is now pinned ahead of
+		# what's installed, so rebuild against that pin. See fau.md.
 		local recipe; recipe=$(recipe_lookup "$name") || recipe=""
 		if [ -n "$recipe" ]; then
 			# Subshell: sourcing a recipe defines recipe_build/PKG_* in
-			# whatever sources it, and this loop sources a different
-			# recipe every iteration -- a subshell via $(...) throws that
-			# away on exit instead of leaking it into the next iteration.
+			# whatever sources it, and a different recipe is sourced each
+			# iteration; $(...) discards that on exit instead of leaking
+			# into the next one.
 			local recipe_version
 			recipe_version=$(source "$recipe"; echo "${PKG_VERSION:-}") || recipe_version=""
 			if [ -n "$recipe_version" ] && [ "$(alpm_vercmp "$recipe_version" "$installed")" -gt 0 ]; then
-				log "$name: recipe pinned to $recipe_version (installed: $installed) -- rebuilding"
+				log "$name: rebuilding, recipe pinned to $recipe_version (was $installed)"
 				if "$SELF_DIR/fau-build" build "$name"; then
 					updated=$((updated + 1))
 				else
 					log "$name: rebuild failed, skipping"
 				fi
 			else
-				log "$name $installed is up to date (built from a recipe, still pinned to $recipe_version)"
+				up_to_date+=("$name")
 			fi
 			continue
 		fi
 
-		log "$name: not found in the local repo, the configured mirrors, or as a build recipe -- skipping"
+		log "$name: not found in the local repo, the mirrors, or as a build recipe, skipping"
 	done
+	[ "${#up_to_date[@]}" -eq 0 ] || log "up to date: ${up_to_date[*]}"
 
 	# System packages: MANDATORY_ORDER/EXTRA_PACKAGES packages (tracked in
 	# source-built-packages, written by build-rootfs.sh) get no newer
-	# version from the alpm fallback -- re-fetching them that way would
-	# silently replace FloraOS's own from-source build with Arch's binary,
-	# exactly the bug fau.md documents as already found and fixed once.
-	# They're still updatable in place if a *system recipe* now exists for
-	# them (fau-recipes' system/ namespace, built on this machine via `fau
-	# bootstrap-build`, never via alpm) -- checked below before falling
-	# back to "rebuild the ISO." Everything else in system.json (libgcc,
-	# fontconfig, dbus, ... -- see build-rootfs.sh) is alpm-fallback
-	# eligible as before. See fau.md.
+	# version from the alpm fallback: re-fetching them that way would
+	# silently replace FloraOS's own from-source build with Arch's
+	# binary, exactly the bug fau.md documents as already found and fixed
+	# once. They're still updatable in place if a *system recipe* now
+	# exists for them (fau-recipes' system/ namespace, built on this
+	# machine via `fau bootstrap-build`, never via alpm), checked below
+	# before falling back to "rebuild the ISO." Everything else in
+	# system.json (libgcc, fontconfig, dbus, ... see build-rootfs.sh) is
+	# alpm-fallback eligible as before. See fau.md.
 	local -A source_built=()
 	local source_built_list="${FAU_ROOT%/}/etc/fau/source-built-packages"
 	if [ -f "$source_built_list" ]; then
@@ -299,10 +299,11 @@ cmd_update() {
 	system_recipes_sync || true
 
 	local sys_checked=0 sys_updated=0 sys_pinned=0
+	local -a sys_up_to_date=() pinned_names=()
 	for name in "${sys_names[@]}"; do
 		local installed; installed=$(system_get_version "$name")
 		if [ -z "$installed" ]; then
-			log "$name is not an installed system package, skipping"
+			log "$name: not an installed system package, skipping"
 			continue
 		fi
 		if [ -n "${source_built[$name]:-}" ]; then
@@ -311,7 +312,7 @@ cmd_update() {
 				local sysrecipe_version
 				sysrecipe_version=$(source "$sysrecipe"; echo "${PKG_VERSION:-}") || sysrecipe_version=""
 				if [ -n "$sysrecipe_version" ] && [ "$(alpm_vercmp "$sysrecipe_version" "$installed")" -gt 0 ]; then
-					log "$name: system recipe pinned to $sysrecipe_version (installed: $installed) -- rebuilding from source"
+					log "$name: rebuilding from source, pinned to $sysrecipe_version (was $installed)"
 					if "$SELF_DIR/fau-bootstrap" bootstrap-build "$name"; then
 						sys_checked=$((sys_checked + 1))
 						sys_updated=$((sys_updated + 1))
@@ -321,12 +322,12 @@ cmd_update() {
 					fi
 					continue
 				fi
-				log "$name $installed is up to date (system recipe still pinned to $sysrecipe_version)"
+				sys_up_to_date+=("$name")
 				sys_checked=$((sys_checked + 1))
 				continue
 			fi
 			sys_pinned=$((sys_pinned + 1))
-			log "$name $installed is pinned from source -- rebuild the ISO (config/versions.conf) to update it"
+			pinned_names+=("$name")
 			continue
 		fi
 		sys_checked=$((sys_checked + 1))
@@ -340,7 +341,7 @@ cmd_update() {
 					install_one_alpm "$name"
 					sys_updated=$((sys_updated + 1))
 				else
-					log "$name $installed is up to date"
+					sys_up_to_date+=("$name")
 				fi
 				continue
 			fi
@@ -348,21 +349,23 @@ cmd_update() {
 
 		log "$name: not found on the configured mirrors, skipping"
 	done
+	[ "${#sys_up_to_date[@]}" -eq 0 ] || log "up to date: ${sys_up_to_date[*]}"
+	[ "${#pinned_names[@]}" -eq 0 ] || log "pinned from source, rebuild the ISO to update: ${pinned_names[*]}"
 
 	log "checked $checked app(s), updated $updated; checked $sys_checked system package(s) ($sys_pinned pinned from source), updated $sys_updated"
 
 	# FloraOS's own files (fau's dispatcher/subtools/lib, the 5 C tools,
-	# floragrub-cfg) -- per-file, keyed on each one's own git blob sha, not
-	# bundled into one version/one rebuild. Safe to run at any point here:
-	# a changed tools/fau/fau-install would replace *this very file*, but
-	# via a staged atomic `mv`, which only affects the name-to-inode
-	# mapping -- this already-running process keeps its own open copy of
-	# the old file until it exits. See fau.md.
+	# floragrub-cfg): per-file, keyed on each one's own git blob sha, not
+	# bundled into one version/one rebuild. Safe to run at any point
+	# here: a changed tools/fau/fau-install would replace this very file,
+	# but via a staged atomic `mv`, which only repoints the path to a new
+	# inode; this already-running process keeps reading its own open
+	# copy of the old file until it exits. See fau.md.
 	if floraos_selfupdate_sweep; then
 		if [ "$FLORAOS_SELFUPDATE_CHANGED" -gt 0 ]; then
 			log "fau itself: $FLORAOS_SELFUPDATE_CHANGED file(s) updated from $FAU_SELFUPDATE_REPO"
 		else
-			log "fau itself: up to date ($FAU_SELFUPDATE_REPO)"
+			log "fau itself: up to date"
 		fi
 	fi
 }

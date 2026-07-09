@@ -203,13 +203,13 @@ floraos_selfupdate_sweep() {
 	for entry in "${to_update[@]}"; do
 		path=${entry%%:*}
 		local sha=${entry#*:}
-		local dest_rel; dest_rel=$(_floraos_dest_for "$path") || { log "warning: no destination mapping for tracked path $path -- skipping"; continue; }
+		local dest_rel; dest_rel=$(_floraos_dest_for "$path") || { log "warning: no destination mapping for tracked path $path, skipping"; continue; }
 		local dest_abs="${FAU_ROOT%/}/$dest_rel"
 
 		local fetched; fetched=$(mktemp)
 		if ! curl -sL --fail -o "$fetched" "$raw_base/$path" 2>/dev/null; then
 			rm -f "$fetched"
-			log "warning: fetching $path from $FAU_SELFUPDATE_REPO failed -- skipping this file for now"
+			log "warning: fetching $path from $FAU_SELFUPDATE_REPO failed, skipping this file for now"
 			continue
 		fi
 

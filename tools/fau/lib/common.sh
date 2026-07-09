@@ -57,6 +57,18 @@ strip_unreachable_docs() {
 	rm -rf "$dir/usr/share/man" "$dir/usr/share/info" "$dir/usr/share/doc" "$dir/usr/share/locale"
 }
 
+# Deletes tmpfiles.d rules OpenRC's own tmpfiles.sh can't satisfy -- its
+# `C` (recursive-copy) handler takes the source-column value literally,
+# with no systemd-style "empty means /usr/share/factory/<path>" fallback,
+# so a package shipping the common "C ... - - - - -" form (no explicit
+# source) always fails at boot ("cp: cannot stat ''"), confirmed for
+# real. audit.conf (from `audit`, a transitive dbus/pam dependency --
+# FloraOS never runs auditd) ships exactly this pattern.
+strip_unusable_tmpfiles() {
+	local dir=$1
+	rm -f "$dir/usr/lib/tmpfiles.d/audit.conf"
+}
+
 # offer_build <name> [version] -- if a fau-build recipe exists for <name>
 # (checked via recipe_lookup, lib/recipes.sh -- a fresh recipes_sync first,
 # so this sees a recipe pushed to FAU_RECIPES_REPO after this ISO was built,
