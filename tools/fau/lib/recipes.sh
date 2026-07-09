@@ -8,9 +8,7 @@
 # recipes/<name>.fis is fetched lazily, only for a name actually requested --
 # this stays cheap no matter how large the recipes collection grows, unlike
 # downloading the entire repo just to build one package. Re-fetched fresh on
-# every lookup, same as recipes.db itself -- see recipe_lookup's own comment
-# for why an earlier "fetch once, trust the cached copy forever" version of
-# this was a real bug, not just an optimization.
+# every lookup, same as recipes.db itself -- see fau.md.
 
 recipes_raw_base() {
 	echo "${FAU_RECIPES_REPO/github.com/raw.githubusercontent.com}/${FAU_RECIPES_BRANCH}"
@@ -40,32 +38,10 @@ recipes_sync() {
 }
 
 # The remote index wins over the read-only ISO-shipped fallback when both
-# know a same-named recipe -- see fau.md. A name present in the synced
-# recipes.db gets its .fis (re-)fetched fresh on every single lookup, not
-# just the first one -- a fetch failure here falls back to whatever was
-# cached from the last successful fetch (offline resilience, same "never
-# worse than before" shape as recipes_sync itself), or the shipped copy if
-# there's no cached one either, but never SKIPS the fetch attempt just
-# because a copy happens to already exist locally.
-#
-# A real, live bug this fixes, not a hypothetical: this used to check
-# `[ ! -f "$cached" ]` and skip the fetch entirely the moment any copy
-# already existed, trusting whatever it downloaded the very first time as
-# permanently correct forever after. That directly fights this whole
-# system's own stated purpose ("so a new recipe reaches every
-# FloraOS machine as soon as it's pushed here, without needing a new ISO")
-# -- a machine that ran `fau build <name>` once, before a recipe bug was
-# fixed and pushed, would NEVER see that fix, no matter how many more
-# times `fau update`/`fau build <name>` ran afterward. Found for real: a
-# live FloraOS box that had already fetched a broken cursor.fis (before a
-# real `PKG_DEPENDS` bug in it was fixed and pushed to fau-recipes) kept
-# failing with the exact same already-fixed error on every retry, because
-# nothing ever re-checked GitHub for that one file again -- only deleting
-# the cached copy by hand made the fix visible. Worse, `fau update`'s own
-# "third kind" version check (see fau.md) reads `PKG_VERSION` straight out
-# of this same cached file for every build-installed package, on every
-# single `fau update` call -- so this bug meant `fau update` could report
-# "up to date" forever off a stale recipe too, not just `fau build`.
+# know a same-named recipe. A name present in the synced recipes.db gets its
+# .fis (re-)fetched fresh on every lookup, falling back to the last
+# successfully fetched copy (or the shipped one) only if the network call
+# fails -- see fau.md.
 recipe_lookup() {
 	local name=$1
 	local index="$FAU_RECIPES_REMOTE_DIR/recipes.db"

@@ -319,6 +319,26 @@ wants strictly offline, shipped-recipes-only behavior on purpose. An
 explicit `fau recipes-update` also exists for triggering a sync on its own,
 without also doing a build or a full dependency-version check.
 
+### `recipe_lookup` re-fetches a `.fis` fresh on every call, not just the first
+
+Used to check `[ ! -f "$cached" ]` and skip the network fetch entirely once
+any copy of a given `recipes/<name>.fis` already existed locally, trusting
+whatever was downloaded the very first time as permanently correct forever
+after. That directly fights this whole system's own stated purpose above (a
+recipe fix reaching every machine as soon as it's pushed, no new ISO
+needed): a machine that built a package once, before a recipe bug was fixed
+upstream, would never see that fix on its own. Found live: a FloraOS box
+that had already fetched a buggy `cursor.fis` (`PKG_DEPENDS` listing a
+nonexistent `eudev` package) kept failing with the exact same already-fixed
+error on every retry, since nothing ever re-checked GitHub for that one file
+again — only deleting the cached copy by hand made the fix visible. This
+also silently affected `fau update`'s own version check for build-installed
+packages, which reads `PKG_VERSION` straight out of this same cached file.
+
+Now always attempts a fresh fetch first (same as `recipes.db` itself),
+falling back to the last successfully fetched copy only if the network call
+fails — offline resilience preserved, staleness-by-default removed.
+
 A recipe here declares two independent dependency lists, not one, because
 they have genuinely different lifetimes:
 
