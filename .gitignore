@@ -1,13 +1,7 @@
-# All build output lives here — downloaded sources, compiled toolchain,
-# staged rootfs, built fau packages. Nothing here is committed; everything
-# here is reproducible from the scripts + manifest + config.
+
 /work/
 
-# Final ISO output
 *.iso
 *.iso.sha256
 
-# fau-recipes/ is its own independent git repo (pushed to
-# github.com/Qsenja/fau-recipes separately) -- fau fetches it at runtime as a
-# plain HTTPS tarball, not via a git submodule. See tools/fau/fau.md.
 /fau-recipes/
