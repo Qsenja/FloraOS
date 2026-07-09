@@ -12,7 +12,8 @@ usage() {
 usage: fau <command> [args]
        fau help [topic]        this command's own commands, in full
 
-topics: install, build, repo, export, backup, service, seat, user, bootstrap
+topics: install, build, repo, export, backup, service, seat, user, bootstrap,
+        locale
         (or `fau help all` for every topic at once)
 
 environment:
@@ -178,9 +179,18 @@ bootstrap-build-list       list every system recipe available (synced
                             fau-recipes system/ namespace)
 EOF
 			;;
+		locale)
+			cat <<'EOF'
+setkeyboard <layout>      apply a console keymap now (loadkeys) and persist
+                            it into /etc/conf.d/keymaps for next boot -- see
+                            /usr/share/keymaps/** for available layout names
+                            (e.g. us, de, fr; searched recursively, same as
+                            loadkeys' own lookup)
+EOF
+			;;
 		all)
 			local t
-			for t in install build repo export backup service seat user bootstrap; do
+			for t in install build repo export backup service seat user bootstrap locale; do
 				echo "-- $t --"
 				usage_topic "$t"
 				echo
@@ -213,6 +223,8 @@ dispatch() {
 			exec "$SELF_DIR/fau-user" "$cmd" "$@" ;;
 		bootstrap|bootstrap-remove|bootstrap-list|bootstrap-export|bootstrap-apply|bootstrap-build|bootstrap-build-list)
 			exec "$SELF_DIR/fau-bootstrap" "$cmd" "$@" ;;
+		setkeyboard)
+			exec "$SELF_DIR/fau-locale" "$cmd" "$@" ;;
 		*)
 			die "unknown command: $cmd (see --help)"
 			;;

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# fau-locale -- console keymap switcher. See fau.md and docs/TODO.md (the
+# locale/keymap switcher entry) for the full reasoning.
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SELF_DIR/lib/common.sh"
+
+KEYMAPS_DIR="/usr/share/keymaps"
+KEYMAPS_CONF="/etc/conf.d/keymaps"
+
+cmd_setkeyboard() {
+	[ $# -eq 1 ] || die "usage: fau setkeyboard <layout>  (e.g. us, de, fr -- see /usr/share/keymaps/**)"
+	local layout=$1
+	command -v loadkeys >/dev/null 2>&1 || die "loadkeys not found (kbd package)"
+	[ -d "$KEYMAPS_DIR" ] || die "$KEYMAPS_DIR not found -- is the kbd package installed?"
+
+	local matches
+	matches=$(find "$KEYMAPS_DIR" -name "$layout.map.gz" -o -name "$layout.map" 2>/dev/null)
+	[ -n "$matches" ] || die "no keymap named '$layout' under $KEYMAPS_DIR/** (loadkeys itself does the same recursive search fau does here)"
+
+	loadkeys -q "$layout" \
+		|| die "loadkeys failed to apply '$layout' (need root, and a real console -- not a serial-only session)"
+
+	if [ -f "$KEYMAPS_CONF" ]; then
+		sed -i "s/^keymap=.*/keymap=\"$layout\"/" "$KEYMAPS_CONF"
+	else
+		echo "keymap=\"$layout\"" > "$KEYMAPS_CONF"
+	fi
+
+	log "keyboard layout set to '$layout' (applied now, and persisted in $KEYMAPS_CONF for next boot)"
+}
+
+cmd=${1:-}; [ $# -ge 1 ] && shift
+
+case "$cmd" in
+	setkeyboard) cmd_setkeyboard "$@" ;;
+	*) die "fau-locale: unknown command: $cmd" ;;
+esac

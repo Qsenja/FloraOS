@@ -58,24 +58,30 @@ file is only for things that could reasonably be finished later.
   kernel-cmdline-driven single-user boot test before calling the
   interactive-transition case solid.
 
-- **`fau setlang`/`fau setkeyboard`** — no locale/keymap switcher exists
-  yet. `usr/share/locale` (91 languages' gettext catalogs) and
-  `usr/share/i18n` (localedef's source data for every locale) are now
-  stripped from the shipped ISO entirely (see fau.md's "Dead-weight strip"
-  section) since `LANG` is hardcoded to `en_US.UTF-8` and nothing reads
-  them today — but that means there's currently no way to get a different
-  language back without rebuilding the ISO by hand. The natural fix reuses
-  existing machinery: Arch's own `glibc` package (already fetchable via
-  `alpm_resolve`/the alpm fallback `install_one_alpm` already uses) bundles
-  the same `usr/share/i18n/{locales,charmaps}` source data — `fau setlang
-  <locale>` would fetch it into a throwaway dir (same disposable-sandbox
-  pattern as `fau build`), run `localedef` to generate just the requested
-  locale into `usr/lib/locale`, and point `/etc/profile`'s `LANG` at it.
-  Keymaps are a separate, simpler case: `kbd`'s `usr/share/kbd/keymaps` is
-  small (1.3M for every layout) and already fully shipped, unstripped, so
-  `fau setkeyboard <layout>` needs no fetch at all — just validate the
-  layout exists, call `loadkeys`, and persist the choice into whatever
-  config OpenRC's `keymaps` init.d service reads. Not implemented yet.
+- **`fau setkeyboard` done, `fau setlang` still open** — `fau setkeyboard
+  <layout>` (new: `tools/fau/fau-locale`) is implemented and verified in a
+  real boot: validates the layout exists under `/usr/share/keymaps/**`
+  (the real shipped path — the note this replaced guessed
+  `usr/share/kbd/keymaps`, which doesn't exist; corrected after checking
+  the actual built rootfs, not assumed), applies it immediately via
+  `loadkeys`, and persists it into `/etc/conf.d/keymaps` (read by OpenRC's
+  `keymaps` init.d service on next boot). A bad layout name fails cleanly
+  with a real error instead of a cryptic `loadkeys` message. No fetch
+  needed: the 252 layout files (1.3M total) are already fully shipped,
+  unstripped.
+  `fau setlang` remains unimplemented — `usr/share/locale` (91 languages'
+  gettext catalogs) and `usr/share/i18n` (localedef's source data for
+  every locale) are stripped from the shipped ISO entirely (see fau.md's
+  "Dead-weight strip" section) since `LANG` is hardcoded to
+  `en_US.UTF-8` and nothing reads them today — so there's currently no way
+  to get a different language back without rebuilding the ISO by hand. The
+  natural fix reuses existing machinery: Arch's own `glibc` package
+  (already fetchable via `alpm_resolve`/the alpm fallback
+  `install_one_alpm` already uses) bundles the same
+  `usr/share/i18n/{locales,charmaps}` source data — `fau setlang <locale>`
+  would fetch it into a throwaway dir (same disposable-sandbox pattern as
+  `fau build`), run `localedef` to generate just the requested locale into
+  `usr/lib/locale`, and point `/etc/profile`'s `LANG` at it.
 
 - **`fau update`'s rolling base-system rebuild now covers all 30
   `MANDATORY_ORDER` packages** — every one has a real

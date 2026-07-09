@@ -1614,6 +1614,38 @@ Verified in a real QEMU boot: `seat-switch 2` / `seat-switch 1` round-trip
 correctly (confirmed via `seat-status` before/after each), and
 `seat-switch abc` is rejected with a clear error and exit status 1.
 
+## `setkeyboard <layout>` (`fau-locale`) — console keymap switcher
+
+No fetch, no sandbox: `kbd`'s full keymap tree (252 layouts, 1.3M total)
+already ships unstripped at `/usr/share/keymaps/**`, nested by keyboard
+"shape" (`i386/qwerty/`, `i386/qwertz/`, `i386/azerty/`, ...). `fau
+setkeyboard <layout>`:
+
+1. Searches `/usr/share/keymaps` recursively for `<layout>.map[.gz]` — the
+   same lookup `loadkeys` itself does internally for a bare name (confirmed
+   via `strings` on the real `loadkeys` binary: `/usr/share/keymaps/**` is
+   compiled in). A handful of names collide across subdirs (`cz`, `es`,
+   `trf` — different keyboard shapes shipping a layout under the same
+   short name); `fau` doesn't try to disambiguate, since `loadkeys`' own
+   resolution doesn't either — same ambiguity every kbd user already lives
+   with upstream, not something this wrapper needs to solve.
+2. Applies it immediately via `loadkeys -q <layout>`.
+3. Persists it into `/etc/conf.d/keymaps`'s `keymap="..."` line (the file
+   OpenRC's `keymaps` init.d service reads at boot), so the choice survives
+   a reboot.
+
+A layout name with no match anywhere under the tree is a clean, immediate
+error — never a raw `loadkeys` failure. Verified in a real QEMU boot: a
+nonexistent layout name fails with exit 1 and a clear message;
+`setkeyboard de` applies cleanly (exit 0) and `/etc/conf.d/keymaps` shows
+`keymap="de"` afterward.
+
+The earlier docs/TODO.md note for this guessed the keymap tree lived at
+`usr/share/kbd/keymaps` — checked against the real built rootfs before
+writing this, and that path doesn't exist; the real one is
+`/usr/share/keymaps`. `fau setlang` (locale switching) is a separate,
+still-unimplemented case — see docs/TODO.md.
+
 ## `user-*` (`fau-user`) — a thin front end over florauser
 
 `user-add`/`user-passwd`/`user-rename`/`user-groupadd`/`user-addtogroup`,
