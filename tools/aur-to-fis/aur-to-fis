@@ -6,6 +6,18 @@
 # or executes one -- only fetches it as plain text (AUR's RPC API + cgit raw
 # file endpoint, both read-only HTTP) and best-effort greps/parses known
 # field shapes out of it.
+#
+# recipe_build() below CAN come out fully written (no die() stub) when the
+# whole of prepare()/build()/package() is composed of a narrow whitelist of
+# safe, unambiguous file operations (install/mkdir/ln/rm/find-delete/sed,
+# plus a quoted heredoc install) with every $pkgdir/$srcdir/$pkgname/...
+# reference already resolved to a literal value -- still never executing or
+# bash-parsing anything, just recognizing fixed command shapes the same way
+# pkgbuild_scalar/pkgbuild_array already recognize fixed field shapes. Any
+# line outside that whitelist aborts translation for the WHOLE function (a
+# partial, silently-incomplete translation would be worse than an honest
+# stub) and falls back to the original comment+die() behavior, scoped to
+# exactly the function/line that blocked it.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -24,6 +36,11 @@ warn() { echo "aur-to-fis: warning: $*" >&2; }
 
 [ $# -eq 1 ] || die "usage: aur-to-fis <aur-pkgname>  (writes the draft .fis to stdout, notes/warnings to stderr)"
 pkgname_arg=$1
+
+# FloraOS only ever targets x86_64 (every recipe/build script in this
+# project assumes it) -- used below both for picking the right arch-keyed
+# source/sha256sums array and for resolving a literal ${CARCH} reference.
+FLORAOS_ARCH="x86_64"
 
 # --- AUR RPC v5: package metadata (JSON, read-only) -------------------------
 
@@ -93,6 +110,9 @@ pkgbuild_func_body() {
 		infn { print }
 	' || true
 }
+pkgbuild_has_func() {
+	printf '%s\n' "$1" | grep -qE "^$2\\(\\)"
+}
 
 # translate_pkgpaths: rewrites $pkgdir/$srcdir references (real PKGBUILD
 # vocabulary) to $app_dir/$src (a .fis recipe_build's own vocabulary) in the
@@ -101,7 +121,9 @@ pkgbuild_func_body() {
 # in terms of the isolated-app paths a human needs to translate it INTO,
 # instead of leaving that substitution as one more manual step every single
 # time. $pkgdir and $app_dir are the same concept (package staging root);
-# $srcdir and $src are the same concept (extracted source dir).
+# $srcdir and $src are the same concept (extracted source dir). Reused
+# as-is (not cosmetic anymore) when emitting a real auto-translated
+# recipe_build() below -- the substitution is identical either way.
 translate_pkgpaths() {
 	sed -E 's/\$\{pkgdir\}/$app_dir/g; s/\$pkgdir\b/$app_dir/g; s/\$\{srcdir\}/$src/g; s/\$srcdir\b/$src/g'
 }
@@ -134,8 +156,26 @@ pkgver=$(pkgbuild_scalar "$pkgbuild" pkgver)
 pkgrel=$(pkgbuild_scalar "$pkgbuild" pkgrel)
 pkgname_var=$(pkgbuild_scalar "$pkgbuild" pkgname)
 underscore_pkgname=$(pkgbuild_scalar "$pkgbuild" _pkgname)
-mapfile -t sources < <(pkgbuild_array "$pkgbuild" source)
-mapfile -t declared_sha256s < <(pkgbuild_array "$pkgbuild" sha256sums)
+
+# Arch-keyed source=/sha256sums= arrays (source_x86_64=, sha256sums_x86_64=)
+# are ADDED to the generic ones by real makepkg, not a replacement for them
+# -- concatenated here in the same order (generic first, then arch-specific)
+# so positional sha256sums-to-source correspondence within each section
+# still lines up. Missing before this fix: a `-bin` package with NO generic
+# source= at all (only per-arch downloads, e.g. opencode-bin's real
+# PKGBUILD) left `sources` empty and crashed this script later with
+# "picked_idx: unbound variable" -- confirmed directly, not a hypothetical --
+# and a package with BOTH (e.g. opencode-desktop-bin: a generic LICENSE
+# download plus the real per-arch .deb) picked the generic LICENSE as if it
+# were the package's actual payload, since nothing here ever looked at the
+# arch-specific arrays at all.
+mapfile -t sources_generic < <(pkgbuild_array "$pkgbuild" source)
+mapfile -t sources_arch < <(pkgbuild_array "$pkgbuild" "source_${FLORAOS_ARCH}")
+mapfile -t sha256_generic < <(pkgbuild_array "$pkgbuild" sha256sums)
+mapfile -t sha256_arch < <(pkgbuild_array "$pkgbuild" "sha256sums_${FLORAOS_ARCH}")
+sources=("${sources_generic[@]}" "${sources_arch[@]}")
+declared_sha256s=("${sha256_generic[@]}" "${sha256_arch[@]}")
+generic_source_count=${#sources_generic[@]}
 
 dynamic_version=""
 grep -qE '^pkgver\(\)' <<< "$pkgbuild" && dynamic_version=1
@@ -158,7 +198,7 @@ external_build_system=""
 { uses_external_build_system "$(pkgbuild_func_body "$pkgbuild" build)" || uses_external_build_system "$(pkgbuild_func_body "$pkgbuild" package)"; } \
 	&& external_build_system=1
 
-# --- Resolve the first source= entry's $var interpolations, best-effort ---
+# --- Resolve $var interpolations, best-effort -------------------------------
 
 resolve_vars() {
 	local s=$1; shift
@@ -166,39 +206,131 @@ resolve_vars() {
 	for pair in "$@"; do
 		[ -n "$pair" ] || continue
 		name=${pair%%=*}; val=${pair#*=}
-		[ -n "$val" ] || continue
-		s=$(printf '%s' "$s" | sed -E "s/\\\$\{${name}\}/${val}/g; s/\\\$${name}([^a-zA-Z0-9_]|\$)/${val}\\1/g")
+		# No `[ -n "$val" ] || continue` here on purpose: a binding being
+		# present at all means the PKGBUILD really did declare that name,
+		# even if its value is the empty string (opencode-bin's own real
+		# `_subver=` is exactly this -- a point-release suffix left empty by
+		# default). Skipping empty values here used to mean "${_subver}"
+		# in a source URL was reported as an unresolved candidate even
+		# though it correctly resolves to nothing.
+		# ${name%suffix} -- shortest-suffix removal, e.g. vesktop-bin's own
+		# real `${pkgname%-bin}` (pkgname=vesktop-bin -> "vesktop"). Computed
+		# here as plain string manipulation over a value THIS script already
+		# resolved -- never executing PKGBUILD text -- and only a literal
+		# (non-glob) suffix is handled, which covers every real-world case
+		# seen so far; not a general glob-pattern implementation.
+		if [[ "$s" == *'${'"$name"'%'* ]]; then
+			local suffix stripped
+			while [[ "$s" =~ \$\{${name}%([^}]*)\} ]]; do
+				suffix=${BASH_REMATCH[1]}
+				stripped=$val
+				[[ "$stripped" == *"$suffix" ]] && stripped=${stripped%"$suffix"}
+				s=${s/\$\{${name}%${suffix}\}/$stripped}
+			done
+		fi
+		# $val is used as a sed REPLACEMENT string below, where /, &, and \
+		# are all special -- a value containing any of them (a plain URL in
+		# url=, or one of the generic_scalar_bindings values below, unlike
+		# the handful of short identifiers this originally only had to
+		# handle) previously broke the sed script outright ("sed: unknown
+		# option to 's'"), confirmed directly against opencode-bin's own
+		# real url= field. Escaped here, once, right before building the
+		# sed script.
+		local val_escaped=${val//\\/\\\\}
+		val_escaped=${val_escaped//\//\\/}
+		val_escaped=${val_escaped//&/\\&}
+		s=$(printf '%s' "$s" | sed -E "s/\\\$\{${name}\}/${val_escaped}/g; s/\\\$${name}([^a-zA-Z0-9_]|\$)/${val_escaped}\\1/g")
 	done
 	printf '%s' "$s"
 }
+# Every OTHER top-level scalar assignment (_subver=, _electronversion=40,
+# url=, ...) gets picked up too, generically -- not just the handful of
+# named ones above. Missing before this fix: opencode-bin's own real
+# PKGBUILD has a real `_subver=` (empty by default, meant to be overridden
+# for a point-release suffix) referenced inside its source_x86_64= URL --
+# left unresolved, the picked URL still literally contained "${_subver}"
+# and was accepted anyway, since nothing re-checked for a leftover
+# unresolved interpolation once the arch-specific pass (below) matched
+# `http*`. Same top-level, column-1 `key=value` heuristic as
+# pkgbuild_scalar/pkgbuild_array elsewhere in this file -- deliberately
+# skips anything shaped like an array assignment (`key=(`), and function
+# bodies are conventionally indented so a bare `^identifier=` won't match
+# one by accident (same tolerance for the rare sloppy PKGBUILD as
+# everywhere else here: a stray extra binding is harmless, it's only ever
+# used for text substitution).
+generic_scalar_bindings=()
+while IFS= read -r line; do
+	if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=\( ]]; then
+		continue
+	elif [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+		gname=${BASH_REMATCH[1]}; gval=${BASH_REMATCH[2]}
+		gval=${gval%\"}; gval=${gval#\"}; gval=${gval%\'}; gval=${gval#\'}
+		generic_scalar_bindings+=("$gname=$gval")
+	fi
+done <<< "$pkgbuild"
+VAR_BINDINGS=("${generic_scalar_bindings[@]}" "pkgname=${pkgname_var:-$aur_name}" "_pkgname=$underscore_pkgname" "pkgver=$pkgver" "pkgrel=$pkgrel" "CARCH=$FLORAOS_ARCH")
 
-src_url_resolved="" src_url_status="ok"
+# classify_source_entry: shared by both picking passes below so "still has
+# an unresolved ${...}/$(...)/backtick" is checked identically in each --
+# an earlier version of the arch-specific pass only checked for `http*`,
+# which meant a URL with a leftover unresolved variable (see the
+# generic_scalar_bindings comment above) still got accepted as "resolved"
+# just because it happened to start with "https://".
+classify_source_entry() {
+	case "$1" in
+		*'${'*|*'$('*|*'`'*) echo unresolved ;;
+		http*) echo http ;;
+		*) echo local ;;
+	esac
+}
+
+# --- Pick the one real source= entry that's the package's actual payload ---
+
+src_url_resolved="" src_url_status="ok" picked_idx="" candidate="" local_sources=()
 if [ "${#sources[@]}" -eq 0 ]; then
-	src_url_status="no source= array found"
+	src_url_status="no source=/source_${FLORAOS_ARCH}= array found"
 else
-	# A local file (a .desktop entry, a config.h override, a patch --
-	# dwm.fis's own real source= is exactly this: local file, real tarball,
-	# local file, in that order) is common alongside the one real download,
-	# and not necessarily first -- scan every entry for the first one that
-	# resolves to an actual http(s) URL instead of assuming index 0.
-	local_sources=() candidate="" picked_idx=""
+	# A local file (a .desktop entry, a config.h override, a patch, or (for a
+	# -bin package) a launcher template checked into the AUR git repo itself
+	# -- dwm.fis's own real source= is exactly the first three, in that
+	# order) is common alongside the one real download, and not necessarily
+	# first -- scan for the first entry that resolves to an actual http(s)
+	# URL instead of assuming index 0.
+	#
+	# First pass: prefer an arch-specific (x86_64) http(s) entry if one
+	# exists -- real-world -bin PKGBUILDs put the ACTUAL payload there and
+	# any generic source= entries tend to be incidental extras (opencode-
+	# desktop-bin's generic source= is a bare LICENSE download; picking that
+	# over the real per-arch .deb would checksum the wrong file entirely).
+	# Falls through to a full scan (matching the original, single-array
+	# behavior) only if no arch-specific http(s) entry exists at all.
 	idx=0
 	for s in "${sources[@]}"; do
-		s=${s#*::}   # AUR's "filename::url" form -- drop any filename:: prefix
-		s=$(resolve_vars "$s" \
-			"pkgname=${pkgname_var:-$aur_name}" "_pkgname=$underscore_pkgname" "pkgver=$pkgver" "pkgrel=$pkgrel")
-		case "$s" in
-			*'${'*|*'$('*|*'`'*)
-				[ -z "$candidate" ] && candidate="unresolved: $s" ;;
-			http*)
-				if [ -z "$src_url_resolved" ]; then src_url_resolved=$s; picked_idx=$idx; fi ;;
+		if [ "$idx" -ge "$generic_source_count" ]; then
+			raw=${s#*::}
+			resolved=$(resolve_vars "$raw" "${VAR_BINDINGS[@]}")
+			if [ "$(classify_source_entry "$resolved")" = http ]; then
+				[ -z "$src_url_resolved" ] && { src_url_resolved=$resolved; picked_idx=$idx; }
+			fi
+		fi
+		idx=$((idx + 1))
+	done
+	idx=0
+	for s in "${sources[@]}"; do
+		raw=${s#*::}   # AUR's "filename::url" form -- drop any filename:: prefix
+		resolved=$(resolve_vars "$raw" "${VAR_BINDINGS[@]}")
+		case "$(classify_source_entry "$resolved")" in
+			unresolved)
+				[ -z "$candidate" ] && candidate="unresolved: $resolved" ;;
+			http)
+				[ -z "$src_url_resolved" ] && { src_url_resolved=$resolved; picked_idx=$idx; } ;;
 			*)
-				local_sources+=("$s") ;;
+				local_sources+=("$resolved") ;;
 		esac
 		idx=$((idx + 1))
 	done
 	if [ -n "$src_url_resolved" ]; then
-		[ "${#sources[@]}" -gt 1 ] && src_url_status="ok (picked the one http(s) source out of ${#sources[@]} total -- others look local/patches: ${local_sources[*]:-none})"
+		[ "${#sources[@]}" -gt 1 ] && src_url_status="ok (picked one http(s) source out of ${#sources[@]} total -- others look local/patches: ${local_sources[*]:-none})"
 	elif [ -n "$candidate" ]; then
 		src_url_status="source URL still has an unresolved \${...}/\$(...) expression after substitution -- resolve by hand: ${candidate#unresolved: }"
 	else
@@ -209,17 +341,43 @@ fi
 # --- Compute a REAL sha256 by actually downloading -- never trust the ------
 # --- PKGBUILD's own (declared, unverified-by-us) checksum -------------------
 
-computed_sha256="" download_status="not attempted"
+computed_sha256="" download_status="not attempted" tarball_is_flat="" tarball_tmp=""
 if [ -n "$src_url_resolved" ]; then
 	log "downloading $src_url_resolved to compute its real sha256 (this is the only network side effect that touches the actual package source)..."
-	tmp=$(mktemp)
-	if curl -sL --fail -o "$tmp" "$src_url_resolved" 2>/dev/null; then
-		computed_sha256=$(sha256sum "$tmp" | cut -d' ' -f1)
+	tarball_tmp=$(mktemp)
+	if curl -sL --fail -o "$tarball_tmp" "$src_url_resolved" 2>/dev/null; then
+		computed_sha256=$(sha256sum "$tarball_tmp" | cut -d' ' -f1)
 		download_status="downloaded OK, sha256 computed directly from the bytes fetched"
+		# fau-build's own build_extract_source (tools/fau/lib/build.sh)
+		# always runs `tar -xf ... --strip-components=1`, assuming a
+		# wrapping "repo-tag/" directory (true for a GitHub-archive-style
+		# tarball). A release asset that's genuinely flat (every member at
+		# the top level, no common leading directory -- confirmed for real
+		# against opencode's own release asset) gets silently stripped down
+		# to NOTHING instead: exit 0, zero files extracted, no warning at
+		# all. Checked here by actually listing the downloaded tarball's
+		# own members (only if it looks like a tar archive at all -- a
+		# .deb/.rpm/.AppImage isn't one, and .deb already gets its own
+		# build_extract_source support, see below), not assumed.
+		#
+		# Must skip DIRECTORY entries when looking for a "no slash" name --
+		# an archive's own wrapping directory is itself listed as one entry
+		# (e.g. plain "dwm-6.8", no trailing slash in this particular tar's
+		# listing) and naively counting any slash-free name as "flat" flagged
+		# dwm's own real, correctly-wrapped tarball as flat too (confirmed
+		# directly: false positive). Only a slash-free REGULAR file/symlink
+		# entry (permission field not starting with 'd') is the real
+		# "--strip-components=1 would eat this whole entry" signal.
+		case "$src_url_resolved" in
+			*.tar.gz|*.tar.xz|*.tar.bz2|*.tar.zst|*.tgz|*.tar)
+				if [ -n "$(tar -tvf "$tarball_tmp" 2>/dev/null | awk '$1 !~ /^d/ { n=NF; if ($n !~ /\//) print $n }' | head -n1)" ]; then
+					tarball_is_flat=1
+				fi
+				;;
+		esac
 	else
 		download_status="download failed -- verify the resolved URL by hand"
 	fi
-	rm -f "$tmp"
 else
 	download_status="skipped -- no resolved URL (see above)"
 fi
@@ -256,6 +414,150 @@ join_csv() { local IFS=,; echo "$*"; }
 declared_sha256=""
 [ -n "$picked_idx" ] && [ "$picked_idx" -lt "${#declared_sha256s[@]}" ] && declared_sha256=${declared_sha256s[$picked_idx]}
 
+# --- Attempt a REAL recipe_build(), not just a stub -------------------------
+#
+# Recognizes a narrow, explicitly-safe whitelist of literal file-operation
+# commands inside prepare()/build()/package() and re-emits them verbatim
+# (after the same $pkgdir/$srcdir->$app_dir/$src substitution shown in the
+# reference comment) as real, runnable recipe_build() lines. Still NEVER
+# executes or bash-parses the PKGBUILD -- every recognized line is matched
+# by a fixed shape, exactly the same category of operation
+# pkgbuild_scalar/pkgbuild_array already do for top-level fields. The
+# instant a line doesn't match, or still has an unresolved ${...}/$(...)/
+# backtick in it after substitution, translation aborts for the WHOLE
+# function -- a partial, silently-incomplete recipe_build() would be worse
+# than the honest stub this falls back to.
+#
+# A bare `cd` is deliberately NOT in the whitelist, even though it's
+# common (dwm/mangowm's own real PKGBUILDs both `cd "$srcdir/$pkgname-
+# $pkgver"` before doing anything else): fau's own build_extract_source
+# already strips exactly one leading path component, so $src is ALREADY
+# what the PKGBUILD calls "$srcdir/$pkgname-$pkgver" -- but telling that
+# apart from a genuine, still-real subdirectory (e.g. a monorepo tarball)
+# would need actually inspecting the tarball's real layout per-subpath,
+# not just pattern-matching text. Safer to bail (fall back to the manual
+# stub, same as today) than guess. None of the three -bin packages this
+# was built against (opencode-bin, opencode-desktop-bin, vesktop-bin)
+# `cd` anywhere in package() at all -- makepkg's own default cwd for
+# every function is $srcdir, matched here with an explicit `cd "$src"`
+# instead of assuming.
+join_continuations() {
+	awk '
+		{
+			if (cont) { line = buf " " $0 } else { line = $0 }
+			if (line ~ /\\$/) { sub(/\\$/, "", line); buf = line; cont = 1 }
+			else { print line; cont = 0 }
+		}
+	'
+}
+
+# local_source_basenames: basenames of every source= entry that never
+# resolved to an http(s) URL (a .desktop entry, a patch, or -- the real
+# gotcha this guards against -- a -bin package's own launcher-script
+# template checked into the AUR git repo itself, e.g. vesktop-bin's
+# "${pkgname%-bin}.sh"). This tool only ever fetches the ONE picked http(s)
+# source; it never clones the AUR package's own git tree, so a reference to
+# one of these basenames anywhere in a function body means that function
+# depends on a file we do NOT have and CANNOT safely fabricate -- treated
+# as unsafe to translate, same as any other unrecognized line.
+local_source_basenames=()
+for s in "${local_sources[@]:-}"; do
+	[ -n "$s" ] || continue
+	local_source_basenames+=("$(basename "$s")")
+done
+
+command_line_is_safe() {
+	local line=$1
+	local trimmed
+	trimmed="${line#"${line%%[![:space:]]*}"}"
+	[ -n "$trimmed" ] || return 0
+
+	# Never accept a line with anything left unresolved, or any piping,
+	# chaining, substitution, or redirection into another command -- only a
+	# single, plain, fully-substituted command is ever in scope here.
+	case "$trimmed" in
+		*'${'*|*'$('*|*'`'*|*'|'*|*'&&'*|*'||'*|*';'*|*'<('*) return 1 ;;
+	esac
+	local base
+	for base in "${local_source_basenames[@]:-}"; do
+		[ -n "$base" ] || continue
+		case "$trimmed" in *"$base"*) return 1 ;; esac
+	done
+
+	if [[ "$trimmed" =~ ^install[[:space:]] ]] \
+		|| [[ "$trimmed" =~ ^mkdir[[:space:]]+-p[[:space:]] ]] \
+		|| [[ "$trimmed" =~ ^ln[[:space:]]+-s ]] \
+		|| [[ "$trimmed" =~ ^rm[[:space:]]+-[rf]+[[:space:]] ]] \
+		|| [[ "$trimmed" =~ ^find[[:space:]] ]] \
+		|| [[ "$trimmed" =~ ^sed[[:space:]]+-i[[:space:]] ]]; then
+		# Every one of these must be scoped to $app_dir somewhere in its
+		# arguments -- the one thing standing between "safe file op inside
+		# the isolated app dir" and "arbitrary rm -rf of something else".
+		[[ "$trimmed" == *'$app_dir'* ]] && return 0
+		return 1
+	fi
+	return 1
+}
+
+# try_translate_body <body> -- prints translated lines and returns 0, or
+# prints nothing and returns 1 (caller falls back to the manual stub).
+try_translate_body() {
+	local body=$1
+	local -a out=()
+	local line in_heredoc="" heredoc_delim="" heredoc_lines=()
+	while IFS= read -r line; do
+		if [ -n "$in_heredoc" ]; then
+			if [ "$line" = "$heredoc_delim" ]; then
+				out+=("${heredoc_lines[@]}" "$line")
+				in_heredoc=""; heredoc_delim=""; heredoc_lines=()
+				continue
+			fi
+			heredoc_lines+=("$line")
+			continue
+		fi
+		if [[ -z "${line//[[:space:]]/}" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+			out+=("$line"); continue
+		fi
+		# A quoted-heredoc install (install ... /dev/stdin "<dest>" <<'DELIM'
+		# or <<"DELIM") is byte-for-byte literal by construction -- no
+		# variable expansion happens inside a quoted heredoc body, so its
+		# content is safe to carry over verbatim without running it through
+		# command_line_is_safe line by line (it's DATA, not commands).
+		if [[ "$line" =~ ^(.*)\<\<[[:space:]]*[\'\"]([A-Za-z_][A-Za-z0-9_]*)[\'\"][[:space:]]*$ ]]; then
+			local cmd_part=${BASH_REMATCH[1]}
+			command_line_is_safe "$cmd_part" || return 1
+			heredoc_delim=${BASH_REMATCH[2]}
+			out+=("$line")
+			in_heredoc=1
+			continue
+		fi
+		command_line_is_safe "$line" || return 1
+		out+=("$line")
+	done <<< "$body"
+	[ -z "$in_heredoc" ] || return 1
+	printf '%s\n' "${out[@]}"
+	return 0
+}
+
+auto_recipe_body="" auto_recipe_ok=1
+if [ -n "$src_url_resolved" ] && [ -n "$computed_sha256" ] \
+	&& [ "${#depends_unresolved[@]}" -eq 0 ] && [ "${#makedepends_unresolved[@]}" -eq 0 ]; then
+	for fn in prepare build package; do
+		pkgbuild_has_func "$pkgbuild" "$fn" || { [ "$fn" = package ] && auto_recipe_ok=0; continue; }
+		body=$(pkgbuild_func_body "$pkgbuild" "$fn" | translate_pkgpaths | join_continuations)
+		resolved_body=$(resolve_vars "$body" "${VAR_BINDINGS[@]}")
+		translated=$(try_translate_body "$resolved_body") || { auto_recipe_ok=0; break; }
+		[ -z "$translated" ] && continue
+		auto_recipe_body+=$'\n'"	# --- from PKGBUILD's own ${fn}() ---"$'\n'
+		auto_recipe_body+="$(printf '%s\n' "$translated" | sed 's/^/\t/')"
+	done
+else
+	auto_recipe_ok=0
+fi
+[ "$auto_recipe_ok" -eq 1 ] || auto_recipe_body=""
+
+rm -f "$tarball_tmp"
+
 # --- Emit the draft ----------------------------------------------------------
 
 {
@@ -268,6 +570,26 @@ declared_sha256=""
 	echo "# download status: $download_status"
 	[ -n "$declared_sha256" ] && [ "$declared_sha256" != "SKIP" ] && \
 		echo "# PKGBUILD's own declared sha256sums[$picked_idx] for the picked source (NOT what PKG_SRC_SHA256 below uses -- cross-check, don't trust blindly): $declared_sha256"
+	if [ -n "$tarball_is_flat" ]; then
+		echo "#"
+		echo "# WARNING: this tarball has no common wrapping directory (at least one member sits"
+		echo "# at the top level) -- fau's own build_extract_source (tools/fau/lib/build.sh) always"
+		echo "# runs --strip-components=1, which would silently empty \$src for a source shaped like"
+		echo "# this (confirmed: exit 0, zero files, no warning). recipe_build below re-fetches and"
+		echo "# re-extracts it itself without that strip to work around this -- same fix as"
+		echo "# fau-recipes/recipes/opencode.fis's own real recipe."
+	fi
+	case "$src_url_resolved" in
+		*.deb) echo "#"; echo "# note: build_extract_source now special-cases *.deb sources (pulls data.tar.* out"
+			echo "# of the ar container) -- \$src below is already the unpacked payload tree (opt/...,"
+			echo "# usr/...), no need to bsdtar/ar it yourself. A recipe whose data.tar happens to be"
+			echo "# xz-compressed needs PKG_BUILD_DEPS=\"xz\" -- see fau-recipes/recipes/opencode-desktop.fis." ;;
+		*.rpm) echo "#"; echo "# TODO: .rpm sources aren't supported by build_extract_source (cpio + its own"
+			echo "# lead/header format, not a tar archive) -- either extend it the same way *.deb was"
+			echo "# (see tools/fau/fau.md's own .deb section), or find a plain tarball/.deb release"
+			echo "# asset instead (this is exactly why vesktop.fis uses upstream's own generic-Linux"
+			echo "# tar.gz release directly rather than going through AUR's vesktop-bin at all)." ;;
+	esac
 	echo "#"
 	if [ "${#depends_unresolved[@]}" -gt 0 ] || [ "${#makedepends_unresolved[@]}" -gt 0 ]; then
 		echo "# TODO: these AUR dependencies did NOT resolve via fau's own alpm lookup (likely AUR-only"
@@ -287,7 +609,7 @@ declared_sha256=""
 		echo "# to fall back to -- if the binary checks \$HOME first, recipe_build needs to ALSO copy"
 		echo "# the default config to \$app_dir/.config/<name>/... (or wherever it actually checks --"
 		echo "# read the source, don't guess). See fau-recipes/recipes/mangowm.fis's own real fix for"
-		echo "# exactly this case."
+		echo "# exactly this case. NOT auto-verified even when recipe_build below is fully written."
 		echo "#"
 	fi
 	if [ -n "$external_build_system" ]; then
@@ -309,31 +631,58 @@ declared_sha256=""
 	echo "PKG_BUILD_DEPS=\"$(join_csv "${makedepends_resolved[@]}")\""
 	echo "PKG_BIN=\"TODO-e.g.-usr/bin/$aur_name\""
 	echo
-	echo "# --- original PKGBUILD build()/package(), for reference only -- NOT auto-translated."
+	echo "# --- original PKGBUILD build()/package(), for reference -- shown either way. ---"
 	echo "# \$pkgdir/\$srcdir already rewritten to \$app_dir/\$src below (a .fis recipe_build's own"
 	echo "# vocabulary for the exact same two paths) so this reads directly in those terms: ---"
+	pkgbuild_func_body "$pkgbuild" prepare | translate_pkgpaths | sed 's/^/# prepare: /'
 	pkgbuild_func_body "$pkgbuild" build | translate_pkgpaths | sed 's/^/# build: /'
 	pkgbuild_func_body "$pkgbuild" package | translate_pkgpaths | sed 's/^/# package: /'
 	echo
-	echo "recipe_build() {"
-	echo "	local src=\$1 app_dir=\$2 sandbox_dir=\$3"
-	echo "	# TODO: translate the PKGBUILD build()/package() steps above into this function."
-	echo "	# A .fis's recipe_build installs straight into \$app_dir (no fakeroot, no \$pkgdir --"
-	echo "	# see fau-recipes/recipes/mangowm.fis for a real worked example: meson + DESTDIR)."
-	if [ -n "$etc_install_build" ] || [ -n "$etc_install_package" ]; then
-		echo "	# TODO: also verify the \$HOME-based config path question flagged above before"
-		echo "	# considering this done -- an etc/ install alone does not mean the isolated app will"
-		echo "	# ever find it at runtime. See fau-recipes/recipes/mangowm.fis."
+	if [ -n "$auto_recipe_body" ]; then
+		echo "recipe_build() {"
+		echo "	local src=\$1 app_dir=\$2 sandbox_dir=\$3"
+		echo "	# Auto-translated from PKGBUILD's own prepare()/build()/package() above -- every line"
+		echo "	# matched a known-safe, unambiguous file-operation shape (install/mkdir/ln/rm/find/sed"
+		echo "	# or a quoted heredoc), never executed to produce this. REVIEW BEFORE TRUSTING, same"
+		echo "	# as everything else in this draft -- this whitelist is deliberately narrow, not proof"
+		echo "	# of correctness, just proof there was nothing IT could recognize as dangerous or"
+		echo "	# ambiguous. cd into \$src first: matches makepkg's own default cwd for every function"
+		echo "	# when nothing explicitly cd's elsewhere (a bare 'cd' itself is never auto-translated,"
+		echo "	# see this script's own comment on why -- so this only ever fires for a PKGBUILD that"
+		echo "	# never explicitly cd's in the first place)."
+		if [ -n "$tarball_is_flat" ]; then
+			echo "	local _tarball; _tarball=\$(build_fetch_source \"\$PKG_SRC_URL\" \"\$PKG_SRC_SHA256\")"
+			echo "	src=\$(mktemp -d)"
+			echo "	tar -xf \"\$_tarball\" -C \"\$src\""
+		fi
+		echo "	cd \"\$src\""
+		printf '%s\n' "$auto_recipe_body"
+		echo "}"
+	else
+		echo "recipe_build() {"
+		echo "	local src=\$1 app_dir=\$2 sandbox_dir=\$3"
+		echo "	# TODO: translate the PKGBUILD build()/package() steps above into this function."
+		echo "	# A .fis's recipe_build installs straight into \$app_dir (no fakeroot, no \$pkgdir --"
+		echo "	# see fau-recipes/recipes/mangowm.fis for a real worked example: meson + DESTDIR)."
+		if [ -n "$etc_install_build" ] || [ -n "$etc_install_package" ]; then
+			echo "	# TODO: also verify the \$HOME-based config path question flagged above before"
+			echo "	# considering this done -- an etc/ install alone does not mean the isolated app will"
+			echo "	# ever find it at runtime. See fau-recipes/recipes/mangowm.fis."
+		fi
+		if [ -n "$external_build_system" ]; then
+			echo "	# TODO: this builds via meson/cmake/ninja -- check ITS OWN install_data/install(FILES"
+			echo "	# for config files it installs that this PKGBUILD-only scan can't see (mango's own"
+			echo "	# config.conf is exactly this). If one exists, copy it to \$app_dir/.config/<name>/..."
+			echo "	# (or wherever the binary actually checks) the same way mangowm.fis does, after the"
+			echo "	# main DESTDIR install below."
+		fi
+		echo "	die \"TODO: recipe_build for $aur_name is not written yet -- see the PKGBUILD comment above\""
+		echo "}"
 	fi
-	if [ -n "$external_build_system" ]; then
-		echo "	# TODO: this builds via meson/cmake/ninja -- check ITS OWN install_data/install(FILES"
-		echo "	# for config files it installs that this PKGBUILD-only scan can't see (mango's own"
-		echo "	# config.conf is exactly this). If one exists, copy it to \$app_dir/.config/<name>/..."
-		echo "	# (or wherever the binary actually checks) the same way mangowm.fis does, after the"
-		echo "	# main DESTDIR install below."
-	fi
-	echo "	die \"TODO: recipe_build for $aur_name is not written yet -- see the PKGBUILD comment above\""
-	echo "}"
 }
 
-log "draft complete for $aur_name -- this is a STARTING POINT, not a finished recipe. Review PKG_SRC_URL/PKG_SRC_SHA256, the unresolved-dependency TODOs, and write a real recipe_build() before this goes anywhere near fau-recipes/recipes/."
+if [ -n "$auto_recipe_body" ]; then
+	log "draft complete for $aur_name -- recipe_build() was fully auto-translated (see the comment inside it for what that does and doesn't prove). Still review PKG_SRC_URL/PKG_SRC_SHA256/PKG_BIN and every TODO above before this goes anywhere near fau-recipes/recipes/."
+else
+	log "draft complete for $aur_name -- this is a STARTING POINT, not a finished recipe. Review PKG_SRC_URL/PKG_SRC_SHA256, the unresolved-dependency TODOs, and write a real recipe_build() before this goes anywhere near fau-recipes/recipes/."
+fi
