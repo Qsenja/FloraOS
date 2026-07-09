@@ -594,6 +594,87 @@ sandbox-prefixed environment around the `build_extract_source` call too,
 not just `recipe_build` — a plain env-var scoped to that one command
 substitution, not a permanent `$PATH` change for the rest of `cmd_build`.
 
+## The `vesktop`/`opencode`/`opencode-desktop`/`cursor` recipes — prebuilt binaries, not from-source builds
+
+All four are proprietary or Electron/Bun-runtime apps where "build from
+source" would mean re-deriving the exact same prebuilt runtime upstream's
+own CI already publishes (Electron/Chromium isn't actually compiled by
+anyone who ships it, and Bun-compiled binaries have no separate source
+form at all) — so each recipe pins upstream's own official release asset
+directly as `PKG_SRC_URL`, same as any other recipe's source tarball, just
+not source code.
+
+- **`vesktop`**: upstream's generic-Linux `.tar.gz` is a flat, self-
+  contained Electron bundle with no wrapping directory at all. Two
+  consequences: `recipe_build` copies the whole extracted tree verbatim
+  (Electron resolves `resources/`/`locales/`/its own bundled `.so`s
+  relative to its own executable's directory, so nothing can be split
+  out), and — because the tarball is flat — `build_extract_source`'s
+  default `--strip-components=1` would silently empty `$src` (see
+  `opencode`, below, for the same bug hit again and fixed generically).
+  `PKG_BIN` is a shell shim, not the real ELF: Chromium's sandbox needs
+  `chrome-sandbox` owned by root with the setuid bit, which `fau build`'s
+  unprivileged per-app model has no way to set up, so the shim always
+  launches with `--no-sandbox` instead.
+- **`opencode`**: a single Bun-compiled binary (`readelf -d` shows only
+  glibc). Its release tarball is exactly the flat-file case above —
+  `recipe_build` re-fetches (a cache hit) and re-extracts it itself
+  without `--strip-components`, rather than changing
+  `build_extract_source`'s shared behavior for every other recipe.
+- **`opencode-desktop`**: same Electron/`--no-sandbox` shape as `vesktop`,
+  but upstream ships no Linux tarball at all, only `.deb`/`.rpm`/
+  `.AppImage` — see the `.deb` section above for why `.deb` was the one
+  worth supporting. `PKG_BUILD_DEPS="xz"` because this `.deb`'s
+  `data.tar` happens to be xz-compressed.
+- **`cursor`**: deliberately *not* a port of AUR's own `cursor-bin`
+  PKGBUILD, which strips Electron out of the `.deb` and depends on a
+  system `electron40` package — an AUR-side disk-sharing optimization
+  (Arch packages a handful of pinned Electron versions, shared across
+  many Electron apps), not a property of the upstream `.deb` itself.
+  Confirmed by extracting the real upstream `.deb` directly: it's fully
+  self-contained, same shape as `vesktop`/`opencode-desktop` (even bundles
+  its own `rg` ripgrep binary). `PKG_DEPENDS` was verified via `readelf -d`
+  on the real bundled binary, not copied from the AUR package's own
+  `electron40`-shaped list. No `recipe_source_for_version`: Cursor's own
+  CDN path embeds a git commit sha that isn't derivable from the version
+  string alone, so `fau build cursor=<other version>` correctly refuses
+  rather than guessing a URL that would 404.
+- **`libudev.so.1` is deliberately absent from all three Electron
+  recipes' `PKG_DEPENDS`.** FloraOS builds its own `eudev` from source,
+  unconditionally, as part of every base rootfs (`scripts/recipes/
+  eudev.sh`) — already there on every system these recipes could ever run
+  on. Listing `"eudev"` isn't just redundant, it's actively fatal: it
+  isn't a real Arch/Artix package name at all (Artix's own package for
+  this is `udev`, an Artix-only split-out of systemd's udev component,
+  unrelated to FloraOS's own from-scratch build under that name) — and
+  `alpm_resolve_many` fails outright the instant any *one* requested name
+  can't be resolved, aborting the merge for every other, genuinely
+  resolvable dependency too. Found live: `fau install cursor` on a booted
+  FloraOS machine died with "couldn't resolve 'eudev' in any configured
+  Arch/Artix repo", having correctly resolved the other 24.
+
+## The `tor-browser` recipe — a different reason to bypass its own AUR PKGBUILD
+
+`tor-browser-bin`'s real PKGBUILD is unusual even among AUR-only prebuilt
+packages: its `sha256sums_x86_64` is a live `$(_dist_checksum ...)` shell
+function that `curl`s the Tor Project's own published checksum file *at
+build time* — never a hardcoded hash — and its `package()` doesn't even
+extract the downloaded tarball; it stores the pristine `.tar.xz` itself
+under `$pkgdir/opt/tor-browser/` (see its own `noextract=`) for a
+template-generated wrapper script to self-extract on first run. None of
+that is safe or sensible to mechanically translate. Tor Browser's own
+official upstream tarball is already a fully self-contained, ready-to-run
+bundle (this is literally how the Tor Project tells every Linux user to
+install it) with one common wrapping directory, so `build_extract_source`'s
+default path works with no special handling. `PKG_DEPENDS` was verified via
+`readelf -d` against the real bundled `Browser/libxul.so` — most of its own
+`NEEDED` entries are bundled right there in `Browser/` itself (found via
+the same directory search `app_wrapper_write` already does), only the
+genuinely-external system libraries are listed. No `--no-sandbox` shim
+needed here, unlike the Electron recipes above: Firefox's own sandbox is
+seccomp-bpf/namespace-based, not the setuid-helper-binary design Chromium
+uses.
+
 ## Manifests (`system.json` / `apps.json`) — `lib/manifest.sh`
 
 Flat schema only: `{"packages":{"name":{"version":"x"}}}`, hand-rolled
