@@ -180,7 +180,7 @@ cmd_update() {
 	# pin, not whatever was last synced (possibly never, on a fresh install).
 	local have_alpm=""
 	if alpm_fallback_available; then
-		log "refreshing package index from the configured mirrors..."
+		log "refreshing package databanks from the configured mirrors..."
 		alpm_refresh_dbs
 		have_alpm=1
 	fi

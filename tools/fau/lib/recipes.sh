@@ -28,6 +28,7 @@ recipes_sync() {
 	[ -n "${FAU_RECIPES_REPO:-}" ] || return 0
 	local base; base=$(recipes_raw_base)
 	local tmp; tmp=$(mktemp)
+	log "fetching recipes databank (official fis index)..."
 	if ! curl -sL --fail -o "$tmp" "$base/recipes.db" 2>/dev/null; then
 		rm -f "$tmp"
 		log "warning: couldn't fetch the recipes index from $FAU_RECIPES_REPO (offline?) -- using whatever's already cached/shipped"
