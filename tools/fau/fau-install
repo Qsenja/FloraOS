@@ -170,9 +170,13 @@ cmd_update() {
 
 	# Unconditional, once per invocation, before any checking/updating --
 	# see fau.md. fau backup itself refuses a non-block-device root (the
-	# live RAM image) with its own clear message; that's an expected,
-	# non-fatal outcome here, not a fau-update failure, so its exit status
-	# is never allowed to abort the update itself.
+	# live RAM image) with its own clear message; that's expected and
+	# non-fatal here, not a fau-update failure -- most packages update just
+	# fine on a live system, they just won't have a snapshot to roll back
+	# to. A specific package that genuinely can't be updated on a live
+	# system (e.g. linux-lts -- the live image's kernel isn't even loaded
+	# from a path this rebuild touches) opts out for itself via its own
+	# recipe's PKG_NEEDS_DISK, checked in fau-bootstrap, not here.
 	local backup_rc=0
 	"$SELF_DIR/fau-backup" backup "pre-update-$(date -u +%Y%m%dT%H%M%SZ)" || backup_rc=$?
 	[ "$backup_rc" -eq 0 ] || log "continuing without a pre-update backup (see above)"

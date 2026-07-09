@@ -384,19 +384,38 @@ stale `.c` entry (`floraseat.c`) causes a real recompile (confirmed:
 resulting binary is valid ELF, actually executes) while every other file
 including the *other* compiled tool (`fauelf`) stays untouched.
 
-### Auto-backup before any `fau update`
+### Auto-backup before any `fau update`, and `PKG_NEEDS_DISK` for the packages that actually can't run on a live system
 
-`cmd_update` now runs `fau backup "pre-update-<timestamp>"` unconditionally,
+`cmd_update` runs `fau backup "pre-update-<timestamp>"` unconditionally,
 once, before any checking/updating happens — not just before a
 system-package rebuild. `fau backup` itself already refuses a non-block-
 device root (the live RAM image) with its own clear message; that refusal
-is expected and non-fatal here, so its exit status is never allowed to
-abort the update itself (`|| backup_rc=$?`, same pattern
-`recipes_sync || true` already uses elsewhere in this file). Verified: on
-a non-block-device test root, the backup attempt fails with `fau backup`'s
-own message, `cmd_update` logs "continuing without a pre-update backup,"
-and every subsequent check/update in that same run still completes
-correctly.
+is expected and non-fatal here (`|| backup_rc=$?`, same pattern
+`recipes_sync || true` already uses elsewhere in this file), because most
+packages update just fine on a live system — they simply have no snapshot
+to fall back to if something goes wrong, same as any package rebuild that
+fails for another reason (disk full, etc.). An earlier version of this
+feature refused to run `fau update` *at all* on a live system, on the
+reasoning that no rollback net means no update — wrong scope: that's a
+property of specific packages (the kernel, see below), not of `fau
+update` as a whole.
+
+For the rare package where a live-system rebuild isn't just unsafe but
+structurally pointless, its own system recipe opts out for itself via
+`PKG_NEEDS_DISK="1"`, checked in `fau bootstrap-build`
+(`cmd_bootstrap_build`, `tools/fau/fau-bootstrap`) right after sourcing
+the recipe: if set and `root_is_block_device` is false, that one
+package's rebuild refuses with a clear message, while every other
+package in the same `fau update` run proceeds normally (the existing
+"rebuild failed, skipping" handling in `cmd_update`'s system-package loop
+already treats a failed `bootstrap-build` as non-fatal to the rest of the
+run). `fau-recipes/system/linux-lts.fis` is the one recipe that sets it
+so far: the live image's actual running kernel is loaded straight off the
+boot media, never from any path a live rebuild would touch, so running it
+there would burn a long build for zero effect, not just an unsafe one.
+Verified directly: sourcing `linux-lts.fis` with a faked non-block-device
+root correctly trips the check, while `rsync.fis` (no `PKG_NEEDS_DISK`)
+correctly doesn't.
 
 ## `build <name>[=<version>]` — installing a specific version, not just the recipe's pinned default
 

@@ -107,12 +107,23 @@ cmd_bootstrap_build() {
 		|| die "no system recipe for '$name' (looked in $FAU_SYSTEM_RECIPES_REMOTE_DIR), see 'fau bootstrap-build-list'"
 
 	local PKG_SRC_URL="" PKG_SRC_SHA256="" PKG_VERSION="" PKG_DESCRIPTION=""
-	local PKG_DEPENDS="" PKG_BUILD_DEPS=""
+	local PKG_DEPENDS="" PKG_BUILD_DEPS="" PKG_NEEDS_DISK=""
 	# shellcheck source=/dev/null
 	source "$recipe"
 	[ -n "$PKG_SRC_URL" ] && [ -n "$PKG_SRC_SHA256" ] && [ -n "$PKG_VERSION" ] \
 		|| die "$recipe: PKG_SRC_URL/PKG_SRC_SHA256/PKG_VERSION must all be set"
 	declare -F recipe_build >/dev/null || die "$recipe: doesn't define recipe_build"
+
+	# Opt-in, not the default: most packages update fine on a live (RAM)
+	# system, they just have no snapshot to roll back to if it goes wrong.
+	# A recipe sets PKG_NEEDS_DISK when a live-system rebuild isn't just
+	# risky but genuinely doesn't make sense -- linux-lts is the one so
+	# far: the live image's running kernel isn't loaded from any path this
+	# rebuild touches, so it would burn a long build for zero effect. See
+	# fau.md.
+	if [ "${PKG_NEEDS_DISK:-}" = "1" ] && ! root_is_block_device; then
+		die "$name needs a real disk install (see florainstall) -- refusing on a live/RAM system"
+	fi
 
 	# A version other than the recipe's own pinned default needs the recipe's
 	# opt-in cooperation, same contract as `fau build name=version`. See fau.md.
@@ -185,6 +196,17 @@ cmd_bootstrap_build() {
 	record_files "$name" "$files"
 	rsync -aK --checksum "$files/" "$FAU_ROOT/"
 	rm -rf "$files"
+
+	# Optional: a recipe can define recipe_post_merge(root) for anything that
+	# has to run against the *merged* tree, not the sandbox's staged output
+	# (e.g. linux-lts's depmod, which needs the full modules.dep database
+	# built from the real, final module path, not a throwaway build dir).
+	# Every other recipe so far needs nothing past the merge; this is the
+	# first that does. See fau.md.
+	if declare -F recipe_post_merge >/dev/null; then
+		log "$name: running post-merge step"
+		recipe_post_merge "$FAU_ROOT"
+	fi
 
 	system_set "$name" "$PKG_VERSION"
 	if [ -n "$existing" ]; then

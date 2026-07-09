@@ -28,6 +28,22 @@ FAU_ELF_PATCH="${FAU_ELF_PATCH:-fauelf}"
 die() { echo "fau: error: $*" >&2; exit 1; }
 log() { echo "fau: $*" >&2; }
 
+# findmnt's SOURCE column suffixes a subvolume mount, e.g. "/dev/sda1[/@]"; stripped below.
+root_device() {
+	local device; device=$(findmnt -n -o SOURCE /) || die "can't find the device mounted at / (findmnt failed)"
+	printf '%s' "${device%%\[*}"
+}
+
+# True on a real disk install (florainstall), false on the live RAM image --
+# the only two roots fau ever runs against. Shared by fau-backup (refuses to
+# snapshot a non-block-device root) and fau-install's cmd_update (refuses to
+# update one at all: no snapshot means no rollback, and changes don't even
+# persist past reboot on the live image anyway).
+root_is_block_device() {
+	local device; device=$(root_device) || return 1
+	[ -b "$device" ]
+}
+
 # tar_extract_or_die <archive> <dest-dir> <label> -- extracts a .pkg
 # archive, turning tar's own per-file failure spam (e.g. hundreds of
 # "Cannot write: No space left on device" lines when a RAM-backed live
