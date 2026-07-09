@@ -1006,6 +1006,44 @@ an accepted, documented simplification, not a full rpmvercmp port.
   optional/soft deps this fallback doesn't need to take literally. Only
   the *exact requested* top-level spec failing to resolve anywhere is a
   hard error.
+- **`alpm_find_provider` itself re-scanned an entire repo's index file via
+  `awk` on every single call** — once per dependency *edge* in the whole
+  transitive closure, not once per unique package. Measured against
+  `mangowm`'s real PKG_DEPENDS+PKG_BUILD_DEPS closure (176 resolved
+  packages, indexes already warm): 4.1s of pure resolution time. Fixed the
+  same way as `alpm_repo_provides_index` above — each repo's index/
+  provides-index now loads into a plain bash associative array once per
+  process (`ALPM_NAME_CACHE`/`ALPM_PROVIDES_CACHE`, lazily, guarded by
+  `ALPM_INDEX_LOADED`/`ALPM_PROVIDES_LOADED`), turning every subsequent
+  lookup into an in-memory hash hit: 2.1s for the same closure, byte-
+  identical resolved output verified before/after. `ALPM_REPO_NAMES_CACHE`
+  gets the same treatment for the repo-name list itself.
+- **A subshell silently defeated an earlier version of that same cache.**
+  `_alpm_resolve_one` called `alpm_find_provider` via
+  `found=$(alpm_find_provider ...)` — a command substitution forks a
+  subshell, so every cache write the function made was discarded the
+  instant it returned. That version came out *slower* (23s) than the
+  original despite every lookup being a hash hit in principle — the whole
+  cache was rebuilt from scratch inside a fresh, doomed subshell on nearly
+  every call. Fixed by having `alpm_find_provider` set a global
+  (`ALPM_FOUND_PROVIDER_RESULT`) instead of printing to stdout, and calling
+  it directly rather than through `$(...)` — the repo-name-list cache had
+  fallen into the identical trap on its own call site and needed the same fix.
+- **`_rpmvercmp`'s leading-zero strip** (`sed 's/^0*//'`) is plain bash
+  parameter expansion now, not a `sed` subprocess spawned twice per numeric
+  segment compared on every version check during resolution. Verified
+  byte-identical output against the original across 27 real version-string
+  pairs, including a real trailing-segment quirk (`0.000` vercmp `0` == 1,
+  not 0) confirmed to be pre-existing algorithm behavior, not something
+  either version changed.
+- **`app_wrapper_write`'s 8 separate `find $app_dir` traversals were
+  investigated and deliberately left alone.** Looked like an obvious
+  8x-redundant-walk target on paper, but measured against a synthetic
+  21,000-file tree (larger than any real FloraOS app — Electron bundles
+  pack most content into one `.asar`, not loose files) it's 0.2s total for
+  all 8. Not a real bottleneck at any scale this project operates at;
+  consolidating it would trade real correctness risk (subtle type/path-
+  matching differences across the 8 lookups) for an unmeasurable benefit.
 
 ## `fau backup` (`fau-backup`) — see [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md)'s
 fau-backup section for the full design (subvolume layout, the
