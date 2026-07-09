@@ -66,30 +66,65 @@ repo_lookup_depends() {
 	rm -rf "$work"
 }
 
+# name<TAB>version<TAB>file<TAB>sha256 for every entry in one grep+sed pass --
+# used by repo_set instead of extracting pkginfo from every OTHER archive on
+# disk just to add or replace one. See fau.md.
+repo_pairs() {
+	local file=$1
+	[ -f "$file" ] || return 0
+	grep -oE '"[^"]*":\{"version":"[^"]*","file":"[^"]*","sha256":"[^"]*"\}' "$file" 2>/dev/null \
+		| sed -E 's/^"([^"]*)":\{"version":"([^"]*)","file":"([^"]*)","sha256":"([^"]*)"\}/\1\t\2\t\3\t\4/'
+}
+
+repo_set() {
+	local file=$1 name=$2 version=$3 pkgfile=$4 sha=$5
+	local tmp; tmp=$(mktemp)
+	{
+		echo '{"packages":{'
+		local first=1 n v f s
+		while IFS=$'\t' read -r n v f s; do
+			[ "$n" = "$name" ] && continue
+			[ $first -eq 1 ] || echo ','
+			first=0
+			printf '"%s":{"version":"%s","file":"%s","sha256":"%s"}' \
+				"$(json_escape "$n")" "$(json_escape "$v")" "$(json_escape "$f")" "$(json_escape "$s")"
+		done < <(repo_pairs "$file")
+		[ $first -eq 1 ] || echo ','
+		printf '"%s":{"version":"%s","file":"%s","sha256":"%s"}' \
+			"$(json_escape "$name")" "$(json_escape "$version")" "$(json_escape "$pkgfile")" "$(json_escape "$sha")"
+		echo
+		echo '}}'
+	} > "$tmp"
+	mv "$tmp" "$file"
+}
+
 repo_add() {
 	local archive=$1
 	[ -f "$archive" ] || die "no such archive: $archive"
 	mkdir -p "$FAU_REPO_DIR"
 
-	# At most one archive per package name is kept -- see fau.md's Repo section.
 	local work; work=$(mktemp -d)
 	tar -I zstd -xf "$archive" -C "$work" pkginfo
-	local incoming_name; incoming_name=$(pkginfo_field "$work/pkginfo" name)
+	local incoming_name incoming_version
+	incoming_name=$(pkginfo_field "$work/pkginfo" name)
+	incoming_version=$(pkginfo_field "$work/pkginfo" version)
 	rm -rf "$work"
-	if [ -n "$incoming_name" ]; then
-		local existing existing_name w2
-		shopt -s nullglob
-		for existing in "$FAU_REPO_DIR"/*.fau.tar.zst; do
-			[ "$(basename "$existing")" = "$(basename "$archive")" ] && continue
-			w2=$(mktemp -d)
-			tar -I zstd -xf "$existing" -C "$w2" pkginfo 2>/dev/null
-			existing_name=$(pkginfo_field "$w2/pkginfo" name)
-			rm -rf "$w2"
-			[ "$existing_name" = "$incoming_name" ] && rm -f "$existing"
-		done
-		shopt -u nullglob
+
+	# At most one archive per package name is kept -- see fau.md's Repo
+	# section. The old archive's filename comes from the existing repo.json
+	# (already indexed by name) instead of re-extracting pkginfo from every
+	# other archive on disk just to find it.
+	local repo; repo=$(repo_json)
+	if [ -n "$incoming_name" ] && [ -f "$repo" ]; then
+		local old_file; old_file=$(repo_lookup_file "$incoming_name")
+		if [ -n "$old_file" ] && [ "$old_file" != "$(basename "$archive")" ]; then
+			rm -f "${FAU_REPO_DIR%/}/$old_file"
+		fi
 	fi
 
 	cp "$archive" "$FAU_REPO_DIR/"
-	repo_index
+	local sha; sha=$(sha256sum "$archive" | cut -d' ' -f1)
+	[ -f "$repo" ] || printf '{"packages":{\n}}\n' > "$repo"
+	repo_set "$repo" "$incoming_name" "$incoming_version" "$(basename "$archive")" "$sha"
+	log "added $(basename "$archive") to $(basename "$FAU_REPO_DIR")"
 }

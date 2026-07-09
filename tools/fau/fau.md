@@ -748,6 +748,25 @@ in this project) rather than sourcing `app_install_one` directly.
   the old archive on a version bump first, you get duplicate keys for the
   same name and which one `repo_lookup_file` resolves to depends on
   filesystem glob order, not on what was actually just added.
+- **`repo_add` used to call full `repo_index` after every single add**,
+  which re-extracts pkginfo (a `tar` + `mktemp -d` + `sha256sum`) from
+  *every* archive in the repo dir, not just the new one — and its own
+  duplicate-name check separately re-extracted pkginfo from every other
+  archive too. Building a full base system calls `repo_add` once per
+  package (`package_stage`, `scripts/lib/common.sh`), so both were O(n)
+  work per call, O(n^2) real tar extractions overall for n packages.
+  `repo_set`/`repo_pairs` (mirroring `lib/manifest.sh`'s `json_set`/
+  `json_pairs` fix) rebuild repo.json from a single grep+sed pass over the
+  *existing* repo.json instead of the archives themselves, and the
+  duplicate check now looks up the old filename via `repo_lookup_file`
+  (already-indexed data) rather than re-extracting every archive. Measured
+  against this project's own real 31-package repo, added in build order:
+  16.9s -> 1.59s. Verified against the original: repo dir contents
+  identical, and `repo_lookup_file`/`repo_lookup_version` return identical
+  answers for every package, including the version-bump/archive-replace
+  path. `repo_index` itself (the explicit `fau repo-index` full-rebuild
+  command) is untouched — rebuilding from the archives on disk from
+  scratch is exactly what that command is for.
 
 ## Dependency version constraints — `lib/manifest.sh`
 
