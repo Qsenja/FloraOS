@@ -21,7 +21,7 @@ recipe_build() {
 	# system recipes' missing PKG_BUILD_DEPS -- see fau.md. Reuses the
 	# headers just installed above for glibc; needed from the very first
 	# `make defconfig` onward, not just at the final build step.
-	export HOSTCFLAGS="-I$BUILD_DIR/linux-headers/include"
+	export HOSTCFLAGS="-idirafter $BUILD_DIR/linux-headers/include"
 
 	log "linux-lts: configuring (defconfig)"
 	make -C "$src" ARCH=x86_64 defconfig >/dev/null
