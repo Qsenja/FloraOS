@@ -181,6 +181,14 @@ cmd_update() {
 	"$SELF_DIR/fau-backup" backup "pre-update-$(date -u +%Y%m%dT%H%M%SZ)" || backup_rc=$?
 	[ "$backup_rc" -eq 0 ] || log "continuing without a pre-update backup (see above)"
 
+	# Whether specific package names were given: a bare `fau update` walks
+	# every installed package, an explicit `fau update linux-lts` targets
+	# just that one. Slow from-source rebuilds (PKG_MANUAL_UPDATE=1, see
+	# below) only run in the second case -- deliberate, not automatic,
+	# since the user asked for exactly this package.
+	local explicit_names=0
+	[ $# -ge 1 ] && explicit_names=1
+
 	local -a app_names=() sys_names=()
 	if [ $# -ge 1 ]; then
 		local n
@@ -303,7 +311,7 @@ cmd_update() {
 	system_recipes_sync || true
 
 	local sys_checked=0 sys_updated=0 sys_pinned=0
-	local -a sys_up_to_date=() pinned_names=()
+	local -a sys_up_to_date=() pinned_names=() manual_available=()
 	for name in "${sys_names[@]}"; do
 		local installed; installed=$(system_get_version "$name")
 		if [ -z "$installed" ]; then
@@ -313,9 +321,21 @@ cmd_update() {
 		if [ -n "${source_built[$name]:-}" ]; then
 			local sysrecipe; sysrecipe=$(system_recipe_lookup "$name") || sysrecipe=""
 			if [ -n "$sysrecipe" ]; then
-				local sysrecipe_version
-				sysrecipe_version=$(source "$sysrecipe"; echo "${PKG_VERSION:-}") || sysrecipe_version=""
+				# Two lines out of the same subshell/source, not two
+				# separate `source` calls: PKG_MANUAL_UPDATE (see
+				# fau-recipes/system/linux-lts.fis) marks a rebuild too
+				# slow/heavy to run unattended inside a bare `fau update` --
+				# it only runs when the package is named explicitly.
+				local sysrecipe_info sysrecipe_version sysrecipe_manual
+				sysrecipe_info=$(source "$sysrecipe"; printf '%s\n%s\n' "${PKG_VERSION:-}" "${PKG_MANUAL_UPDATE:-}") || sysrecipe_info=""
+				sysrecipe_version=$(printf '%s\n' "$sysrecipe_info" | sed -n '1p')
+				sysrecipe_manual=$(printf '%s\n' "$sysrecipe_info" | sed -n '2p')
 				if [ -n "$sysrecipe_version" ] && [ "$(alpm_vercmp "$sysrecipe_version" "$installed")" -gt 0 ]; then
+					if [ "$sysrecipe_manual" = "1" ] && [ "$explicit_names" -eq 0 ]; then
+						manual_available+=("$name ($installed -> $sysrecipe_version)")
+						sys_checked=$((sys_checked + 1))
+						continue
+					fi
 					log "$name: rebuilding from source, pinned to $sysrecipe_version (was $installed)"
 					if "$SELF_DIR/fau-bootstrap" bootstrap-build "$name"; then
 						sys_checked=$((sys_checked + 1))
@@ -355,6 +375,7 @@ cmd_update() {
 	done
 	[ "${#sys_up_to_date[@]}" -eq 0 ] || log "up to date: ${sys_up_to_date[*]}"
 	[ "${#pinned_names[@]}" -eq 0 ] || log "pinned from source, rebuild the ISO to update: ${pinned_names[*]}"
+	[ "${#manual_available[@]}" -eq 0 ] || log "update available but skipped (slow rebuild, run 'fau update <name>' to do it): ${manual_available[*]}"
 
 	log "checked $checked app(s), updated $updated; checked $sys_checked system package(s) ($sys_pinned pinned from source), updated $sys_updated"
 
