@@ -315,10 +315,18 @@ and `mkfs.ext4` works; `mbedtls` (the one recipe that only builds a
 rebuilds and a real `curl` HTTPS request against the freshly-built
 libraries succeeds.
 
-Only 6 `MANDATORY_ORDER` packages remain genuinely blocked:
-`glibc`/`linux-lts`/`eudev`/`curl`/`sysvinit`/`openrc`. See
-[docs/TODO.md](../../docs/TODO.md) for the specific reason each one isn't
-convertible yet.
+The remaining 7 (`rsync`, `openrc`, `eudev`, `curl`, `sysvinit`, `glibc`,
+`linux-lts`) are converted too now — all 30 `MANDATORY_ORDER` packages have
+real system recipes. Each needed a real, verified fix for a build-host-only
+assumption its original recipe made (pointing at another package's staged
+build output, a build host's own already-installed tools, etc.), not a
+guess — see [docs/TODO.md](../../docs/TODO.md) for what each one actually
+was and how it was confirmed. `linux-lts` (the kernel) is the one that
+needed the most: it's `PKG_NEEDS_DISK`/`PKG_MANUAL_UPDATE` (see below), and
+a real deliberately-broken-kernel QEMU test caught three more real bugs
+along the way (an mbedTLS bug affecting every HTTPS fetch this whole
+system makes, not just the kernel's; two kbuild-host-tool sandboxing
+gaps).
 
 ### FloraOS's own files: per-file granular update, not one lump
 
