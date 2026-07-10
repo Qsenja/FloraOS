@@ -960,11 +960,15 @@ silently doesn't fit.
     at startup and nothing else sets it up yet (no logind/elogind, see
     fau's own package list).
   - **New group**: `/etc/group` now has a `seat:x:11:` entry
-    (`scripts/apply-skeleton.sh`). Only root logs in today so this is a
-    formality -- the day FloraOS gets real user management (`useradd`/
-    `usermod` don't exist yet either, see below), `usermod -aG seat <user>`
-    is the entire migration path for that user to reach the compositor's
-    seat socket.
+    (`scripts/apply-skeleton.sh`). Only root logs in today so this is
+    still mostly a formality even though real user management now exists
+    (`tools/florauser`, `fau user-add`/`user-passwd`/etc., added since
+    this was first written) -- `fau user-add <name> seat` (or `fau
+    user-addtogroup <name> seat` after the fact) is the entire migration
+    path for a non-root user to reach the compositor's seat socket, but a
+    full non-root desktop login flow (a real user logging in via
+    floralogin, reaching a working seat, launching a compositor) hasn't
+    actually been exercised end-to-end yet -- see docs/TODO.md.
   - Still explicitly NOT done, on purpose rather than by oversight:
     **no real GPU acceleration driver** (i915/amdgpu/
     nouveau deliberately left out of linux-lts -- built-in would bloat

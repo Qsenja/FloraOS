@@ -12,9 +12,51 @@ file is only for things that could reasonably be finished later.
   simpledrm/sysfb KMS driver, not i915/amdgpu/nouveau. Add the one your
   hardware needs once this actually blocks someone (see README.md's
   GUI-readiness note).
+- **No WiFi story at all — kernel or userspace.** Checked directly (not
+  assumed): `config-floraos` builds `CONFIG_CFG80211`/`CONFIG_MAC80211`
+  (the generic 802.11 stack) but every actual chipset driver
+  (`ATH9K`/`ATH10K`/`IWLWIFI`/`BRCMFMAC`/`RTW88`/`MT76*`/...) is off, same
+  "generic infra present, no hardware-specific driver, add what you need"
+  shape as the GPU entry above. But even with a driver enabled, there's
+  still nothing to *use* it: `MANDATORY_ORDER` (`scripts/build-rootfs.sh`)
+  has no `wpa_supplicant`/`iwd`, and no `fau` command exists to associate
+  with a network — `dhcpcd` only handles DHCP on an interface that's
+  already up. On a laptop with no ethernet, this is a harder blocker to
+  daily use than the GPU gap, since there's no workaround at all today.
+  Natural shape once picked up: `iwd` (single daemon, already-present
+  `dbus-daemon` for its control API, no `wpa_supplicant`/`wpa_cli`
+  split) fetched via the alpm fallback like any other app, plus a `fau
+  wifi-connect <ssid>` wrapper matching the `fau setkeyboard`/`setlang`
+  convention (`tools/fau/fau-locale`) — validate, apply, persist.
+- **No audio story at all** — no `pipewire`/`pulseaudio`/plain `alsa-utils`
+  anywhere in `MANDATORY_ORDER` or as a documented opt-in install; checked
+  directly, not assumed. Nothing plays sound today, base image or
+  installed app. `fau install pipewire` (or equivalent) resolving via the
+  alpm fallback is plausible today without any FloraOS-side work, but
+  nobody's actually tried booting it, wiring its own service (OpenRC vs.
+  its own session-spawn model), or confirming a compositor session can
+  reach it.
+- **No power/session management (`elogind`/`upower`/`acpid` equivalent)**
+  — a lid close, a battery-critical event, or a suspend request today
+  does nothing at all; nothing listens for any of them. Relevant mainly
+  for laptops; a desktop/server FloraOS install doesn't need this to be
+  daily-drivable. `floralogin` already hand-rolls the one `logind`-shaped
+  thing a Wayland compositor hard-requires (`XDG_RUNTIME_DIR`, see
+  ARCHITECTURE.md) without pulling in real `elogind` — extending that
+  same minimal, hand-rolled approach to lid/battery/suspend (vs. actually
+  adopting `elogind`) is an open design question, not just an
+  implementation gap.
+- **Non-root desktop login flow is unverified** — `tools/florauser`
+  (`fau user-add`/`user-passwd`/etc.) exists and works for managing
+  accounts, and `usermod -aG seat <user>`-equivalent
+  (`fau user-addtogroup <user> seat`) is the documented migration path
+  for seat access (see ARCHITECTURE.md), but nobody has actually booted
+  as a non-root user, logged in via `floralogin`, and confirmed a
+  compositor session reaches the seat socket correctly end to end. Only
+  root has ever actually been tested logging in.
 - **Persistent syslog daemon** — not scripted, no concrete logging
   requirement has shown up yet. See ARCHITECTURE.md/MANIFEST.md.
-`fau backup`'s `restore` is now atomic where it matters — a new tool,
+- **`fau backup`'s `restore`** is now atomic where it matters — a new tool,
 `fauswap` (`tools/fauswap`, a minimal `renameat2(RENAME_EXCHANGE)`
 wrapper, same class as `fauelf`), swaps `@` and the snapshot in one
 kernel operation `@` can never be observed missing during. Verified for
@@ -29,7 +71,7 @@ See `fauswap.md` and `tools/fau/fau.md`'s `fau backup` section for the
   turned off in firmware setup to boot a FloraOS install. Fine today (no
   signed-boot requirement has shown up yet, same reasoning as the syslog
   daemon entry above); a real gap once that changes.
-**Single-user mode (runlevel `S1`) is done** — sysvinit's `l1:S1:wait:` entry
+- **Single-user mode (runlevel `S1`) is done** — sysvinit's `l1:S1:wait:` entry
 now runs `sulogin` directly, as its own inittab line
 (`~~:S1:wait:/usr/bin/sulogin`), not as an OpenRC-managed service. Verified
 end to end via the real intended path: a kernel-cmdline-driven single-user
