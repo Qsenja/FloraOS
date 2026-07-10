@@ -8,10 +8,34 @@ in the base image, app isolation under `~/apps/`) are *not* listed here — this
 file is only for things that could reasonably be finished later.
   **More features for yay-to-fis** – rename it to be more general, add more features the translater so the person transforming the buildfile needs to look less and can trust more. rewrite in another language if that brings more features.
   give the .fis language special attributes so a dev can make their package better for floraos's system
-- **No real GPU-accelerated driver** — the kernel only ships a generic
-  simpledrm/sysfb KMS driver, not i915/amdgpu/nouveau. Add the one your
-  hardware needs once this actually blocks someone (see README.md's
+- **No real GPU-accelerated driver for AMD/Intel** — the kernel only
+  ships a generic simpledrm/sysfb KMS driver, not i915/amdgpu (nouveau is
+  built as a loadable module but superseded by the nvidia recipe below
+  when both are present — see its modprobe.d blacklist). Add the one
+  your hardware needs once this actually blocks someone (see README.md's
   GUI-readiness note).
+- **NVIDIA: kernel module + userspace driver done and verified building/
+  loading, real hardware rendering not yet confirmed.** `fau
+  bootstrap-build nvidia` (`fau-recipes/system/nvidia.fis`, see
+  `tools/fau/fau.md`) builds NVIDIA's proprietary driver (kernel module +
+  GLVND/Vulkan userspace) against FloraOS's own kernel — 580.xx by
+  default (the last branch supporting Maxwell/Pascal/Volta), any other
+  version via `nvidia=<version>`. Required a real prerequisite that
+  didn't exist before: `linux-lts.fis` now stages a build-capable kernel
+  tree (`/usr/lib/modules/<release>/build`) — live-system rebuild only,
+  deliberately not baked into the ISO (~580M, against this project's
+  minimal-base-by-default identity), so a fresh install needs one
+  `fau bootstrap-build linux-lts` before the *first* out-of-tree module
+  (nvidia or otherwise) — untested from a truly fresh ISO specifically,
+  only from a live system already mid-rebuild for other reasons. Verified
+  for real (no GPU hardware needed for any of this): all five kernel
+  modules compile and `depmod` resolves them cleanly against the full
+  merged root with vermagic matching the running kernel exactly, nouveau
+  correctly blacklisted, and every GLVND/EGL-external-platform/Vulkan
+  userspace file lands where the dispatch mechanism `fau.md` already
+  documents looks for it. **Not verified**: actual GPU-accelerated
+  rendering in `mango` — needs real NVIDIA hardware, deliberately left
+  for real-hardware testing rather than guessed at.
 - **No WiFi story at all — kernel or userspace.** Checked directly (not
   assumed): `config-floraos` builds `CONFIG_CFG80211`/`CONFIG_MAC80211`
   (the generic 802.11 stack) but every actual chipset driver

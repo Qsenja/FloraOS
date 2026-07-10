@@ -53,9 +53,9 @@ build_extract_source() {
 	local name=$1 tarball=$2
 	local dest="${FAU_CACHE_DIR%/}/build-sources/extract-$name"
 	rm -rf "$dest"
-	mkdir -p "$dest"
 	case "$tarball" in
 		*.deb)
+			mkdir -p "$dest"
 			# Pulls out data.tar.* (dpkg's filesystem payload) and hands it
 			# to plain tar -- see fau.md.
 			local data_tarball; data_tarball=$(mktemp)
@@ -64,7 +64,23 @@ build_extract_source() {
 			tar -xf "$data_tarball" -C "$dest"
 			rm -f "$data_tarball"
 			;;
+		*.run)
+			# A makeself-style self-extracting installer (NVIDIA's own
+			# driver packaging), not a tar archive at all -- --extract-only
+			# runs the embedded extraction step without ever invoking the
+			# installer program itself. --target requires $dest to not
+			# already exist (confirmed directly: it refuses and errors
+			# "already exists" otherwise, unlike every other case here which
+			# pre-creates $dest) -- it creates the directory itself and
+			# drops the payload straight into it, no extra nested
+			# version-named subdirectory to strip (confirmed by extracting
+			# a real installer and inspecting the result, not assumed from
+			# the same shape as tarballs' own --strip-components=1 need).
+			chmod +x "$tarball"
+			sh "$tarball" --extract-only --target "$dest" >/dev/null
+			;;
 		*)
+			mkdir -p "$dest"
 			tar -xf "$tarball" -C "$dest" --strip-components=1
 			;;
 	esac

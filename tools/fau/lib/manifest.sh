@@ -183,7 +183,17 @@ record_files() {
 # to sha256sum instead of re-deriving comparison logic. See fau.md.
 record_file_hashes() {
 	local name=$1 src=$2
-	(cd "$src" && find . -type f -exec sha256sum {} +) \
+	# lib/modules/<release>/modules.* is excluded: depmod regenerates this
+	# whole set as a single shared index spanning every installed kernel
+	# module, not content any one package (linux-lts, nvidia, ...) owns on
+	# its own -- installing/rebuilding any other module-shipping package
+	# afterward legitimately rewrites these same files again, which
+	# 'fau bootstrap-verify' would otherwise report as "drift" on a
+	# package that never actually changed. depmod's own exit code (see
+	# recipe_post_merge) is the real correctness signal for these, not a
+	# per-file hash -- confirmed by watching this exact false-positive
+	# happen on a real nvidia.fis build/verify pass, not guessed.
+	(cd "$src" && find . -type f -not -path './lib/modules/*/modules.*' -exec sha256sum {} +) \
 		| sed 's/  \.\//  /' > "$FAU_FILES_DIR/$name.sha256"
 }
 

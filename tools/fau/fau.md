@@ -598,11 +598,211 @@ just that one. A system recipe with `PKG_MANUAL_UPDATE="1"` only rebuilds
 in the second case: a bare `fau update` reports it as available and
 skipped ("update available but skipped (slow rebuild, run 'fau update
 <name>' to do it): ..."), naming it explicitly always rebuilds it
-regardless of the flag. `fau-recipes/system/linux-lts.fis` is the only
-recipe that sets it so far. Verified the parsing directly: sourcing
+regardless of the flag. `linux-lts.fis` and `nvidia.fis` (below) are the
+only recipes that set it so far. Verified the parsing directly: sourcing
 `linux-lts.fis` reports `PKG_VERSION`/`PKG_MANUAL_UPDATE` correctly
 alongside each other, while a recipe without the flag (`mbedtls.fis`)
 correctly reports an empty `PKG_MANUAL_UPDATE`.
+
+## Out-of-tree kernel modules: `linux-lts.fis`'s staged build tree, and the `nvidia` recipe
+
+Nothing in this repo could build a third-party kernel module against a
+running FloraOS system before this -- confirmed by reading
+`linux-lts.fis`'s own `recipe_build` in full: after `make bzImage
+modules` + `modules_install`, `$files` only ever ended up with
+`boot/vmlinuz-floraos`/`System.map-floraos`/`config-floraos`/
+`kernelrelease` and `lib/modules/<release>/`'s own module files -- no
+`Module.symvers`, no `scripts/`, no `include/`, nothing
+`/usr/lib/modules/<release>/build` (the path any out-of-tree module's own
+Makefile looks for by convention, confirmed directly against a real
+NVIDIA driver `.run` installer's `kernel/Makefile`) would need to exist
+at all. Not nvidia-specific: VirtualBox guest modules, ZFS, anything
+else out-of-tree hits the same wall.
+
+### `linux-lts.fis`: staging a build-capable tree, and a real prune-list bug this caught
+
+`recipe_build` now also `cp -a`s the whole configured+built `$src` tree
+into `$files/usr/lib/modules/<release>/build/` right after the module
+build, pruning what an external module build never reads: the actual
+kernel subsystem source (`kernel/`, `mm/`, `drivers/`, `fs/`, `net/`,
+`sound/`, `crypto/`, `security/`, `virt/`, `ipc/`, `block/`, `init/`,
+`lib/`, `samples/`, `usr/`, `rust/`, `io_uring/`), `arch/x86/boot/` (the
+bzImage build's own output, already copied separately), and pure link
+byproducts (`vmlinux`, `vmlinux.o`, `vmlinux.unstripped`, `vmlinux.a`,
+`built-in.a`) and `tools/perf`/`tools/testing` (irrelevant to module
+builds, by far `tools/`'s largest subdirectories). Kept: `scripts/`
+(kbuild machinery, including already-built host tools like
+`scripts/mod/modpost` -- keeping them avoids rebuilding), `include/`,
+`arch/x86/` (minus `boot/`), `Module.symvers`, `certs/`,
+`tools/objtool/`.
+
+This prune list was not reasoned out correctly in one pass. A first cut
+only dropped the subsystem-source directories and left everything else,
+verified against a real build: `du -sh` on the actual staged result found
+1.1G, with `arch/x86/boot/` (121M, already redundant), the `vmlinux*`
+link byproducts (~230M combined), `Documentation/` (77M -- despite an
+earlier version of this very comment claiming it was "never copied at
+all," which was simply wrong until this real measurement caught it),
+`tools/perf`+`tools/testing` (78M), and `io_uring/` (a subsystem source
+dir the first pass had simply missed) all still present. Real
+measurement, not guessing, cut the staged tree to 580M.
+
+**Verified for real, no GPU needed**: a trivial standalone "hello world"
+kernel module (`module_init`/`module_exit`, `MODULE_LICENSE("GPL")`)
+built cleanly against the staged tree
+(`make -C /usr/lib/modules/<release>/build M=<dir> modules`), and
+`modinfo` on the resulting `.ko` showed `vermagic: 6.18.38 SMP preempt
+mod_unload` -- an exact match against the running kernel's own release
+string, confirming the staged tree is genuinely build-capable, not just
+present.
+
+**Deliberately live-system-only, not baked into the ISO's own build-time
+recipe** (`scripts/recipes/linux-lts.sh`, untouched) — the staged tree
+alone is ~580M, real weight for a project whose whole identity is a
+minimal base with everything else opt-in (no bundled WM/DE, `audio` only
+ever installed on request, ...). Baking this into every single ISO would
+tax every install that never touches a third-party kernel module to
+benefit the ones that do. The cost of NOT baking it in is a one-time
+`fau bootstrap-build linux-lts` before the first out-of-tree module
+(nvidia or otherwise) — rebuilding the exact same already-installed
+version specifically to materialize the build tree, slow but safe (it's
+the same kernel, not an upgrade) and, unlike everything else in this
+section, the one piece of this feature genuinely untested end-to-end:
+confirmed the *live-system* recipe produces a working tree from a build
+already in progress for other reasons, not confirmed *starting from* a
+truly fresh ISO install with no prior kernel rebuild at all.
+
+### `fau-recipes/system/nvidia.fis` — NVIDIA's proprietary driver, any version
+
+Why the proprietary driver, not NVIDIA's own open-source kernel modules
+(`github.com/NVIDIA/open-gpu-kernel-modules`): the open modules only
+support Turing and later GPUs (they need the GPU System Processor first
+introduced there) -- Maxwell/Pascal/Volta hardware needs this classic
+module. 580.xx is the last driver branch that supports Maxwell/Pascal at
+all (confirmed via NVIDIA's own release notes and Arch Linux's own
+advisory on the following 590 branch dropping that support), which is
+why it's the recipe's pinned default -- not arbitrary. Any other version
+works too: `recipe_source_for_version` (the same mechanism `dwm.fis`
+already established for pinning an arbitrary release) just substitutes
+the version into NVIDIA's own URL template, confirmed identical across
+several real releases (535.x, 580.76.05, 580.105.08, 580.126.09, ...).
+An explicit version pin gets an unverified-download warning instead of a
+hard-pinned checksum, same contract as `dwm.fis`'s own override.
+
+The kernel module's own build wrapper (the `.c` files under `kernel/` in
+the extracted `.run` installer) is real, compilable source -- the actual
+driver logic (`kernel/nvidia/nv-kernel.o_binary`) is a precompiled object
+NVIDIA ships for every distro, proprietary or not. Not a FloraOS-specific
+compromise; this is simply how this driver works everywhere, confirmed
+directly by extracting a real installer and reading its own `.manifest`.
+
+**`build_extract_source` gained a `*.run` case** (`lib/build.sh`): a
+makeself-style self-extracting installer isn't a tar archive at all.
+`sh "$tarball" --extract-only --target "$dest"` runs the embedded
+extraction step without ever invoking `nvidia-installer` itself --
+confirmed directly that `--target` requires `$dest` to not already
+exist (it creates the directory itself and errors "already exists"
+otherwise, unlike every other case here which pre-creates `$dest`), and
+that the payload lands directly in `$dest` with no extra nested
+version-named subdirectory to strip.
+
+**The `.manifest`-driven install, not a hardcoded file list**: the
+installer's own `.manifest` (confirmed by extracting a real 580.173.02
+installer and reading it directly) tags every shipped file with a TYPE
+(`OPENGL_LIB`, `GLVND_EGL_ICD_JSON`, `VULKAN_ICD_JSON`, `FIRMWARE`, ...)
+and an arch tag (`NATIVE`/`COMPAT32`). `recipe_build` `grep`s for the
+handful of types a Wayland/GLVND desktop actually needs (see the recipe's
+own header comment for the full list and reasoning) rather than a
+hardcoded per-file list, so a future driver version adding/removing a
+file of a type this recipe already handles is picked up automatically,
+version to version, without needing this recipe rewritten each time --
+the actual point of parsing by type instead of guessing filenames.
+Deliberately **not** installed: Xorg's own GLX module and X-specific ICDs
+(FloraOS ships no Xorg at all), the `COMPAT32` (32-bit) tree (would need
+a whole separate 32-bit-capable libc/multilib setup FloraOS doesn't
+have), systemd units (no systemd), and the CUDA/OpenCL/NVENC/NVDEC
+compute stack (`libcuda.so` alone is ~96MB; a real, deliberate scope cut
+for "desktop GPU accel," not an oversight) -- `nvidia-smi`+`libnvidia-ml`
+are the one exception, matched by exact filename rather than the
+`CUDA_LIB` type wholesale, since they're the one basic "is my GPU
+detected" diagnostic this feature's own verification leans on.
+
+Every `grep | while read` pipeline populating these installs is followed
+by `|| true`: under `fau-bootstrap`'s own `set -euo pipefail`, a type
+with zero matching manifest entries (plausible for some future/older
+driver version -- e.g. a release without bundled GSP firmware) would
+otherwise abort the whole build over an empty, non-fatal result. Caught
+by re-reading the recipe after writing it, not by a real failure --
+worth guarding regardless, since the entire reason to parse by type
+instead of hardcoding filenames is to stay correct across driver
+versions this recipe was never tested against directly.
+
+The kernel module build itself: `make -C kernel/ SYSSRC=<staged build
+tree> KERNEL_UNAME=<release> modules` then `modules_install
+INSTALL_MOD_PATH=$files` -- `SYSSRC`/`KERNEL_UNAME` are NVIDIA's own real
+Makefile variables (confirmed by reading `kernel/Makefile` directly, not
+recalled from memory), same `INSTALL_MOD_PATH` convention `linux-lts.fis`
+already uses. `recipe_post_merge` runs `depmod` against the *full*
+merged root, same hook `linux-lts.fis` already established.
+
+Nouveau (`linux-lts.fis` builds it as a loadable module) must not bind
+the GPU nvidia now owns -- `recipe_build` writes
+`/etc/modprobe.d/nvidia.conf` (`blacklist nouveau`, plus
+`options nvidia-drm modeset=1`, needed for wlroots/mango's DRM KMS
+backend to see the device at all -- off by default upstream). This is
+the first file this project has ever written under `/etc/modprobe.d/`
+-- there was no existing blacklist/module-option mechanism to reuse
+(confirmed: no hits anywhere in the repo beyond the `modprobe` binary
+itself), so this establishes the pattern rather than following one.
+
+**Two real bugs found via real builds, not guessed**:
+- A `\Q...\E` PCRE-only escape (leftover from an earlier draft) in two of
+  the exact-filename `grep -E` calls -- GNU `grep -E` doesn't understand
+  it at all, so those greps would have silently matched nothing, ever.
+  Fixed by anchoring on `^` instead and accepting `.` in a version string
+  matching "any character" as a harmless, already-precedented looseness
+  (`dwm.fis` doesn't escape dots in its own version substitution either).
+- `cmd_bootstrap_build`'s own final `system_set` call was still the old,
+  version-only call -- never converted to `system_set_full` when
+  `system.json`'s reproducibility schema was added, so every source-built
+  package (not just `nvidia`) was recording zero provenance despite
+  everything else being wired up. Found testing `nvidia.fis`
+  specifically, fixed at the source (`fau-bootstrap`), verified against
+  all three real origins afterward.
+
+**A third, more structural finding**: `fau bootstrap-verify` reported
+"drift" on 9 files after a clean `nvidia` install -- all
+`lib/modules/<release>/modules.*` (`modules.dep`, `modules.alias`,
+`modules.symbols`, their `.bin` caches, ...). These aren't `nvidia`'s own
+files at all: `depmod` regenerates this whole set as a single shared
+index spanning *every* installed kernel module, rewritten again the next
+time any module-shipping package's `recipe_post_merge` runs `depmod` --
+not something any one package still owns after the fact. `depmod`'s own
+exit code (checked directly: `0`, clean, against the full merged root)
+is the real correctness signal for these files, not a per-file hash.
+Fixed by excluding `lib/modules/*/modules.*` from
+`record_file_hashes` (`lib/manifest.sh`) entirely -- confirmed the fix
+doesn't hide a real problem by re-verifying `depmod` cleanly resolves
+`nvidia-drm.ko`'s dependency on `drm_fbdev_ttm_driver_fbdev_probe`
+(the one symbol a *temp-directory-scoped* `depmod` run during
+`modules_install` itself couldn't resolve and warned about, correctly,
+since that scoped run never sees the rest of the merged module tree) via
+a separate, full-root `depmod` invocation, exit 0.
+
+**What was and wasn't verified**: the kernel module build, `depmod`
+resolving cleanly against the full module tree, vermagic matching the
+running kernel exactly, nouveau's blacklist, and every userspace file
+(GLVND vendor JSON, EGL external platform JSON, Vulkan ICD, the library
+set) landing at the path `fau.md`'s own already-documented
+`egl_vendor.d`/`__EGL_VENDOR_LIBRARY_DIRS` mechanism looks for -- all
+real, verified against a real `fau bootstrap-build` run (`FAU_ROOT`
+pointed at a scratch directory rather than a live QEMU boot, same
+host-side verification approach the `system.json` reproducibility work
+above already used -- no GPU hardware needed for any of this, and this
+doesn't depend on kernel/hardware specifics QEMU would be needed for).
+**Not verified**: actual GPU rendering -- confirming `mango` actually
+renders with hardware acceleration needs the real GPU this was developed
+against, deliberately left to real hardware rather than guessed at.
 
 ## `build <name>[=<version>]` — installing a specific version, not just the recipe's pinned default
 
