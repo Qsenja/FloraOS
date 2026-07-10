@@ -1643,8 +1643,52 @@ nonexistent layout name fails with exit 1 and a clear message;
 The earlier docs/TODO.md note for this guessed the keymap tree lived at
 `usr/share/kbd/keymaps` — checked against the real built rootfs before
 writing this, and that path doesn't exist; the real one is
-`/usr/share/keymaps`. `fau setlang` (locale switching) is a separate,
-still-unimplemented case — see docs/TODO.md.
+`/usr/share/keymaps`.
+
+## `setlang <locale>` (`fau-locale`) — locale switcher
+
+`usr/share/locale`/`usr/share/i18n` are both stripped from the shipped ISO
+(see "Dead-weight strip" above) since `LANG` is hardcoded to
+`en_US.UTF-8` and nothing reads them today. Unlike keymaps, this needs a
+real fetch: `fau setlang <locale>` pulls glibc's own `usr/share/i18n`
+source data into a throwaway sandbox (`alpm_sandbox_fetch`, same
+disposable pattern `fau build` uses, discarded on exit), validates the
+requested locale/charmap exist in it, runs `localedef` to generate just
+that one locale into the real `/usr/lib/locale/locale-archive`, and
+points `/etc/profile`'s `LANG` at it.
+
+Two real bugs found building this, neither guessed:
+
+- **`localedef` needs `I18NPATH` pointed at the sandbox.** Real locale
+  definition files (confirmed for both `de_DE` and `en_US`) have a `copy
+  "i18n"` directive pulling in a shared building-block file
+  (`usr/share/i18n/locales/i18n`) via `localedef`'s own default search
+  path — which resolves to nothing on a live system, since
+  `usr/share/i18n` doesn't exist there at all. First attempt failed with
+  `cannot open locale definition file 'i18n'`; fixed by setting
+  `I18NPATH="$sandbox_dir/usr/share/i18n"` on the `localedef` invocation,
+  so it finds the sandbox's own copy instead.
+- **`local sandbox_dir` breaks its own cleanup trap.** Same class of bug
+  `fau-build`'s `cmd_build` already found and fixed (see its own comment):
+  a function-`local` sandbox path goes out of scope the moment the
+  function returns, but `trap 'rm -rf "$sandbox_dir"' EXIT` fires later,
+  at the whole *script's* exit — by then `$sandbox_dir` is unbound,
+  crashing under `set -u` right after logging success (`fau setlang`
+  reported the locale as set correctly, then still exited non-zero).
+  Fixed the same way `fau-build` already does: don't declare it `local`.
+
+Both were caught by a real QEMU boot, not by reading the code — the first
+one specifically because the live system genuinely has no
+`usr/share/i18n` to silently fall back to (an earlier host-side spot
+check of the equivalent `localedef` invocation for `linux-lts`'s recipe
+missed an analogous bug the same way, for the same reason — see that
+recipe's own notes below).
+
+Verified end to end: `setlang de_DE.UTF-8` fetches, generates, and exits
+0; `/etc/profile` shows `LANG=de_DE.UTF-8` and `locale -a` lists
+`de_DE.utf8` afterward. `setlang xx_XX.UTF-8` (no such locale) fails
+cleanly with exit 1 and a clear message, no fetch of anything beyond the
+dependency resolution needed to know that.
 
 ## `user-*` (`fau-user`) — a thin front end over florauser
 

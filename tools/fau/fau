@@ -186,6 +186,15 @@ setkeyboard <layout>      apply a console keymap now (loadkeys) and persist
                             /usr/share/keymaps/** for available layout names
                             (e.g. us, de, fr; searched recursively, same as
                             loadkeys' own lookup)
+setlang <locale>          fetch glibc's own locale source data into a
+                            throwaway sandbox (discarded after, same
+                            disposable-sandbox pattern as 'fau build'),
+                            generate the requested locale (localedef), and
+                            point /etc/profile's LANG at it. <locale> is the
+                            usual name, e.g. de_DE.UTF-8 or fr_FR.UTF-8
+                            (charmap defaults to UTF-8 if omitted). Needs a
+                            working network connection; re-login for LANG to
+                            take effect in already-open shells.
 EOF
 			;;
 		all)
@@ -223,7 +232,7 @@ dispatch() {
 			exec "$SELF_DIR/fau-user" "$cmd" "$@" ;;
 		bootstrap|bootstrap-remove|bootstrap-list|bootstrap-export|bootstrap-apply|bootstrap-build|bootstrap-build-list)
 			exec "$SELF_DIR/fau-bootstrap" "$cmd" "$@" ;;
-		setkeyboard)
+		setkeyboard|setlang)
 			exec "$SELF_DIR/fau-locale" "$cmd" "$@" ;;
 		*)
 			die "unknown command: $cmd (see --help)"

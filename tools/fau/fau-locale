@@ -6,9 +6,14 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SELF_DIR/lib/common.sh"
+# shellcheck source=lib/manifest.sh
+source "$SELF_DIR/lib/manifest.sh"
+# shellcheck source=lib/alpm.sh
+source "$SELF_DIR/lib/alpm.sh"
 
 KEYMAPS_DIR="/usr/share/keymaps"
 KEYMAPS_CONF="/etc/conf.d/keymaps"
+PROFILE_FILE="/etc/profile"
 
 cmd_setkeyboard() {
 	[ $# -eq 1 ] || die "usage: fau setkeyboard <layout>  (e.g. us, de, fr -- see /usr/share/keymaps/**)"
@@ -32,9 +37,63 @@ cmd_setkeyboard() {
 	log "keyboard layout set to '$layout' (applied now, and persisted in $KEYMAPS_CONF for next boot)"
 }
 
+cmd_setlang() {
+	[ $# -eq 1 ] || die "usage: fau setlang <locale>  (e.g. de_DE.UTF-8, fr_FR.UTF-8 -- charmap defaults to UTF-8 if omitted)"
+	command -v localedef >/dev/null 2>&1 || die "localedef not found (glibc package)"
+
+	local locale=$1 locale_name=$1 charmap="UTF-8"
+	case "$locale" in
+		*.*) locale_name=${locale%%.*}; charmap=${locale#*.} ;;
+	esac
+
+	# Deliberately NOT `local` -- the EXIT trap can fire after this
+	# function returns, once a local var of the same name has already
+	# gone out of scope (confirmed the hard way: "sandbox_dir: unbound
+	# variable" from the trap, right after cmd_setlang itself had already
+	# logged success). Same fix fau-build's cmd_build already uses.
+	sandbox_dir=$(mktemp -d)
+	trap 'rm -rf "$sandbox_dir"' EXIT
+	log "fetching glibc's locale source data (one-time, discarded after)..."
+	alpm_sandbox_fetch "$sandbox_dir" glibc
+
+	local locale_src="$sandbox_dir/usr/share/i18n/locales/$locale_name"
+	local charmap_src="$sandbox_dir/usr/share/i18n/charmaps/$charmap.gz"
+	[ -f "$locale_src" ] || die "no locale named '$locale_name' under glibc's usr/share/i18n/locales/ (check spelling/case -- e.g. de_DE, fr_FR, ja_JP)"
+	[ -f "$charmap_src" ] || die "no charmap named '$charmap' under glibc's usr/share/i18n/charmaps/ (check spelling/case -- e.g. UTF-8, ISO-8859-15)"
+
+	local charmap_tmp; charmap_tmp=$(mktemp)
+	zcat "$charmap_src" > "$charmap_tmp"
+	# No --prefix: unlike build-rootfs.sh's build-time en_US.UTF-8 generation
+	# (which targets a not-yet-booted $ROOTFS_DIR), this runs against the
+	# real, live root -- localedef appends straight into the existing
+	# /usr/lib/locale/locale-archive.
+	# I18NPATH is required, not optional: most real locale definition files
+	# (confirmed for both de_DE and en_US) have their own `copy "i18n"`
+	# directive pulling in glibc's shared building-block file
+	# (usr/share/i18n/locales/i18n) via localedef's own default search
+	# path -- which on a live FloraOS system resolves to nothing at all,
+	# since usr/share/i18n is deliberately stripped from the shipped ISO.
+	# Found via a real failure: "cannot open locale definition file
+	# `i18n'". Pointing I18NPATH at this sandbox's own fetched copy (which
+	# has the real file) fixes it -- confirmed directly.
+	I18NPATH="$sandbox_dir/usr/share/i18n" \
+		localedef -i "$locale_src" -f "$charmap_tmp" "$locale_name.$charmap" \
+		|| { rm -f "$charmap_tmp"; die "localedef failed to generate '$locale_name.$charmap' (need root)"; }
+	rm -f "$charmap_tmp"
+
+	if [ -f "$PROFILE_FILE" ] && grep -q '^export LANG=' "$PROFILE_FILE"; then
+		sed -i "s/^export LANG=.*/export LANG=$locale_name.$charmap/" "$PROFILE_FILE"
+	else
+		echo "export LANG=$locale_name.$charmap" >> "$PROFILE_FILE"
+	fi
+
+	log "locale set to '$locale_name.$charmap' (generated, and persisted in $PROFILE_FILE -- re-login or open a new shell for it to take effect)"
+}
+
 cmd=${1:-}; [ $# -ge 1 ] && shift
 
 case "$cmd" in
 	setkeyboard) cmd_setkeyboard "$@" ;;
+	setlang) cmd_setlang "$@" ;;
 	*) die "fau-locale: unknown command: $cmd" ;;
 esac

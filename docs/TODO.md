@@ -58,30 +58,15 @@ file is only for things that could reasonably be finished later.
   kernel-cmdline-driven single-user boot test before calling the
   interactive-transition case solid.
 
-- **`fau setkeyboard` done, `fau setlang` still open** — `fau setkeyboard
-  <layout>` (new: `tools/fau/fau-locale`) is implemented and verified in a
-  real boot: validates the layout exists under `/usr/share/keymaps/**`
-  (the real shipped path — the note this replaced guessed
-  `usr/share/kbd/keymaps`, which doesn't exist; corrected after checking
-  the actual built rootfs, not assumed), applies it immediately via
-  `loadkeys`, and persists it into `/etc/conf.d/keymaps` (read by OpenRC's
-  `keymaps` init.d service on next boot). A bad layout name fails cleanly
-  with a real error instead of a cryptic `loadkeys` message. No fetch
-  needed: the 252 layout files (1.3M total) are already fully shipped,
-  unstripped.
-  `fau setlang` remains unimplemented — `usr/share/locale` (91 languages'
-  gettext catalogs) and `usr/share/i18n` (localedef's source data for
-  every locale) are stripped from the shipped ISO entirely (see fau.md's
-  "Dead-weight strip" section) since `LANG` is hardcoded to
-  `en_US.UTF-8` and nothing reads them today — so there's currently no way
-  to get a different language back without rebuilding the ISO by hand. The
-  natural fix reuses existing machinery: Arch's own `glibc` package
-  (already fetchable via `alpm_resolve`/the alpm fallback
-  `install_one_alpm` already uses) bundles the same
-  `usr/share/i18n/{locales,charmaps}` source data — `fau setlang <locale>`
-  would fetch it into a throwaway dir (same disposable-sandbox pattern as
-  `fau build`), run `localedef` to generate just the requested locale into
-  `usr/lib/locale`, and point `/etc/profile`'s `LANG` at it.
+`fau setkeyboard`/`fau setlang` (locale/keymap switcher) are both done now,
+verified in real boots — see `tools/fau/fau.md`'s `setkeyboard`/`setlang`
+sections for the full story, including two real bugs `setlang` surfaced
+along the way: `localedef` needing `I18NPATH` pointed at the fetch sandbox
+(most real locale files `copy "i18n"` a shared file that doesn't exist on
+a live system, since `usr/share/i18n` is deliberately stripped from the
+ISO), and a `local`-scoped sandbox dir breaking its own `trap ... EXIT`
+cleanup (same class of bug `fau-build`'s `cmd_build` had already found and
+fixed — same fix applied here).
 
 - **`fau update`'s rolling base-system rebuild now covers all 30
   `MANDATORY_ORDER` packages** — every one has a real
