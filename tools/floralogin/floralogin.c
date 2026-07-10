@@ -75,23 +75,16 @@ int main(void) {
 			continue;
 		}
 
-		if (initgroups(pw->pw_name, pw->pw_gid) != 0) {
-			perror("floralogin: initgroups");
-			return 1;
-		}
-		if (setgid(pw->pw_gid) != 0) {
-			perror("floralogin: setgid");
-			return 1;
-		}
-		if (setuid(pw->pw_uid) != 0) {
-			perror("floralogin: setuid");
-			return 1;
-		}
-		if (chdir(pw->pw_dir) != 0) {
-			chdir("/");
-		}
-
-		/* no session manager to do this for us, see floralogin.md */
+		/* No session manager to do this for us, see floralogin.md --
+		 * must run while still root: setuid() below permanently drops
+		 * privileges, and /run itself is root:root 0755, so any
+		 * non-root user's own mkdir here would always fail with
+		 * EACCES. Confirmed the hard way in a real QEMU boot (this
+		 * used to run after setuid/setgid): root's own login "worked"
+		 * by accident (root can write /run regardless), silently
+		 * leaving every non-root user with no XDG_RUNTIME_DIR at all
+		 * -- no session manager, no compositor, nothing needing it
+		 * could ever start for a non-root login. */
 		{
 			char rundir[64];
 			int len = snprintf(rundir, sizeof rundir, "/run/user/%d", (int)pw->pw_uid);
@@ -106,6 +99,22 @@ int main(void) {
 					setenv("XDG_RUNTIME_DIR", rundir, 1);
 				}
 			}
+		}
+
+		if (initgroups(pw->pw_name, pw->pw_gid) != 0) {
+			perror("floralogin: initgroups");
+			return 1;
+		}
+		if (setgid(pw->pw_gid) != 0) {
+			perror("floralogin: setgid");
+			return 1;
+		}
+		if (setuid(pw->pw_uid) != 0) {
+			perror("floralogin: setuid");
+			return 1;
+		}
+		if (chdir(pw->pw_dir) != 0) {
+			chdir("/");
 		}
 
 		const char *shell = (pw->pw_shell[0] != '\0') ? pw->pw_shell : "/usr/bin/bash";

@@ -52,14 +52,36 @@ file is only for things that could reasonably be finished later.
   same minimal, hand-rolled approach to lid/battery/suspend (vs. actually
   adopting `elogind`) is an open design question, not just an
   implementation gap.
-- **Non-root desktop login flow is unverified** — `tools/florauser`
-  (`fau user-add`/`user-passwd`/etc.) exists and works for managing
-  accounts, and `usermod -aG seat <user>`-equivalent
-  (`fau user-addtogroup <user> seat`) is the documented migration path
-  for seat access (see ARCHITECTURE.md), but nobody has actually booted
-  as a non-root user, logged in via `floralogin`, and confirmed a
-  compositor session reaches the seat socket correctly end to end. Only
-  root has ever actually been tested logging in.
+- **Non-root desktop login: login + seat protocol confirmed working,
+  actual GPU rendering still broken.** Booted as a non-root user for the
+  first time (`fau user-add testuser seat`, `fau user-passwd`,
+  `floralogin`) and found a real bug: `floralogin` dropped privileges
+  (`setuid`/`setgid`) *before* creating `/run/user/<uid>`, so `/run`'s own
+  root:root 0755 permissions meant every non-root login silently got no
+  `XDG_RUNTIME_DIR` at all (`floralogin: warning: could not create
+  /run/user/1000: Permission denied`) -- root's own login only ever
+  "worked" by accident (root can write anywhere regardless). Fixed by
+  creating/chowning the directory while still root, before dropping
+  privileges. Verified for real afterward: `XDG_RUNTIME_DIR=/run/user/1000`,
+  correct `testuser:testuser` 0700 ownership, seat socket confirmed
+  group-writable and the group membership confirmed correct
+  (`groups=...,11(seat)`).
+  With that fixed, `mango` (built and run as the same non-root user) DOES
+  reach `floraseat` correctly end to end --
+  `floraseat.log` shows a real session opening and activating for uid
+  1000 on vt1, confirming the seat-protocol half of this actually works.
+  But `mango` still fails to render: `Failed to open DRM node
+  '/dev/dri/card0': Permission denied`, from wlroots' own
+  `render/egl.c`, not from the seat/session code path that just
+  succeeded -- looks like a second, independent direct-open attempt
+  (EGL/renderer layer acquiring its own fd rather than reusing the one
+  the seat protocol already handed the DRM backend for modesetting), not
+  yet root-caused. No udev rule assigns `/dev/dri/card*`/`renderD*` to
+  any group either (confirmed: `60-drm.rules` only creates by-path
+  symlinks, no `GROUP=`/`MODE=`), though that shouldn't matter if the
+  seat-mediated fd path is actually what wlroots uses for this. Real
+  remaining gap, not glossed over: a full non-root graphical session
+  still doesn't render, just further than before.
 - **Persistent syslog daemon** — not scripted, no concrete logging
   requirement has shown up yet. See ARCHITECTURE.md/MANIFEST.md.
 - **`fau backup`'s `restore`** is now atomic where it matters — a new tool,
