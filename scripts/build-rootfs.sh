@@ -209,6 +209,12 @@ main() {
 		"$FLORA_ROOT/tools/fauelf/fauelf.c"
 	chmod 755 "$ROOTFS_DIR/usr/bin/fauelf"
 
+	log "=== compiling fauswap (fau backup's renameat2 RENAME_EXCHANGE helper) ==="
+	gcc -Wall -Wextra -O2 \
+		-o "$ROOTFS_DIR/usr/bin/fauswap" \
+		"$FLORA_ROOT/tools/fauswap/fauswap.c"
+	chmod 755 "$ROOTFS_DIR/usr/bin/fauswap"
+
 	log "=== compiling floraseat (FloraOS's own seatd-protocol-compatible seat daemon) ==="
 	gcc -Wall -Wextra -O2 \
 		-o "$ROOTFS_DIR/usr/bin/floraseat" \

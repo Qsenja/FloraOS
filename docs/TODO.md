@@ -14,16 +14,15 @@ file is only for things that could reasonably be finished later.
   GUI-readiness note).
 - **Persistent syslog daemon** — not scripted, no concrete logging
   requirement has shown up yet. See ARCHITECTURE.md/MANIFEST.md.
-- **`fau backup`'s `restore` rename sequence still isn't fully atomic** — a
-  crash between the two renames (`mv @ -> @pre-restore-*` and
-  `mv @snapshots/<name> -> @`) still leaves `@` briefly missing; the only
-  real fix would be a `renameat2(RENAME_EXCHANGE)`-based swap, and no tool
-  this project ships exposes that syscall (adding one — a small compiled
-  helper, same class as `fauelf` — hasn't been decided as worth it yet for
-  this alone). The window is now as narrow as it gets without that, and no
-  longer an unrecoverable brick: `fau backup-repair <name>` completes an
-  interrupted restore after booting the still-working "FloraOS (backup:
-  <name>)" GRUB entry. See ARCHITECTURE.md's fau-backup section.
+`fau backup`'s `restore` is now atomic where it matters — a new tool,
+`fauswap` (`tools/fauswap`, a minimal `renameat2(RENAME_EXCHANGE)`
+wrapper, same class as `fauelf`), swaps `@` and the snapshot in one
+kernel operation `@` can never be observed missing during. Verified for
+real via `scripts/test-install.sh`'s existing backup/backup-restore
+phases (unchanged test, now exercising the atomic path — real QEMU PASS).
+See `fauswap.md` and `tools/fau/fau.md`'s `fau backup` section for the
+3-step sequence (why it's not just one bare exchange) and how
+`backup-repair` now recognizes the new interrupted-state shape.
 - **No Secure Boot support in `florainstall`'s new UEFI path** (see
   ARCHITECTURE.md) — no shim, no MOK enrollment, GRUB's own EFI binary is
   unsigned. Machines that enforce Secure Boot (most do by default) need it

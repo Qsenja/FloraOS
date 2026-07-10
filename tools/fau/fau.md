@@ -1534,19 +1534,33 @@ case), so plain `mktemp -d` died with "Read-only file system" there.
 `/dev/shm` is its own tmpfs, mounted by devfs's own init script
 independent of whatever's mounted as `/`.
 
-`backup-restore` isn't atomic (no tool here exposes
-`renameat2(RENAME_EXCHANGE)`) — `_backup_restore_do` clears the snapshot's
-read-only property *before* touching `@` at all so a failure there never
-leaves `@` missing, narrowing the real risk to the two renames themselves.
-`backup-repair <name>` (`_backup_repair_do`) completes the interrupted case:
-run after booting the still-working "FloraOS (backup: `<name>`)" GRUB entry
-(whose subvolume is untouched by the failed rename), it refuses outright if
-`@` already exists or if `@snapshots/<name>` is also gone — it only knows
-how to complete this one specific, well-understood state, not guess at
-others. Verified against real btrfs subvolumes (not just read through): both
-the normal-restore path and the induced-crash-then-repair path, plus both
-repair-refusal cases, exercised directly (not via `scripts/test-install.sh`,
-which doesn't yet inject a crash mid-restore).
+`backup-restore` is now atomic where it actually matters, via a new tool,
+`fauswap` (`tools/fauswap/fauswap.c`) — a minimal wrapper around
+`renameat2(2)`'s `RENAME_EXCHANGE` flag, same "small, auditable,
+purpose-built" class as `fauelf`. See `fauswap.md` for the full design
+rationale (why it's a 3-step sequence, not one bare exchange between `@`
+and the snapshot). In short, `_backup_restore_do`:
+
+1. Renames `@snapshots/<name>` aside to a fresh, private
+   `@restore-pending-<name>-<ts>` name — an ordinary rename that never
+   touches `@`.
+2. `fauswap`s `@` and that pending name — the one atomic step. `@` can
+   never be observed missing: `renameat2` either fully swaps both names or
+   changes nothing.
+3. Renames the pending name to its final, human-readable
+   `@pre-restore-<name>-<ts>` — cosmetic only, `@` already holds the
+   correct restored content by this point regardless.
+
+`backup-repair <name>` (`_backup_repair_do`) now primarily looks for a
+leftover `@restore-pending-<name>-*` subvolume (a crash during step 1 or
+3) and just finishes the cosmetic rename — `@` is already known-safe in
+that case, so this never has to guess. The old "`@` is missing,
+`@snapshots/<name>` still exists" case is kept as a defensive fallback (no
+longer reachable through `backup-restore`'s own code, since neither of its
+two plain renames ever touches `@` before the atomic step, but harmless to
+keep for any other way `@` might go missing). Verified against real btrfs
+subvolumes via `scripts/test-install.sh`'s existing backup/restore
+phases (unchanged test, now exercising the atomic path).
 
 ## `service-*` (`fau-service`) — a thin front end over OpenRC
 

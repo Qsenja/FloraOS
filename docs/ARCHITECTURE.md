@@ -455,6 +455,23 @@ a first-time user sees it before being asked for credentials -- appropriate
 for this live, RAM-resident image, which has no persistent install yet and no
 `passwd(1)` built to change it.
 
+## `scripts/test-all.sh` — running every test in one pass
+
+`./floraiso test-all` (or `scripts/test-all.sh` directly) runs every
+`scripts/test-*.sh` test and prints a PASS/FAIL summary table, instead of
+invoking each by hand. Default is the "fast" tier (`test-iso.sh`,
+`test-install.sh`, `test-install-uefi.sh` — a few minutes total);
+`--all` opts into the "slow" tier too (`test-kernel-update.sh`, a real
+kernel rebuild, tens of minutes, needs network). `--only NAME[,NAME...]`
+runs a specific subset regardless of tier. Always sequential, deliberately
+never parallel: two QEMU VMs genuinely competing for the same host's
+CPU/network caused real, reproducible failures during this project's own
+development — a second VM's slirp usermode networking degraded badly
+under CPU contention from a heavy kernel-build VM, with real mirror
+fetches failing 100% of the time under load and succeeding instantly once
+the other VM finished (confirmed directly, not assumed). Each test's full
+output is saved to `work/test-all-logs/<name>.log`.
+
 ## Test harness: QEMU serial-console automation (scripts/lib/common.sh)
 
 `scripts/test-iso.sh`, `test-install.sh`, and `test-install-uefi.sh` all drive

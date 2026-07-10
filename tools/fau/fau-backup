@@ -90,11 +90,21 @@ _backup_restore_do() {
 	local tmp=$1 name=$4
 	[ -e "$tmp/@snapshots/$name" ] || die "no such backup: $name (see 'fau backup-list')"
 	local ts; ts=$(date -u +%Y%m%dT%H%M%SZ)
-	# Not atomic (no renameat2 RENAME_EXCHANGE available); see fau.md for the crash window this narrows.
+	local pending="$tmp/@restore-pending-$name-$ts"
 	btrfs property set "$tmp/@snapshots/$name" ro false || die "clearing the snapshot's read-only property failed -- @ is untouched, nothing to repair, just re-run 'fau backup-restore $name'"
-	mv "$tmp/@" "$tmp/@pre-restore-$name-$ts" || die "renaming the current @ aside failed"
-	mv "$tmp/@snapshots/$name" "$tmp/@" \
-		|| die "promoting $name to @ failed -- @ is currently MISSING. The GRUB menu's default entry (subvol=@) won't boot until this is fixed, but \"FloraOS (backup: $name)\" (subvol=@snapshots/$name, untouched by the failed rename) still will -- boot that, then run 'fau backup-repair $name' from there. Or fix by hand: mv @pre-restore-$name-$ts back to @"
+	# Step 1/3: plain renames, but neither one ever touches @ -- see
+	# fauswap.md for why the sequence is split this way. A crash here
+	# leaves @ completely untouched; at worst 'fau backup-list'/this
+	# backup's own GRUB entry is briefly out of sync, fixed by
+	# 'fau backup-repair NAME'.
+	mv "$tmp/@snapshots/$name" "$pending" || die "renaming the snapshot aside for the swap failed -- @ is untouched, nothing to repair, just re-run 'fau backup-restore $name'"
+	# Step 2: the one moment that has to be atomic. renameat2(RENAME_EXCHANGE)
+	# either fully swaps both names or changes nothing -- @ can never be
+	# observed missing, unlike a plain two-mv sequence.
+	fauswap "$tmp/@" "$pending" \
+		|| die "atomic swap failed -- @ is untouched (renameat2 either fully succeeds or does nothing), just re-run 'fau backup-restore $name'"
+	mv "$pending" "$tmp/@pre-restore-$name-$ts" \
+		|| die "restore itself succeeded (@ now holds '$name') but renaming the old root to its final @pre-restore-$name-$ts name failed -- harmless, @ already boots correctly; run 'fau backup-repair $name' to finish the rename, or do it by hand: mv $pending to @pre-restore-$name-$ts"
 }
 
 cmd_backup_restore() {
@@ -110,10 +120,37 @@ cmd_backup_restore() {
 
 _backup_repair_do() {
 	local tmp=$1 name=$4
-	# Only completes one specific interrupted-restore state; anything else is refused (see fau.md).
+	# Realistic case, since fauswap.md's atomic swap: a leftover
+	# @restore-pending-$name-<ts> subvolume from a crash either before the
+	# swap ran or after it (but before its purely cosmetic final rename).
+	# @ is safe either way -- renameat2's RENAME_EXCHANGE requires both
+	# paths to already exist, so it can never be the thing that leaves @
+	# missing. This just finishes tidying the name.
+	local pending
+	pending=$(find "$tmp" -mindepth 1 -maxdepth 1 -name "@restore-pending-$name-*" 2>/dev/null | head -1)
+	if [ -n "$pending" ]; then
+		if [ -e "$tmp/@" ]; then
+			local ts=${pending##*-"$name"-}
+			log "found a leftover $(basename "$pending") -- @ is fine, finishing the rename to its final name"
+			mv "$pending" "$tmp/@pre-restore-$name-$ts" \
+				|| die "renaming $(basename "$pending") to its final @pre-restore-$name-$ts name failed -- retry 'fau backup-repair $name'"
+			return 0
+		fi
+		# @ missing here is not reachable through backup-restore's own
+		# atomic swap -- only possible from something unrelated having
+		# removed it. Best-effort: put the pending snapshot back as @.
+		log "@ is missing (not something backup-restore's own atomic swap can cause) -- restoring $(basename "$pending") as @"
+		mv "$pending" "$tmp/@" || die "restoring $(basename "$pending") as @ failed -- retry 'fau backup-repair $name'"
+		return 0
+	fi
+
+	# Legacy/defensive case: @ missing, @snapshots/$name never even got
+	# renamed aside -- not reachable via backup-restore's current code
+	# (the first thing it does is rename @snapshots/$name, never @, until
+	# the atomic swap), kept for any other way @ might go missing.
 	[ ! -e "$tmp/@" ] || die "@ already exists -- nothing to repair. If you meant to restore '$name' fresh, use 'fau backup-restore $name' instead"
 	[ -e "$tmp/@snapshots/$name" ] \
-		|| die "@ is missing but @snapshots/$name doesn't exist either -- this isn't the interrupted-restore state backup-repair knows how to fix. Recover manually (see docs/TODO.md's fau-backup entry): the previous root should still be at some @pre-restore-$name-<timestamp>"
+		|| die "@ is missing, and neither @snapshots/$name nor a @restore-pending-$name-* subvolume exists -- this isn't a state backup-repair knows how to fix. Recover manually (see docs/TODO.md's fau-backup entry): the previous root should still be at some @pre-restore-$name-<timestamp>"
 	log "@ is missing and @snapshots/$name still exists -- completing the interrupted 'backup-restore $name'"
 	btrfs property set "$tmp/@snapshots/$name" ro false || die "clearing the snapshot's read-only property failed -- retry 'fau backup-repair $name'"
 	mv "$tmp/@snapshots/$name" "$tmp/@" || die "promoting $name to @ failed -- retry 'fau backup-repair $name'"
