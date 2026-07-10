@@ -65,13 +65,20 @@ install_one() {
 	local work; work=$(mktemp -d)
 	tar -I zstd -xf "$archive" -C "$work"
 	local version; version=$(pkginfo_field "$work/pkginfo" version)
+	# Only present if this archive was itself produced by a recipe build that
+	# recorded its source (see fau-build's .pkginfo write) -- empty for an
+	# archive built before that, which is fine, system_set_full below just
+	# omits the field. See fau.md.
+	local src_url; src_url=$(pkginfo_field "$work/pkginfo" src_url)
+	local src_sha256; src_sha256=$(pkginfo_field "$work/pkginfo" src_sha256)
 	mkdir -p "$FAU_ROOT"
 	# -aK --checksum: see fau.md's "Installing" section for why both flags are required, not optional.
 	record_files "$name" "$work/files"
+	record_file_hashes "$name" "$work/files"
 	rsync -aK --checksum "$work/files/" "$FAU_ROOT/"
 	rm -rf "$work"
 
-	system_set "$name" "$version"
+	system_set_full "$name" "$version" "fau-repo" "$src_url" "$src_sha256" ""
 	if [ -n "$existing" ]; then
 		log "upgraded $name $existing -> $version"
 	else
@@ -194,6 +201,7 @@ cmd_bootstrap_build() {
 	strip_unusable_tmpfiles "$files"
 	mkdir -p "$FAU_ROOT"
 	record_files "$name" "$files"
+	record_file_hashes "$name" "$files"
 	rsync -aK --checksum "$files/" "$FAU_ROOT/"
 	rm -rf "$files"
 
@@ -208,7 +216,8 @@ cmd_bootstrap_build() {
 		recipe_post_merge "$FAU_ROOT"
 	fi
 
-	system_set "$name" "$PKG_VERSION"
+	local recipe_sha256; recipe_sha256=$(sha256sum "$recipe" | cut -d' ' -f1)
+	system_set_full "$name" "$PKG_VERSION" "source" "$PKG_SRC_URL" "$PKG_SRC_SHA256" "$recipe_sha256"
 	if [ -n "$existing" ]; then
 		log "rebuilt $name $existing -> $PKG_VERSION from source, merged into $FAU_ROOT"
 	else
@@ -251,7 +260,7 @@ cmd_bootstrap_remove() {
 				did=$(remove_one_file "$name" "$relpath")
 				if [ "$did" -eq 1 ]; then removed=$((removed + 1)); else kept=$((kept + 1)); fi
 			done < "$file_list"
-			rm -f "$file_list"
+			rm -f "$file_list" "$FAU_FILES_DIR/$name.sha256"
 			system_unset "$name"
 			if [ "$kept" -gt 0 ]; then
 				log "removed $name ($removed files deleted, $kept left in place -- still owned by another installed package)"
@@ -274,6 +283,64 @@ cmd_bootstrap_list() {
 	for n in $(system_list_names); do
 		printf '%s %s\n' "$n" "$(system_get_version "$n")"
 	done
+}
+
+cmd_bootstrap_info() {
+	[ $# -eq 1 ] || die "usage: fau bootstrap-info <name>"
+	local name=$1
+	state_init
+	local version; version=$(system_get_version "$name")
+	[ -n "$version" ] || die "$name is not installed"
+	local origin; origin=$(system_get_origin "$name")
+	local src_url; src_url=$(system_get_src_url "$name")
+	local src_sha256; src_sha256=$(system_get_src_sha256 "$name")
+	local recipe_sha256; recipe_sha256=$(system_get_recipe_sha256 "$name")
+	printf 'name:          %s\n' "$name"
+	printf 'version:       %s\n' "$version"
+	printf 'origin:        %s\n' "${origin:-unknown (installed before provenance tracking existed)}"
+	[ -z "$src_url" ]       || printf 'src_url:       %s\n' "$src_url"
+	[ -z "$src_sha256" ]    || printf 'src_sha256:    %s\n' "$src_sha256"
+	[ -z "$recipe_sha256" ] || printf 'recipe_sha256: %s\n' "$recipe_sha256"
+	local sha_file="$FAU_FILES_DIR/$name.sha256"
+	if [ -f "$sha_file" ]; then
+		printf 'files:         %s tracked (see '"'"'fau bootstrap-verify %s'"'"')\n' "$(wc -l < "$sha_file")" "$name"
+	else
+		printf 'files:         not recorded (installed before file-hash tracking existed)\n'
+	fi
+}
+
+# Drift detection: re-hashes every file recorded at install time (see
+# record_file_hashes) and compares against FAU_ROOT's current content. Reuses
+# sha256sum -c directly rather than hand-rolling the comparison -- the
+# recorded file already is sha256sum's own input format. See fau.md.
+cmd_bootstrap_verify() {
+	local -a names=()
+	if [ $# -eq 0 ] || [ "$1" = "--all" ]; then
+		while IFS= read -r n; do names+=("$n"); done < <(system_list_names)
+	else
+		names=("$@")
+	fi
+	[ "${#names[@]}" -gt 0 ] || die "nothing installed to verify"
+
+	local ok=0 drift=0 skipped=0
+	for name in "${names[@]}"; do
+		local sha_file="$FAU_FILES_DIR/$name.sha256"
+		if [ ! -f "$sha_file" ]; then
+			log "$name: no recorded file hashes (installed before 'fau bootstrap-verify' existed), skipping"
+			skipped=$((skipped + 1))
+			continue
+		fi
+		if (cd "$FAU_ROOT" && sha256sum -c "$sha_file" --quiet) 2>/dev/null; then
+			log "$name: OK ($(wc -l < "$sha_file") files match)"
+			ok=$((ok + 1))
+		else
+			log "$name: DRIFT DETECTED -- rerunning verbosely to show which file(s):"
+			(cd "$FAU_ROOT" && sha256sum -c "$sha_file") 2>&1 | grep -v ": OK$" | while IFS= read -r line; do log "  $line"; done
+			drift=$((drift + 1))
+		fi
+	done
+	log "verify summary: $ok OK, $drift with drift, $skipped skipped (no recorded hashes)"
+	[ "$drift" -eq 0 ]
 }
 
 cmd_bootstrap_export() {
@@ -302,5 +369,7 @@ case "$cmd" in
 	bootstrap-apply) cmd_bootstrap_apply "$@" ;;
 	bootstrap-build) cmd_bootstrap_build "$@" ;;
 	bootstrap-build-list) cmd_bootstrap_build_list "$@" ;;
+	bootstrap-info) cmd_bootstrap_info "$@" ;;
+	bootstrap-verify) cmd_bootstrap_verify "$@" ;;
 	*) die "fau-bootstrap: unknown command: $cmd" ;;
 esac

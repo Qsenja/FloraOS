@@ -181,6 +181,12 @@ cmd_build() {
 		echo "description=$PKG_DESCRIPTION"
 		echo "depends=$PKG_DEPENDS"
 		echo "bin=$PKG_BIN"
+		# Carried along so that if this archive is later repo-add'ed and
+		# installed as a system package (fau-bootstrap's install_one, origin
+		# "fau-repo"), its own system.json entry can still show real source
+		# provenance instead of nothing. See fau.md.
+		echo "src_url=$PKG_SRC_URL"
+		echo "src_sha256=$PKG_SRC_SHA256"
 	} > "$app_dir/.pkginfo"
 	local relbin; for relbin in "${bin[@]}"; do
 		app_wrapper_write "$name" "$app_dir" "$relbin"

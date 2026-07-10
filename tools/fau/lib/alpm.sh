@@ -657,14 +657,21 @@ install_one_alpm() {
 		strip_unusable_tmpfiles "$extract_dir"
 
 		[ "$i" -eq "$total" ] && version=${pkg_version[$i]}
-		[ "$i" -eq "$total" ] && record_files "$name" "$extract_dir"
+		if [ "$i" -eq "$total" ]; then
+			record_files "$name" "$extract_dir"
+			record_file_hashes "$name" "$extract_dir"
+		fi
 		rsync -aK --checksum "$extract_dir/" "$FAU_ROOT/"
 		rm -rf "$extract_dir"
 	done
 	rm -rf "$jobs_dir"
 
 	log "$name: fetched $fetched, used cache for $cached, skipped $skipped (already provided or base-system bootstrap noise) -- merged into $FAU_ROOT"
-	system_set "$name" "${version:-unknown (via alpm)}"
+	# src_url here is a repo-relative pointer (repo/filename), not a resolved
+	# mirror URL -- alpm_resolve can pick from several mirrors, so there's no
+	# single fixed URL to pin, but repo+filename+sha256 together are still
+	# enough to prove exactly which binary bytes were merged. See fau.md.
+	system_set_full "$name" "${version:-unknown (via alpm)}" "alpm" "${pkg_repo[$total]}/${pkg_filename[$total]}" "${pkg_sha256[$total]}" ""
 	log "installed $name ${version:-(via alpm)} into $FAU_ROOT"
 }
 

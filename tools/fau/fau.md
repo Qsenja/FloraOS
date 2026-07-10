@@ -1096,9 +1096,71 @@ uses.
 
 ## Manifests (`system.json` / `apps.json`) — `lib/manifest.sh`
 
-Flat schema only: `{"packages":{"name":{"version":"x"}}}`, hand-rolled
+`apps.json` stays flat: `{"packages":{"name":{"version":"x"}}}`, hand-rolled
 grep/sed parsing (`json_get_version`, `json_set`, ...) — fine at this scale,
 revisit if the schema ever grows past one level.
+
+`system.json` is fau's *reproducibility* manifest, not just an installed
+list — "version" alone can't answer "what bytes actually produced this,
+and can I get them again": two systems can show the same version for
+`curl` while one merged a precompiled Arch/Artix binary and the other
+built it from FloraOS's own pinned source, indistinguishable from a bare
+version string. Each entry can carry, beyond `version`:
+
+- `origin` — where the package's bytes actually came from: `fau-repo`
+  (merged from a prebuilt `.fau.tar.zst` in `FAU_REPO_DIR`, `install_one`),
+  `alpm` (the Arch/Artix binary fallback, `install_one_alpm`), `source`
+  (built live from a `fau-recipes/system/*.fis` recipe,
+  `cmd_bootstrap_build`), or `selfupdate` (fau's own per-file granular
+  update — see the rolling-update section above; cosmetic entry only, the
+  real per-file state lives in `FAU_INSTALLED_MANIFEST`, not here).
+- `src_url`/`src_sha256` — exactly what was fetched. For `source`, the
+  recipe's own `PKG_SRC_URL`/`PKG_SRC_SHA256`. For `alpm`, a repo-relative
+  pointer (`<repo>/<filename>`) plus the binary package's own sha256 from
+  the mirror's index — there's no single fixed URL to pin (`alpm_resolve`
+  can pick from several mirrors), but repo+filename+sha256 together still
+  prove exactly which binary bytes were merged. For `fau-repo`, carried
+  through from the `.fau.tar.zst`'s own `.pkginfo` (`fau-build` now writes
+  `src_url=`/`src_sha256=` there too) — empty if the archive predates that.
+- `recipe_sha256` — sha256 of the `.fis` recipe file's own content
+  (`source` origin only), so the exact recipe text that produced this
+  build can be told apart from whatever `fau-recipes` happens to serve
+  under that name today. Deliberately a content hash of the fetched file
+  rather than a GitHub API blob-sha lookup — recipes are fetched over
+  plain HTTPS raw-content requests (see "fau update also sweeps base
+  system packages" below), no `git`/GitHub-API dependency in the runtime
+  tool at all, so hashing what was actually downloaded keeps the same
+  no-extra-dependency shape.
+
+`version` is always written first in each entry
+(`"name":{"version":"x","origin":"y",...}`) so `json_get_version`/
+`json_list_names`/`json_pairs` — anchored on `{"version"` immediately
+following the opening brace, unchanged since before this schema grew —
+keep parsing `system.json` correctly without needing to know about the
+extra fields at all. `system_pairs_full`/`system_set_full`/`system_unset`
+use that same anchor for their own full-record parsing, for a sharper
+reason: the *outer* `{"packages":{...}}` wrapper is itself shaped just
+like a package entry once you look for any `"name":{...}` pattern — a
+brand new `{"packages":{}}` (before a single package has ever been
+recorded) matches `"packages":{}` as if `"packages"` were itself a
+package with an empty body. Anchoring on `{"version"` immediately (which
+only a real package entry ever has, and the outer wrapper never does)
+rules that degenerate case out; caught by a standalone test against a
+fresh `state_init` output before it ever touched a real rootfs, not by
+inspection.
+
+`record_file_hashes(name, src)` sits next to `record_files` (which still
+owns the plain path list `bootstrap-remove` walks) and writes
+`FAU_FILES_DIR/<name>.sha256` in `sha256sum`'s own input shape — computed
+over the staged build/extract directory before the `rsync` merge (same
+content that ends up in `FAU_ROOT`). `fau bootstrap-verify [pkg...|--all]`
+hands that file straight back to `sha256sum -c` from `FAU_ROOT` rather
+than re-deriving comparison logic, flagging any file changed or missing
+since install/build — packages installed before this existed just have no
+`.sha256` file and are skipped, not failed. `fau bootstrap-info <pkg>`
+prints one package's full record (version/origin/src_url/src_sha256/
+recipe_sha256/whether file hashes are tracked) for a human to actually
+look at.
 
 `json_set`/`json_unset` used to rebuild the file by calling `json_list_names`
 (one grep+sed pass) and then `json_get_version` (another grep+sed pair) once
@@ -1112,6 +1174,10 @@ byte-identical against the original across a 30-entry build-up plus removals
 and an overwrite, not just eyeballed. `json_get_version`/`json_list_names`
 themselves are untouched — their many single-lookup call sites elsewhere
 (`fau-install`, `fau-export`, `fau-bootstrap`) were never the O(n^2) part.
+`system_pairs_full` (below) keeps the same one-grep-pass-over-every-entry
+shape, just with five `sed` calls per matched package instead of one, to
+pull out the extra reproducibility fields — still O(n) forks overall, not
+a return to the O(n^2) `json_set`/`json_unset` used to have.
 
 **A real bug found in `fau-bootstrap`'s `cmd_bootstrap_apply`**: it used to
 read only the package names out of the manifest via a hand-rolled pass and

@@ -247,6 +247,6 @@ floraos_selfupdate_apply() {
 	if [ "$FLORAOS_SELFUPDATE_CHANGED" -gt 0 ]; then
 		# Cosmetic only, for `fau list`/fastfetch -- the real per-file
 		# state lives in FAU_INSTALLED_MANIFEST, not this one string.
-		system_set "fau" "$(date -u +%Y%m%d.%H%M%S)"
+		system_set_full "fau" "$(date -u +%Y%m%d.%H%M%S)" "selfupdate" "" "" ""
 	fi
 }

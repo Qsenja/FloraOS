@@ -209,6 +209,20 @@ bootstrap-build <pkg>[=<version>]   rebuild a base-system package from source,
                             directly.
 bootstrap-build-list       list every system recipe available (synced
                             fau-recipes system/ namespace)
+bootstrap-info <pkg>       show system.json's full reproducibility record for
+                            one package: version, origin (fau-repo/alpm/
+                            source/selfupdate -- where its bytes actually
+                            came from), src_url/src_sha256 (exactly what was
+                            fetched, alpm and source origins), recipe_sha256
+                            (the .fis recipe's own content hash, source
+                            origin only), and whether its per-file hashes
+                            are tracked for bootstrap-verify
+bootstrap-verify [pkg ...] re-hash every file recorded at install/build time
+                            (default: every installed system package) and
+                            compare against what's actually on disk now --
+                            flags drift (edited/missing files) since install.
+                            Packages installed before this existed have no
+                            recorded hashes and are skipped, not failed
 EOF
 			;;
 		locale)
@@ -262,7 +276,7 @@ dispatch() {
 			exec "$SELF_DIR/fau-seat" "$cmd" "$@" ;;
 		user-add|user-passwd|user-rename|user-groupadd|user-addtogroup)
 			exec "$SELF_DIR/fau-user" "$cmd" "$@" ;;
-		bootstrap|bootstrap-remove|bootstrap-list|bootstrap-export|bootstrap-apply|bootstrap-build|bootstrap-build-list)
+		bootstrap|bootstrap-remove|bootstrap-list|bootstrap-export|bootstrap-apply|bootstrap-build|bootstrap-build-list|bootstrap-info|bootstrap-verify)
 			exec "$SELF_DIR/fau-bootstrap" "$cmd" "$@" ;;
 		setkeyboard|setlang)
 			exec "$SELF_DIR/fau-locale" "$cmd" "$@" ;;
