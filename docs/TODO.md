@@ -198,5 +198,17 @@ fixed — same fix applied here).
       the gap until a real live system (with no system perl to fall back
       to) exposed it.
 
+      **The full deliberately-broken-kernel-and-recover QEMU test now
+      PASSES, end to end, for real** (`scripts/test-kernel-update.sh`):
+      install → boot → `fau backup` → `fau bootstrap-build linux-lts`
+      (`RC=0`, a genuine from-source kernel rebuild inside the VM) →
+      deliberately corrupt the live `vmlinuz-floraos` → `grub-reboot` into
+      the pre-update snapshot → reboot → confirms `/proc/cmdline` shows
+      `rootflags=subvol=@snapshots/pre-kernel-test` and `uname -r` matches
+      the pre-rebuild baseline. This is the real, working safety net the
+      whole `PKG_NEEDS_DISK`/`PKG_MANUAL_UPDATE`/auto-snapshot design
+      above was for — not just reasoned about, actually driven through a
+      real bad kernel and a real recovery.
+
 See ARCHITECTURE.md for the full design-decision history (including
 everything above that's already DONE, and the reasoning behind each).
