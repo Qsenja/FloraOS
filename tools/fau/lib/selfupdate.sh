@@ -157,34 +157,46 @@ _floraos_compile_and_install() {
 	mv "$tmp_bin" "$dest_abs"
 }
 
-# The main sweep: fetch the current tree listing once, diff every tracked
-# path against FAU_INSTALLED_MANIFEST, and only fetch+swap the ones whose
-# blob sha actually changed. Returns 0 with $FLORAOS_SELFUPDATE_CHANGED set
-# (a count) on success, even if nothing changed; 1 if the tree listing
-# itself couldn't be fetched (offline).
-floraos_selfupdate_sweep() {
-	FLORAOS_SELFUPDATE_CHANGED=0
+# Split into check/apply (used to be one combined "sweep") so `fau update`
+# can show every pending change -- packages and FloraOS's own files alike --
+# in one list before asking to proceed, pacman -Syu style. See fau.md.
+
+# Cheap half: fetch the tree listing once, diff every tracked path against
+# FAU_INSTALLED_MANIFEST. No file content is fetched and nothing is
+# compiled here -- just enough to know *what* would change. Sets
+# $FLORAOS_SELFUPDATE_PENDING (array of "path:sha" entries). Returns 0 even
+# if nothing changed; 1 if the tree listing itself couldn't be fetched
+# (offline).
+floraos_selfupdate_check() {
+	FLORAOS_SELFUPDATE_PENDING=()
 	local listing; listing=$(floraos_tree_listing) || {
 		log "warning: couldn't check FloraOS's own repo for updates (offline?)"
 		return 1
 	}
 
-	local -a to_update=()
 	local path
 	while IFS= read -r path; do
 		local remote_sha; remote_sha=$(printf '%s\n' "$listing" | awk -F'\t' -v p="$path" '$1==p{print $2}')
 		[ -n "$remote_sha" ] || continue
 		local local_sha; local_sha=$(_floraos_manifest_sha_for "$path")
 		[ "$remote_sha" = "$local_sha" ] && continue
-		to_update+=("$path:$remote_sha")
+		FLORAOS_SELFUPDATE_PENDING+=("$path:$remote_sha")
 	done < <(_floraos_tracked_paths)
+	return 0
+}
 
-	[ "${#to_update[@]}" -gt 0 ] || return 0
+# Expensive half: actually fetches/compiles/swaps every entry in
+# $FLORAOS_SELFUPDATE_PENDING (as left by floraos_selfupdate_check, or set
+# directly by a caller). Sets $FLORAOS_SELFUPDATE_CHANGED to how many
+# files actually got updated.
+floraos_selfupdate_apply() {
+	FLORAOS_SELFUPDATE_CHANGED=0
+	[ "${#FLORAOS_SELFUPDATE_PENDING[@]}" -gt 0 ] || return 0
 
 	# gcc is only fetched if at least one of the changed paths is a .c
 	# source -- a run that only touches bash files never pays for it.
 	local need_gcc=0 entry
-	for entry in "${to_update[@]}"; do
+	for entry in "${FLORAOS_SELFUPDATE_PENDING[@]}"; do
 		case "${entry%%:*}" in *.c) need_gcc=1 ;; esac
 	done
 	# Deliberately NOT `local` -- the EXIT trap below can fire after this
@@ -200,7 +212,8 @@ floraos_selfupdate_sweep() {
 
 	local raw_base; raw_base=${FAU_SELFUPDATE_REPO/github.com/raw.githubusercontent.com}/${FAU_SELFUPDATE_BRANCH}
 
-	for entry in "${to_update[@]}"; do
+	local path
+	for entry in "${FLORAOS_SELFUPDATE_PENDING[@]}"; do
 		path=${entry%%:*}
 		local sha=${entry#*:}
 		local dest_rel; dest_rel=$(_floraos_dest_for "$path") || { log "warning: no destination mapping for tracked path $path, skipping"; continue; }

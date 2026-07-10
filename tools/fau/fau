@@ -45,10 +45,18 @@ install <pkg>[=<ver>] [pkg ...]   install package(s) into FAU_APPS_DIR/<name>/,
                             directly is the only way to pin something that
                             only comes from a recipe (mangowm, dwm, ...)
 remove <pkg> [pkg ...]    remove package(s) and their PATH wrappers
-update [pkg ...]          check installed package(s) (default: all) for a newer
-                            version and reinstall it: against a fresh fetch of
-                            the local repo + configured Arch/Artix mirrors for
-                            a normal install, or against a freshly-synced
+update [pkg ...] [-y]     check installed package(s) (default: all) for a newer
+                            version, print the full list of what would change
+                            (packages and FloraOS's own files alike, each
+                            showing old -> new version and how), then ask to
+                            proceed -- pacman -Syu's own shape, nothing is
+                            installed/rebuilt until confirmed. -y/--noconfirm
+                            skips the prompt (needed for non-interactive use;
+                            a non-terminal invocation without it aborts
+                            without changes rather than hanging). Checks
+                            against a fresh fetch of the local repo +
+                            configured Arch/Artix mirrors for a normal
+                            install, or against a freshly-synced
                             FAU_RECIPES_REPO's PKG_VERSION (rebuilding via
                             'fau build') for anything only ever installed
                             that way (mangowm)

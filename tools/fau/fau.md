@@ -188,6 +188,69 @@ local repo, not resolvable via alpm, no recipe either — is reported and
 skipped, same as an individual rebuild failure: nothing here aborts the
 rest of a multi-package `update` run.
 
+## `fau update`'s list-then-confirm gate — pacman -Syu's own shape
+
+`cmd_update` used to check and install/rebuild each package as it went,
+one at a time. It's now two clean phases:
+
+1. **Check** every requested (or, bare `fau update`, every installed) app
+   and system package, plus FloraOS's own tracked files
+   (`floraos_selfupdate_check`, see `lib/selfupdate.sh` below) — all pure
+   lookups, nothing installed or fetched-and-applied yet. Every pending
+   change lands in parallel arrays (`plan_names`/`plan_kinds`/
+   `plan_methods`/`plan_old`/`plan_new`), keyed by which install path
+   would actually handle it (`repo`/`alpm`/`build` for apps, `alpm`/
+   `bootstrap-build` for system packages).
+2. **Show the full list, ask once, then apply** — exactly what changed
+   for real testing (see below) and nothing else. Printed as two blocks
+   when non-empty (`Packages to update (N):` with each line's
+   `name   old -> new  [method]`, then `FloraOS's own files to update
+   (M):` with each changed path) followed by `Proceed with update? [Y/n]`.
+   Bare Enter or `y`/`yes` proceeds; anything else aborts with nothing
+   changed. `-y`/`--noconfirm` (parsed out of the package-name arguments
+   first, same position pacman accepts its own flags in) skips the
+   prompt outright — required for any non-interactive/scripted call,
+   since a genuinely non-terminal invocation without it aborts instead of
+   hanging (checked via `[ -t 0 ]`, same guard `lib/common.sh`'s
+   `offer_build` already uses for its own y/n prompt, including reading
+   from `/dev/tty` explicitly rather than plain stdin).
+
+If nothing is pending at all (no package, no FloraOS file), `cmd_update`
+reports one summary line and returns immediately — no prompt, no backup,
+matching pacman's own "there is nothing to do."
+
+**The pre-update `fau backup` moved from the top of this function to
+right after confirmation, on purpose.** It used to run unconditionally
+before any checking happened at all; now that there's a real "here's what
+would happen" gate, taking a real btrfs snapshot before the user has even
+seen (let alone confirmed) that anything will change was wasted work on
+the common "everything's up to date" run — it only makes sense once
+something is actually about to change.
+
+Phase 2 itself is otherwise a straight port of what each branch already
+did before this change (same `app_install_one`/`app_install_one_alpm`/
+`install_one_alpm`/`fau build`/`fau bootstrap-build` calls, same
+success/failure counting) — restructured to run from the precomputed plan
+instead of inline per-package decisions, not reimplemented.
+
+`lib/selfupdate.sh`'s own sweep is split the same way: `floraos_selfupdate_check`
+(tree listing + manifest diff only, no file content fetched) and
+`floraos_selfupdate_apply` (the actual fetch/compile/swap per pending
+file) replace the old single `floraos_selfupdate_sweep`, which combined
+both and had exactly one caller (this one).
+
+Verified in a real QEMU boot, real network, real result -- not staged: a
+bare `fau update -y` correctly reported one app and 34 system packages up
+to date, then rendered `FloraOS's own files to update (3): tools/fau/fau,
+tools/fau/fau-install, tools/fau/lib/selfupdate.sh` -- exactly the three
+files this feature itself had just changed locally but not yet pushed, so
+the live tree genuinely differed from the last-pushed GitHub state. `-y`
+skipped the prompt, the backup attempt failed cleanly and non-fatally (a
+live RAM image isn't a block device) exactly as documented, and all three
+files fetched/installed correctly (`fau itself: 3 file(s) updated`, exit
+0). Also confirmed separately: a piped/non-interactive invocation without
+`-y` aborts cleanly instead of hanging on `read`.
+
 ## `fau update` also sweeps base system packages, not just apps
 
 `cmd_update` used to only ever touch `FAU_APPS_JSON`. Extended to also walk
