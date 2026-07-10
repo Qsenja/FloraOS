@@ -126,7 +126,7 @@ fixed — same fix applied here).
       an unattended everyday update); it only rebuilds when named
       explicitly (`fau update linux-lts`/`fau bootstrap-build linux-lts`).
       A real, deliberately-broken-kernel-and-recover QEMU test found and
-      fixed three further real bugs along the way, none of them guessed:
+      fixed five further real bugs along the way, none of them guessed:
       mbedTLS silently never offering RSA-PSS signature schemes during a
       TLS 1.2 handshake (a genuine upstream mbedTLS limitation, confirmed
       still present in mbedTLS's own development branch, not a
@@ -137,9 +137,24 @@ fixed — same fix applied here).
       `HOSTCFLAGS` at the `linux-api-headers` package already
       sandbox-fetched as one of `gcc`'s own build deps, not a
       hand-reconstructed `headers_install` output — that has its own
-      chicken-and-egg problem); and `bison` hardcoding both its own data
+      chicken-and-egg problem); `bison` hardcoding both its own data
       directory and the `m4` binary's path to `/usr/...` (fixed via
-      `BISON_PKGDATADIR`/`M4`, its own documented overrides).
+      `BISON_PKGDATADIR`/`M4`, its own documented overrides); and perl
+      needing two separate relocatability fixes — its own `libperl.so`
+      living under a version-specific nested dir never on
+      `LD_LIBRARY_PATH` by default, then (found only *after* fixing that
+      one, one build further) its core/site/vendor module dirs not on
+      any path perl actually searches (`PERL5LIB`, its own documented
+      override) — both confirmed via real QEMU failures, and both the
+      *exact same class* of bug `app_wrapper_write` already had to fix
+      once before for isolated app installs (`cowsay`, see `fau.md`'s
+      "App wrapper scripts" section) — perl's relocatability problems are
+      apparently generic enough to hit twice, in two unrelated
+      subsystems, independently. An earlier host-side spot-check of this
+      recipe missed the `libperl.so` gap entirely: the build host's own
+      already-installed system perl silently satisfied it there, masking
+      the gap until a real live system (with no system perl to fall back
+      to) exposed it.
 
 See ARCHITECTURE.md for the full design-decision history (including
 everything above that's already DONE, and the reasoning behind each).
