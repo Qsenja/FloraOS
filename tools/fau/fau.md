@@ -73,6 +73,21 @@ every `fau-*` tool identically, not just the dispatcher -- none of the
 others are symlinked today, but the fix costs nothing when it isn't, and
 there's no guarantee a future one won't be.
 
+## `${FAU_ROOT%/}/var/log/fau.log` — every log()/die() line, persisted
+
+No syslog daemon exists (see docs/TODO.md) and never has, so until this,
+`fau`'s own actions left no trace anywhere once a serial/terminal
+scrollback was gone -- every real bug found by an actual boot test this
+project has hit had to be reconstructed by hand from a raw QEMU serial
+transcript. `lib/common.sh`'s `log()`/`die()` now also append a
+timestamped copy of every line to `$FAU_LOG_FILE`
+(`${FAU_ROOT%/}/var/log/fau.log`), via `_fau_log_write`. Best-effort on
+purpose (`mkdir -p ... || return 0`, the `>>` itself backgrounded with
+`|| true`): a read-only root (booted into a snapshot), a live RAM image
+before `/var/log` exists, or plain permission trouble must never turn a
+convenience log line into a command failure -- nothing here is load-
+bearing for correctness, unlike `FAU_SYSTEM_JSON`/`FAU_INSTALLED_MANIFEST`.
+
 ## Two install modes, one package format
 
 `install`/`remove`/`list` (`fau-install`) merge into an isolated
@@ -250,6 +265,20 @@ live RAM image isn't a block device) exactly as documented, and all three
 files fetched/installed correctly (`fau itself: 3 file(s) updated`, exit
 0). Also confirmed separately: a piped/non-interactive invocation without
 `-y` aborts cleanly instead of hanging on `read`.
+
+### `--check` — the same list, never applied
+
+`fau update --check` runs the exact same Phase 1 and prints the exact
+same list (or the same "everything up to date" summary), then returns
+right after printing it — before the confirm prompt, before the backup,
+before Phase 2 ever runs. `--check` wins over `-y` if both are somehow
+given; it must never apply anything no matter what else was passed. Meant
+for monitoring/cron: "is anything outdated" with zero risk of triggering
+a rebuild (useful now that some rebuilds — a kernel — are genuinely
+expensive). Verified directly: a pending change renders the identical
+two-block list and exits 0 without ever reaching the `read` prompt, even
+with stdin closed (`< /dev/null`) — a case the non-`--check` path would
+correctly treat as "abort, can't prompt."
 
 ## `fau update` also sweeps base system packages, not just apps
 
@@ -1624,6 +1653,32 @@ two plain renames ever touches `@` before the atomic step, but harmless to
 keep for any other way `@` might go missing). Verified against real btrfs
 subvolumes via `scripts/test-install.sh`'s existing backup/restore
 phases (unchanged test, now exercising the atomic path).
+
+### `backup-boot-next <name>` — try a backup once, without committing to it
+
+`backup-restore` promotes a snapshot to be the new `@` permanently
+(reversible, but via a second restore). `backup-boot-next <name>` is the
+lighter option: a thin wrapper over `grub-reboot "FloraOS (backup:
+<name>)"` that arms that GRUB entry for the *next boot only* — the
+default entry (and thus every boot after that one) is unaffected. Useful
+to just look at an old state (did that kernel actually work, was that
+config file really different) without touching the live `@` at all.
+
+Validates the backup actually exists (`@snapshots/<name>`, via the same
+`backup_with_toplevel` subvolid=5 mount every other `backup-*` command
+uses) *before* calling `grub-reboot` — `grub-reboot` itself doesn't
+validate its argument against `grub.cfg`'s real menu titles, it just
+records the choice, so a typo'd name would otherwise silently arm nothing
+(GRUB falls through to the default entry at boot) instead of failing
+loudly here where it's actually useful to fail.
+
+Verified end to end in a real QEMU disk install: `backup-boot-next
+totally-bogus` (no such backup) correctly fails with `no such backup:
+totally-bogus (see 'fau backup-list')` and exit 1, before `grub-reboot`
+is ever called; `backup-boot-next bootnexttest` (a real backup) exits 0;
+the following reboot's `/proc/cmdline` showed
+`rootflags=subvol=@snapshots/bootnexttest` — confirming it actually
+booted the armed snapshot, one time, exactly as intended.
 
 ## `service-*` (`fau-service`) — a thin front end over OpenRC
 

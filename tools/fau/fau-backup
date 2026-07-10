@@ -167,6 +167,27 @@ cmd_backup_repair() {
 	log "this session is still running on the same mount as before (subvolid-pinned, unaffected by the rename, same as backup-restore) -- reboot to pick up the repaired default entry"
 }
 
+_backup_boot_next_do() {
+	local tmp=$1 name=$4
+	[ -e "$tmp/@snapshots/$name" ] || die "no such backup: $name (see 'fau backup-list')"
+}
+
+cmd_backup_boot_next() {
+	[ $# -eq 1 ] || die "usage: fau backup-boot-next <name>  -- boots \"FloraOS (backup: <name>)\" once, next boot only (grub-reboot); the default entry is unchanged after that"
+	backup_name_check "$1"
+	# Checked before touching grub-reboot at all: grub-reboot itself
+	# doesn't validate its argument against grub.cfg's real menu entries
+	# -- it just records the choice, so a typo'd/nonexistent name would
+	# otherwise arm something that silently falls through to the default
+	# entry at boot instead of failing loudly here where it's useful.
+	backup_with_toplevel _backup_boot_next_do "$1"
+	command -v grub-reboot >/dev/null 2>&1 \
+		|| die "grub-reboot not found -- is grub installed? (real disk installs only, see 'fau backup')"
+	grub-reboot "FloraOS (backup: $1)" \
+		|| die "grub-reboot failed -- run 'fau backup-list' to confirm '$1' is a real backup name"
+	log "next boot only will use \"FloraOS (backup: $1)\" -- reboot now to actually boot into it; the default entry is unaffected after that boot"
+}
+
 cmd=${1:-}; [ $# -ge 1 ] && shift
 
 case "$cmd" in
@@ -175,5 +196,6 @@ case "$cmd" in
 	backup-remove) cmd_backup_remove "$@" ;;
 	backup-restore) cmd_backup_restore "$@" ;;
 	backup-repair) cmd_backup_repair "$@" ;;
+	backup-boot-next) cmd_backup_boot_next "$@" ;;
 	*) die "fau-backup: unknown command: $cmd" ;;
 esac

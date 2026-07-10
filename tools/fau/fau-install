@@ -168,15 +168,18 @@ cmd_update() {
 	apps_state_init
 	state_init
 
-	# -y/--noconfirm can appear anywhere among the package-name arguments
-	# (matches pacman's own flag placement) -- pull it out first, whatever
-	# remains is package names exactly as before.
-	local assume_yes=0
+	# -y/--noconfirm and --check can appear anywhere among the
+	# package-name arguments (matches pacman's own flag placement) --
+	# pull them out first, whatever remains is package names exactly as
+	# before. --check wins over -y if somehow both are given: it must
+	# never apply anything, no matter what else was passed.
+	local assume_yes=0 check_only=0
 	local -a names=()
 	local a
 	for a in "$@"; do
 		case "$a" in
 			-y|--noconfirm) assume_yes=1 ;;
+			--check) check_only=1 ;;
 			*) names+=("$a") ;;
 		esac
 	done
@@ -410,6 +413,12 @@ cmd_update() {
 		done
 	fi
 	echo
+
+	# --check stops right here, always -- no prompt, no backup, nothing
+	# applied, regardless of -y. Same checks as above, just reported
+	# instead of acted on: for monitoring/cron ("is anything outdated")
+	# without ever risking a rebuild.
+	[ "$check_only" -ne 1 ] || return 0
 
 	if [ "$assume_yes" -ne 1 ]; then
 		if [ ! -t 0 ]; then

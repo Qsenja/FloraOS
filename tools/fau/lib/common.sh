@@ -25,8 +25,23 @@ FAU_SYSTEM_RECIPES_REMOTE_DIR="${FAU_SYSTEM_RECIPES_REMOTE_DIR:-${FAU_CACHE_DIR}
 # See ../fauelf/fauelf.md -- rewrites absolute DT_NEEDED entries for isolated app installs.
 FAU_ELF_PATCH="${FAU_ELF_PATCH:-fauelf}"
 
-die() { echo "fau: error: $*" >&2; exit 1; }
-log() { echo "fau: $*" >&2; }
+# Persistent record of every log()/die() line, timestamped -- no syslog
+# daemon exists (see docs/TODO.md), so this is the only place "what did
+# fau actually do, and when" survives past the terminal's own scrollback.
+# See fau.md.
+FAU_LOG_FILE="${FAU_ROOT%/}/var/log/fau.log"
+
+# Best-effort, deliberately: a read-only root (booted into a snapshot), a
+# live RAM image before /var/log exists, or plain permission trouble must
+# never turn a log line into a command failure -- this is a convenience
+# trail, not something any caller's correctness depends on.
+_fau_log_write() {
+	mkdir -p "$(dirname "$FAU_LOG_FILE")" 2>/dev/null || return 0
+	printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$FAU_LOG_FILE" 2>/dev/null || true
+}
+
+die() { local msg="error: $*"; echo "fau: $msg" >&2; _fau_log_write "$msg"; exit 1; }
+log() { echo "fau: $*" >&2; _fau_log_write "$*"; }
 
 # findmnt's SOURCE column suffixes a subvolume mount, e.g. "/dev/sda1[/@]"; stripped below.
 root_device() {

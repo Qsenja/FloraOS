@@ -45,7 +45,8 @@ install <pkg>[=<ver>] [pkg ...]   install package(s) into FAU_APPS_DIR/<name>/,
                             directly is the only way to pin something that
                             only comes from a recipe (mangowm, dwm, ...)
 remove <pkg> [pkg ...]    remove package(s) and their PATH wrappers
-update [pkg ...] [-y]     check installed package(s) (default: all) for a newer
+update [pkg ...] [-y] [--check]
+                          check installed package(s) (default: all) for a newer
                             version, print the full list of what would change
                             (packages and FloraOS's own files alike, each
                             showing old -> new version and how), then ask to
@@ -53,7 +54,11 @@ update [pkg ...] [-y]     check installed package(s) (default: all) for a newer
                             installed/rebuilt until confirmed. -y/--noconfirm
                             skips the prompt (needed for non-interactive use;
                             a non-terminal invocation without it aborts
-                            without changes rather than hanging). Checks
+                            without changes rather than hanging). --check
+                            prints the same list and stops there, always --
+                            no prompt, nothing applied, regardless of -y
+                            (for monitoring/cron: "is anything outdated"
+                            without ever risking a rebuild). Checks
                             against a fresh fetch of the local repo +
                             configured Arch/Artix mirrors for a normal
                             install, or against a freshly-synced
@@ -117,16 +122,25 @@ backup <name>             snapshot / (read-only, btrfs) under @snapshots/<name>
                             installs only (see florainstall)
 backup-list               list existing backups, newest first
 backup-remove <name>      delete a backup and its GRUB menu entry
+backup-boot-next <name>   boot "FloraOS (backup: <name>)" once, next boot
+                            only (grub-reboot) -- the default entry is
+                            unaffected after that boot. Handy to just look
+                            at an old state without committing to it via
+                            backup-restore
 backup-restore <name>     promote a backup to be the new / (the current root
                             is kept, renamed @pre-restore-<name>-<timestamp>);
-                            reboot afterward to actually boot into it. Not
-                            atomic -- a crash mid-restore is a real risk (see
-                            backup-repair below and docs/TODO.md)
-backup-repair <name>      complete an interrupted backup-restore <name> after
-                            a crash left @ missing. Boot the "FloraOS
-                            (backup: <name>)" GRUB entry first (it still
-                            works -- only the default entry is broken), then
-                            run this from there
+                            reboot afterward to actually boot into it.
+                            Atomic where it matters (fauswap, a
+                            renameat2(RENAME_EXCHANGE) wrapper) -- @ can
+                            never be observed missing mid-restore; see
+                            backup-repair below for the narrow leftover-name
+                            cleanup a crash can still require
+backup-repair <name>      cleans up a leftover @restore-pending-<name>-*
+                            name from a crash during backup-restore (before
+                            or after its atomic swap) -- @ is always safe by
+                            the time this is needed, this just tidies the
+                            name. Also completes the older (pre-fauswap)
+                            "@ missing" case if that's ever somehow reached
 EOF
 			;;
 		service)
@@ -230,7 +244,7 @@ dispatch() {
 			exec "$SELF_DIR/fau-repo" "$cmd" "$@" ;;
 		export|import)
 			exec "$SELF_DIR/fau-export" "$cmd" "$@" ;;
-		backup|backup-list|backup-remove|backup-restore|backup-repair)
+		backup|backup-list|backup-remove|backup-restore|backup-repair|backup-boot-next)
 			exec "$SELF_DIR/fau-backup" "$cmd" "$@" ;;
 		service-list|service-status|service-enable|service-disable|service-start|service-stop|service-restart)
 			exec "$SELF_DIR/fau-service" "$cmd" "$@" ;;
