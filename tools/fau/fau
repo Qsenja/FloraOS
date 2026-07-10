@@ -44,6 +44,16 @@ install <pkg>[=<ver>] [pkg ...]   install package(s) into FAU_APPS_DIR/<name>/,
                             silently ignored -- 'fau build <pkg>=<ver>'
                             directly is the only way to pin something that
                             only comes from a recipe (mangowm, dwm, ...)
+                            'fau install audio' is special-cased: not a real
+                            alpm package (no such name exists) and not
+                            isolated like everything else here -- installs
+                            pipewire/wireplumber/pipewire-pulse/pipewire-alsa
+                            as real system packages and wires up starting
+                            them (etc/inittab.d/audio-*.tab), since an audio
+                            server has to be reachable by every process on
+                            the system, the opposite of app isolation. See
+                            fau.md. Opt-in: nothing here runs or is even
+                            fetched unless this is actually called.
 remove <pkg> [pkg ...]    remove package(s) and their PATH wrappers
 update [pkg ...] [-y] [--check]
                           check installed package(s) (default: all) for a newer

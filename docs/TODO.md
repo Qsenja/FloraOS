@@ -28,14 +28,20 @@ file is only for things that could reasonably be finished later.
   split) fetched via the alpm fallback like any other app, plus a `fau
   wifi-connect <ssid>` wrapper matching the `fau setkeyboard`/`setlang`
   convention (`tools/fau/fau-locale`) — validate, apply, persist.
-- **No audio story at all** — no `pipewire`/`pulseaudio`/plain `alsa-utils`
-  anywhere in `MANDATORY_ORDER` or as a documented opt-in install; checked
-  directly, not assumed. Nothing plays sound today, base image or
-  installed app. `fau install pipewire` (or equivalent) resolving via the
-  alpm fallback is plausible today without any FloraOS-side work, but
-  nobody's actually tried booting it, wiring its own service (OpenRC vs.
-  its own session-spawn model), or confirming a compositor session can
-  reach it.
+- **Audio: software stack done and opt-in, real hardware playback still
+  unconfirmed.** `fau install audio` (see `tools/fau/fau.md`) installs
+  `pipewire`/`wireplumber`/`pipewire-pulse`/`pipewire-alsa` as real
+  system packages and starts all three via new `/etc/inittab.d/*.tab`
+  fragments, reloaded live (`telinit q`, no reboot needed). Verified in a
+  real QEMU boot: all three daemons come up with real PIDs, and a live
+  `pw-cli info 0` reaches the running core. Not verified: actual
+  hardware playback — a virtual Intel HDA controller was tried
+  (`snd_hda_intel` binds to it, confirmed in `dmesg`/`/proc/bus/pci/devices`)
+  but codec probing failed in this sandbox's own QEMU build (which only
+  offers `none`/`wav` `-audiodev` backends, a stripped build) — looks
+  like a test-environment limitation, not a FloraOS bug, but real
+  hardware or a less-stripped QEMU is the natural way to actually close
+  this out.
 - **No power/session management (`elogind`/`upower`/`acpid` equivalent)**
   — a lid close, a battery-critical event, or a suspend request today
   does nothing at all; nothing listens for any of them. Relevant mainly

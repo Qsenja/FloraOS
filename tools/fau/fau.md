@@ -106,6 +106,75 @@ Both of those only ever move *already-built* files around (a local
 (`fau-build`) just below for the third mode: compiling something from
 source, on this same live system, on demand.
 
+## `install audio` — an opt-in system-level meta-install, special-cased
+
+Everything above assumes one name maps to one isolated app. `audio`
+doesn't fit that shape at all: there's no real alpm package named
+`audio`, and even if there were, an audio server has to be reachable by
+*every other process on the system* — the exact opposite of what app
+isolation exists for. `cmd_install` special-cases the literal name
+`audio` (`install_audio_meta`, `fau-install`) instead of routing it
+through `app_install_one`:
+
+1. Installs `pipewire-pulse`, `pipewire-alsa`, `wireplumber` as real
+   system packages via `fau-bootstrap`'s own `install_one` (the same
+   merge-into-`FAU_ROOT`-and-record-in-`system.json` mechanism
+   `build-rootfs.sh` itself uses for `dbus`/`fontconfig`/...) — confirmed
+   via a real alpm resolve that `pipewire-pulse`/`pipewire-alsa` already
+   transitively pull in `pipewire`, the full `pipewire-audio` closure
+   (`alsa-card-profiles`, `bluez-libs`, ...), and `wireplumber` (via the
+   virtual `pipewire-session-manager` package wireplumber provides);
+   `wireplumber` is still listed explicitly so a future repackaging that
+   loosens that chain doesn't silently drop it.
+2. Wires up starting all three. **Deliberately not** the real
+   `pipewire-openrc`/`wireplumber-openrc`/`pipewire-pulse-openrc`
+   packages' own `/etc/user/init.d/*` service files — fetched and read
+   those directly before deciding this, not guessed: they're Artix's own
+   "OpenRC user services" extension, needing a per-user `openrc`
+   instance started via a PAM session hook (`/etc/pam.d/openrc-user`)
+   that FloraOS doesn't have (`floralogin` is its own hand-rolled login,
+   not real PAM — see ARCHITECTURE.md). Each of those service files just
+   runs a plain command (`/usr/bin/pipewire`, `/usr/bin/wireplumber`,
+   `/usr/bin/pipewire -c pipewire-pulse.conf`) under `supervise-daemon`
+   with `DBUS_SESSION_BUS_ADDRESS=unix:path=${XDG_RUNTIME_DIR}/bus` — so
+   `install_audio_meta` runs those same three commands directly instead,
+   via sysvinit's own `/etc/inittab.d/*.tab` fragment mechanism (real,
+   built into this project's own sysvinit build — confirmed in
+   `init.c`: one entry per `.tab` file, read at boot and re-read live on
+   `telinit q`/`SIGHUP`, no reboot needed), using FloraOS's own
+   already-fixed `DBUS_SESSION_BUS_ADDRESS`
+   (`unix:path=/run/dbus/session_bus_socket`, same address the `db:`
+   inittab entry already starts) and `floralogin.c`'s own
+   `XDG_RUNTIME_DIR=/run/user/0` convention for root, rather than
+   adopting the whole per-user-openrc/PAM subsystem just for this one
+   feature.
+3. Reloads inittab immediately (`telinit q`, falling back to `kill -HUP
+   1`, best-effort — harmless if this isn't running on a live boot, e.g.
+   during an ISO/rootfs build).
+
+Genuinely opt-in: nothing here is even fetched, let alone started,
+unless `fau install audio` is actually run — no dead weight in the base
+image for anyone who doesn't want this.
+
+**Verified in a real QEMU boot**: `fau install audio` installs cleanly
+(tracked in `system.json` as `pipewire-pulse`/`pipewire-alsa`), and —
+the part that actually matters — all three daemons come up for real
+with no reboot, confirmed via real PIDs (`pgrep -a pipewire` shows both
+`/usr/bin/pipewire` and `/usr/bin/pipewire -c pipewire-pulse.conf`;
+`pgrep -a wireplumber` shows `/usr/bin/wireplumber`) and a live
+`pw-cli info 0` reaching the real running core (`version: "1.6.7"`,
+`core.daemon = "true"`). **Not verified**: actual hardware playback.
+Tested with a virtual Intel HDA controller (`-device ich9-intel-hda`)
+and both `hda-output`/`hda-duplex` codec models — the kernel's own
+`snd_hda_intel` driver binds to the controller (confirmed in
+`/proc/bus/pci/devices` and `dmesg`), but logs `Cannot probe codecs,
+giving up` either way, and this sandbox's own QEMU build only offers
+`none`/`wav` `-audiodev` backends (a stripped-down build, not a normal
+one) — this looks like a codec-emulation gap in this specific test
+environment's QEMU, not a FloraOS-side bug, but it means real hardware
+audio output was not actually confirmed end to end, only the software
+stack up to a live PipeWire core.
+
 ## `update [pkg ...]` (`fau-install`'s own third command) — checking against a fresh mirror fetch, not a cached one
 
 Lives in `fau-install` rather than its own `fau-update` tool (unlike

@@ -131,8 +131,73 @@ cmd_install() {
 	for name in "$@"; do
 		i=$((i + 1))
 		[ "$total" -eq 1 ] || log "=== [$i/$total] requested app: $name ==="
-		app_install_one "$name"
+		case "$name" in
+			audio) install_audio_meta ;;
+			*) app_install_one "$name" ;;
+		esac
 	done
+}
+
+# `fau install audio` -- see fau.md. Not a real alpm package (no such
+# name exists) and not a good fit for the isolated-app path either: an
+# audio server has to be reachable by every OTHER process on the system,
+# the exact opposite of app isolation's own point. Installs as real
+# system packages (fau-bootstrap's own install_one, same mechanism
+# build-rootfs.sh uses for dbus/fontconfig/...) instead, plus wires up
+# starting the three daemons involved. Opt-in, on purpose: nothing here
+# runs, and nothing is even fetched, unless this is actually called.
+install_audio_meta() {
+	if [ -n "$(system_get_version pipewire)" ]; then
+		log "audio: already installed (pipewire $(system_get_version pipewire))"
+		return 0
+	fi
+
+	log "audio: installing pipewire + wireplumber + pipewire-pulse + pipewire-alsa (real alpm packages, merged into the live system)"
+	# pipewire-pulse/pipewire-alsa already pull in pipewire + wireplumber
+	# (via the virtual "pipewire-session-manager" -- confirmed via a real
+	# alpm resolve, not assumed) plus the full pipewire-audio closure
+	# (alsa-card-profiles, bluez-libs, ...); wireplumber is still listed
+	# explicitly so a future repackaging that loosens that chain doesn't
+	# silently drop it.
+	"$SELF_DIR/fau-bootstrap" bootstrap pipewire-pulse pipewire-alsa wireplumber \
+		|| die "audio: installing the package set failed (see above)"
+
+	# Deliberately NOT the real pipewire-openrc/wireplumber-openrc/
+	# pipewire-pulse-openrc packages' own /etc/user/init.d/* services --
+	# those are Artix's "OpenRC user services" extension, which needs a
+	# per-user openrc instance started via PAM session hooks FloraOS
+	# doesn't have (floralogin is its own hand-rolled login, not a real
+	# PAM stack; see ARCHITECTURE.md). Confirmed by fetching and reading
+	# those packages' own files directly, not guessed: each just runs a
+	# plain `command="/usr/bin/pipewire"` (etc.) under `supervise-daemon`,
+	# with `DBUS_SESSION_BUS_ADDRESS=unix:path=${XDG_RUNTIME_DIR}/bus` --
+	# the exact same three commands FloraOS wires up below directly via
+	# sysvinit's own etc/inittab.d/*.tab fragments (one entry per file,
+	# confirmed from init.c) instead, using FloraOS's own already-fixed
+	# DBUS_SESSION_BUS_ADDRESS (see the dbus inittab entry) and
+	# floralogin.c's own XDG_RUNTIME_DIR=/run/user/0 convention for root,
+	# rather than adopting the whole per-user-openrc/PAM subsystem just
+	# for this.
+	mkdir -p /etc/inittab.d
+
+	cat > /etc/inittab.d/audio-pipewire.tab <<'EOF'
+pw:2345:respawn:mkdir -p /run/user/0 && env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/session_bus_socket XDG_RUNTIME_DIR=/run/user/0 /usr/bin/pipewire >>/var/log/pipewire.log 2>&1
+EOF
+	cat > /etc/inittab.d/audio-wireplumber.tab <<'EOF'
+wp:2345:respawn:mkdir -p /run/user/0 && env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/session_bus_socket XDG_RUNTIME_DIR=/run/user/0 /usr/bin/wireplumber >>/var/log/wireplumber.log 2>&1
+EOF
+	cat > /etc/inittab.d/audio-pipewire-pulse.tab <<'EOF'
+pp:2345:respawn:mkdir -p /run/user/0 && env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/session_bus_socket XDG_RUNTIME_DIR=/run/user/0 /usr/bin/pipewire -c pipewire-pulse.conf >>/var/log/pipewire-pulse.log 2>&1
+EOF
+
+	# Picks the new inittab.d fragments up immediately (sysvinit's own
+	# SIGHUP re-read, `telinit q`'s exact mechanism) -- no reboot needed
+	# to actually start using this. Best-effort: fails harmlessly if PID 1
+	# isn't sysvinit right now (e.g. this ran during an ISO/rootfs build,
+	# not a live boot).
+	telinit q 2>/dev/null || kill -HUP 1 2>/dev/null || true
+
+	log "audio: installed and started (pipewire, wireplumber, pipewire-pulse) -- these are inittab-managed, not OpenRC services (see fau.md), so check with 'pgrep -a pipewire|wireplumber' or /var/log/pipewire*.log, not 'fau service-status'"
 }
 
 cmd_remove() {
