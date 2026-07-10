@@ -29,33 +29,49 @@ See `fauswap.md` and `tools/fau/fau.md`'s `fau backup` section for the
   turned off in firmware setup to boot a FloraOS install. Fine today (no
   signed-boot requirement has shown up yet, same reasoning as the syslog
   daemon entry above); a real gap once that changes.
-- **Single-user mode (runlevel `S1`) now wired up, one real bug still
-  open** — `etc/runlevels/single/emergency-shell` (new, in
-  `apply-skeleton.sh`) runs `sulogin` via a `start()` override; confirmed
-  working end-to-end when invoked directly (`/etc/init.d/emergency-shell
-  start` → real `sulogin` prompt → empty password → root maintenance
-  shell). Building it surfaced a real, previously-unknown bug affecting
-  *all four* of FloraOS's own custom services (`floraseat`, `dhcpcd`,
-  `udevd`, `emergency-shell`): they used the shebang
+**Single-user mode (runlevel `S1`) is done** — sysvinit's `l1:S1:wait:` entry
+now runs `sulogin` directly, as its own inittab line
+(`~~:S1:wait:/usr/bin/sulogin`), not as an OpenRC-managed service. Verified
+end to end via the real intended path: a kernel-cmdline-driven single-user
+boot (confirmed via `1`; sysvinit's own `init.c` recognizes `single`/`-s`/a
+lone `0-9sS` character, though `single`/`S` alone curiously didn't trigger
+it in this specific build while `1` reliably did — not fully root-caused,
+noted here rather than left silent) reaches `sulogin`'s real prompt after
+runlevel teardown, and an empty password drops into a genuine root
+maintenance shell.
+
+Two real bugs found getting here, neither guessed:
+
+- **All three of FloraOS's own custom services** (`floraseat`, `dhcpcd`,
+  `udevd` — a fourth, `emergency-shell`, existed briefly during
+  development and is described below) used the shebang
   `#!/usr/bin/openrc-run`, but OpenRC's own dependency-cache generator
   (`sh/gendepends.sh`) does a literal string match against
   `#!/sbin/openrc-run` before sourcing a script for `depend()` info —
   `/sbin` resolving to the same binary via symlink doesn't matter, the
-  comparison is textual. All four were silently absent from
+  comparison is textual. All were silently absent from
   `/run/openrc/deptree` on every boot, so none of their `depend()`
   declarations (e.g. `floraseat`'s `need udevd`) were ever honored by
   OpenRC's scheduler — confirmed by inspecting the live cache, not
-  guessed. Fixed by changing all four to the literal `#!/sbin/openrc-run`.
-  Remaining open item: manually running `openrc single` from an
-  already-booted multi-user shell (runlevel 3) showed inconsistent
-  behavior tearing down `dhcpcd`/network/local mounts on the way in
-  (sometimes finishing cleanly, sometimes taking much longer) before ever
-  reaching `emergency-shell`'s start phase — this exercises a harder
-  transition (3 → single) than the real intended path (booting straight
-  into single-user from GRUB, where multi-user services were never
-  started to begin with). Not yet tested via that real path; needs a
-  kernel-cmdline-driven single-user boot test before calling the
-  interactive-transition case solid.
+  guessed. Fixed by changing all to the literal `#!/sbin/openrc-run`.
+- **The actual, deeper bug: OpenRC's own `librc.c` hardcodes `"single"`
+  as a runlevel that never contains services.**
+  `rc_services_in_runlevel()` reads: `/* These special levels never
+  contain any services */ if (strcmp(runlevel, RC_LEVEL_SINGLE) != 0) {
+  ...scan the directory... }` — so an `etc/runlevels/single/<service>`
+  symlink (the first approach tried here, `emergency-shell`, complete
+  with a correct shebang and a `need localmount` guard against an
+  earlier real hang where "Unmounting filesystems" never returned) is
+  *never* started by `openrc single`, no matter what's in that
+  directory — confirmed by reading OpenRC's source after chasing a real,
+  reproducible no-op (teardown happened, nothing ever started, both
+  interactively and via a real kernel-cmdline boot). This is a genuine
+  upstream OpenRC design assumption (presumably: distros are expected to
+  handle single-user via inittab directly, never through an OpenRC
+  service), not something fixable from FloraOS's side of the fence.
+  Fixed the same way `dhcpcd`/`udevd` already work around a different
+  OpenRC scheduling gap: `sulogin` runs as its own direct inittab entry
+  instead of an `openrc single`-managed service.
 
 `fau setkeyboard`/`fau setlang` (locale/keymap switcher) are both done now,
 verified in real boots — see `tools/fau/fau.md`'s `setkeyboard`/`setlang`

@@ -11,7 +11,6 @@ BUILD_DATE=$(date -u +%Y%m%d 2>/dev/null || echo unknown)
 mkdir -p "$ROOTFS"/{root,home,proc,sys,dev,run,tmp,mnt}
 mkdir -p "$ROOTFS/etc/inittab.d"
 mkdir -p "$ROOTFS/etc/runlevels/default"
-mkdir -p "$ROOTFS/etc/runlevels/single"
 mkdir -p "$ROOTFS/var/log"
 chmod 1777 "$ROOTFS/tmp"
 
@@ -120,6 +119,21 @@ l1:S1:wait:/usr/bin/openrc single
 l3:3:wait:/usr/bin/openrc default
 l6:6:wait:/usr/bin/openrc reboot
 
+# sulogin runs as its own direct inittab entry, not an openrc-managed
+# service -- OpenRC's own librc.c hardcodes "single" as a runlevel that
+# NEVER contains services (rc_services_in_runlevel: `/* These special
+# levels never contain any services */ if (strcmp(runlevel,
+# RC_LEVEL_SINGLE) != 0) { ...scan the directory... }`), so anything
+# symlinked into etc/runlevels/single/ is silently never started by
+# `openrc single` no matter what -- confirmed by reading OpenRC's own
+# source after a real, reproducible hang/no-op chase (see
+# docs/TODO.md's single-user-mode entry for the full story, including
+# the separate, now-fixed shebang bug found along the way). This mirrors
+# the exact same class of gap dhcpcd/udevd already work around below --
+# runs after openrc single's own teardown of runlevel 3 services
+# finishes (sysvinit runs same-runlevel `wait` entries in file order).
+~~:S1:wait:/usr/bin/sulogin
+
 # dhcpcd/udevd run as inittab `once` entries, not via openrc's runlevel
 # dependency resolution -- see docs/ARCHITECTURE.md for why (a real,
 # unresolved OpenRC scheduling gap, not a stylistic choice).
@@ -141,15 +155,15 @@ fs:2345:respawn:/usr/bin/floraseat >>/var/log/floraseat.log 2>&1
 s0:2345:respawn:/usr/sbin/agetty --skip-login --login-program /usr/bin/floralogin ttyS0 115200 vt100
 EOF
 
-# All four of this file's own custom services (dhcpcd, udevd, floraseat,
-# emergency-shell below) must use the literal shebang "#!/sbin/openrc-run",
-# not "#!/usr/bin/openrc-run" -- even though /sbin is symlinked to usr/bin
-# and both resolve to the same binary. OpenRC's own dependency-cache
-# generator (sh/gendepends.sh) does a plain string comparison against each
-# script's first line before sourcing it for depend() info; anything else
-# is silently skipped, no error. Found by chasing a real hang: emergency-
-# shell's own "need localmount" (below) was being completely ignored,
-# traced to it never appearing in /run/openrc/deptree at all.
+# All three of this file's own custom services (dhcpcd, udevd, floraseat)
+# must use the literal shebang "#!/sbin/openrc-run", not
+# "#!/usr/bin/openrc-run" -- even though /sbin is symlinked to usr/bin and
+# both resolve to the same binary. OpenRC's own dependency-cache generator
+# (sh/gendepends.sh) does a plain string comparison against each script's
+# first line before sourcing it for depend() info; anything else is
+# silently skipped, no error. Found by chasing a real hang while this was
+# still 4 services (a since-removed emergency-shell one included) -- see
+# docs/TODO.md's single-user-mode entry for the full story.
 #
 # init.d script for dhcpcd -- manual rc-service only; not symlinked into
 # etc/runlevels/default/ (see the inittab comment above).
@@ -214,41 +228,6 @@ depend() {
 }
 EOF
 chmod 755 "$ROOTFS/etc/init.d/floraseat"
-
-# Single-user/emergency mode (inittab's `l1:S1:wait:/usr/bin/openrc single`)
-# ran openrc against an empty etc/runlevels/single/ and did nothing at all --
-# no shell, no prompt, silently unusable. sulogin exists specifically for
-# this (see docs/MANIFEST.md's sysvinit entry) but was never wired in. Not a
-# command= service: sulogin is an interactive, blocking session, not a
-# daemon start-stop-daemon should background, so start() just runs it
-# directly and waits for it to exit (an admin returning to a normal
-# runlevel by hand afterwards, standard sysvinit single-user semantics).
-#
-# depend() need localmount is load-bearing, not decorative: openrc's own
-# runlevel-switch code (src/rc/rc.c) explicitly excludes the boot runlevel
-# (which owns localmount) when heading to "single", then tears down
-# anything not otherwise still "needed" -- confirmed by reading rc.c and by
-# a real hang, "openrc single" got stuck forever at "Unmounting
-# filesystems" because nothing told it root should stay mounted. Declaring
-# "need localmount" here makes openrc's reverse-dependency check
-# (do_stop_services' "needsme" pass) see that this about-to-start service
-# needs localmount, so it's skipped instead of stopped.
-cat > "$ROOTFS/etc/init.d/emergency-shell" <<'EOF'
-#!/sbin/openrc-run
-description="Single-user emergency shell (sulogin)"
-
-depend() {
-	need localmount
-}
-
-start() {
-	ebegin "Starting single-user shell"
-	/usr/bin/sulogin
-	eend 0
-}
-EOF
-chmod 755 "$ROOTFS/etc/init.d/emergency-shell"
-ln -sf /etc/init.d/emergency-shell "$ROOTFS/etc/runlevels/single/emergency-shell"
 
 # Dead weight removed: FloraOS relies entirely on dhcpcd, not these two
 # scripts' static ifconfig/route bringup -- see docs/ARCHITECTURE.md.
